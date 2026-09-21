@@ -35,6 +35,7 @@ Each check has a level: `off`, `warn` or `error`. At `error`, a check reports wh
 | [`hooks-wired`](#hooks-wired) | `off` | Each configured hook script exists and is wired in .claude/settings.json on its event and matcher. |
 | [`ratchet`](#ratchet) | `error` | A size breach not recorded in the baseline, or one that grew past its record, is an error. |
 | [`standard-overrides`](#standard-overrides) | `warn` | Every format setting that differs from the standard, every setting that differs from the project's profile, and every list setting widened past what it inherited, says why. |
+| [`git-repo`](#git-repo) | `warn` | The governance root is inside a git repository. |
 
 ## Registry and checkouts
 
@@ -575,5 +576,24 @@ Every format setting that differs from the standard, every setting that differs 
 **Question:** Where does this project keep a format or a setting that differs from the standard or its profile, or a list widened past what either sets, and why?
 
 **Why:** One standard, met or overridden on purpose: an override with no reason is a fork nobody decided to keep.
+
+No parameters: set its `level` only.
+
+## Other checks
+
+### `git-repo`
+
+The governance root is inside a git repository.
+
+| | |
+|---|---|
+| Default level | `warn` |
+| Scope | Runs once for the governance root |
+| Ratchet | No |
+| Since | 0.4.1 |
+
+**Question:** Is this project a git repository? Several checks read its history.
+
+**Why:** Outside git, the checks that read history or ignore rules (when a file was last touched, whether it was ever committed, what git ignores) quietly check nothing; the gate would look green while not looking.
 
 No parameters: set its `level` only.

@@ -360,6 +360,19 @@ class Adopt(Base):
         self.assertIn(f"engine {__version__} is a development tree; not installed", out)
         self.assertFalse(layout.engines_dir().exists())
 
+    def test_a_development_tree_says_nothing_when_its_version_is_installed(self):
+        """Nothing would have been installed either way: no note, not the development one."""
+        self.assertFalse((ENGINE / "govern" / layout.RELEASE_MARKER).exists())
+        dest = layout.engines_dir() / __version__
+        put(dest / "govern" / "cli.py", "# installed\n")
+        self.assertIsNone(installer.install_running_engine())
+        code, out, err = self.adopt("--apply")
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn("development tree", out)
+        self.assertNotIn("  engine  ", out)
+        self.assertEqual((dest / "govern" / "cli.py").read_text(encoding="utf-8"),
+                         "# installed\n")
+
     def test_a_stamp_for_another_version_is_not_installed(self):
         note = installer.install_running_engine(engine=self.stamped("v9.9.9"))
         self.assertIn("development tree; not installed", note)

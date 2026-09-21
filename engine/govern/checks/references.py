@@ -36,9 +36,7 @@ def stale_references(ctx, params) -> Findings:
     renames = _install_renames(ctx) + [(n["text"], n["now"]) for n in params["names"]]
     if not renames:
         return f
-    docs = []
-    for pattern in ctx.workspace("docs", []):
-        docs += [p for p in sorted(ctx.root.glob(pattern)) if p.is_file() and p not in docs]
+    docs = ctx.workspace_docs()
     for s in ctx.registry.scopes:
         if s.governed and s.gov is not None:
             docs += [p for _, p in ctx.governed_docs(s.gov) if p not in docs]

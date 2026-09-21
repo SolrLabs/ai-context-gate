@@ -31,7 +31,7 @@ from pathlib import Path
 
 import govern.checks  # noqa: F401  (registers the built-in checks the before/after run needs)
 from govern import __version__, cli, config, layout, registry
-from govern.context import Context, git
+from govern.context import Context, git, repo_of
 from govern.decisions import GRAMMARS, id_key, mask_lines, POINTER_RE, STATUS_RE, TOPIC_RE
 from govern.findings import Findings
 from govern.text import Unreadable, eol, has_bom, overlay, read
@@ -586,13 +586,6 @@ def _findings(ctx: Context, override: dict[Path, str] | None = None) -> list[tup
 
 # ---------------------------------------------------------------------------- git
 
-def _repo_of(path: Path) -> Path | None:
-    for d in (path.parent, *path.parent.parents):
-        if (d / ".git").exists():
-            return d
-    return None
-
-
 def _apply_blockers(paths: list[Path]) -> list[str]:
     """Every reason `--apply` must refuse: a file outside any git repo, one `git status` could
     not be checked (git missing, `safe.directory`, a lock — `context.git` returns `None`,
@@ -603,7 +596,7 @@ def _apply_blockers(paths: list[Path]) -> list[str]:
     land as one reviewable commit, so any of these fails closed."""
     blockers = []
     for path in paths:
-        repo = _repo_of(path)
+        repo = repo_of(path)
         if repo is None:
             blockers.append(f"{path}: not inside a git repo — the migration must land as a "
                             f"reviewable commit")
@@ -626,7 +619,7 @@ def _apply_blockers(paths: list[Path]) -> list[str]:
 def _repo_groups(paths: list[Path]) -> dict[Path, list[Path]]:
     groups: dict[Path, list[Path]] = {}
     for path in paths:
-        repo = _repo_of(path)
+        repo = repo_of(path)
         if repo is not None:
             groups.setdefault(repo, []).append(path)
     return groups

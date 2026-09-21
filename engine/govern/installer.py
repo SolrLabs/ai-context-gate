@@ -432,19 +432,20 @@ def install_running_engine(home: Path | None = None, engine: Path | None = None)
     by the release tools, never in the repository) that reads `v<version>`; a development
     tree would otherwise shadow the real release of its version for good. A version already
     there is never overwritten. Returns the line to report, or None when the version is
-    installed already. EngineNotInstalled when the copy fails."""
+    installed already — whatever copy is running, so a development tree says nothing when
+    there was nothing to install. EngineNotInstalled when the copy fails."""
     from govern import profile
     src = engine or Path(__file__).resolve().parent
+    engines = layout.engines_dir(home)
+    dest = engines / __version__
+    if (dest / "govern" / "cli.py").is_file():
+        return None
     try:
         stamp = (src / layout.RELEASE_MARKER).read_text(encoding="utf-8")
     except OSError:
         stamp = None
     if stamp != f"v{__version__}\n":
         return f"engine {__version__} is a development tree; not installed"
-    engines = layout.engines_dir(home)
-    dest = engines / __version__
-    if (dest / "govern" / "cli.py").is_file():
-        return None
     if dest.exists():
         return (f"engine {__version__} in {dest} is broken (no govern/cli.py); not replaced: "
                 f"remove it to let the gate reinstall it")

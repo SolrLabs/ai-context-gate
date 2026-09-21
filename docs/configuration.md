@@ -199,7 +199,7 @@ Where every project keeps its records. Paths are relative to each project's gove
 |---|---|---|---|
 | `governed_tiers` | list of strings | `["full"]` | Tiers whose projects carry the doc set and are governed |
 | `docs` | list of strings | `["**/*.md"]` | Globs of the governed docs |
-| `exclude` | list of strings | `[]` | Globs of docs to leave out, matched against the path relative to the governance directory |
+| `exclude` | list of strings | `[]` | Globs of docs to leave out, matched against the path relative to the governance directory, in addition to the excludes that always apply (below) |
 | `required_docs` | list of strings | `[]` | Docs every governed project must carry |
 | `required_when` | list of tables | `[]` | Docs required only when a project has a given fact: `{ key = "handoff", docs = ["working-files/HANDOFF.md"] }`. Both keys are required, and `key` must be one of the facts listed under [`[repo]`](#repo-a-single-repo). |
 | `decision_log` | string | `"DECISIONS.md"` | The project's decision log |
@@ -208,7 +208,12 @@ Where every project keeps its records. Paths are relative to each project's gove
 | `trap_prefix` | string | `"T"` | The trap-id prefix, as in `T-3` |
 
 Governed docs never include files under `node_modules/`, `.venv/`, `venv/`, `vendor/`, `dist/`,
-`build/`, `target/` or `.git/`, or files git ignores.
+`build/`, `target/`, `.git/`, `.context-gate/` (the tool's own files and reports) or `.claude/`
+(agents and skills have checks of their own), or files git ignores. These always apply, even to
+a `docs` glob such as `**/*.md` that would otherwise match them, and `exclude` adds to them. The
+workspace's own `[workspace] docs` globs leave out the same directories. When adopt finds no docs
+directory, it proposes an `exclude` listing the repo's GitHub-facing files that have no
+frontmatter (`README.md`, `CHANGELOG.md` and the like), which you can edit.
 
 ```toml
 [governance]

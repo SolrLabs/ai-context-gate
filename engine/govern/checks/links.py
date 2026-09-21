@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 
 from govern import blocks
-from govern.context import git
+from govern.context import git, repo_of
 from govern.findings import Findings
 from govern.manifest import Param, check
 from govern.text import read
@@ -43,13 +43,12 @@ def _docs(ctx, scope=None):
     any one project, so a project-scoped run leaves them out entirely)."""
     seen = []
     if scope is None:
-        for pattern in ctx.workspace("docs", []):
-            for p in sorted(ctx.root.glob(pattern)):
-                if p.is_file() and p not in [q for _, q in seen] and not ctx.owned_by_project(p):
-                    # A project scope's own doc (single-repo mode's default shape, or a doc
-                    # glob wide enough to reach into a project dir): that scope's own pass over
-                    # its governed docs, below, checks its links already.
-                    seen.append((ctx.rel(p), p))
+        for p in ctx.workspace_docs():
+            if not ctx.owned_by_project(p):
+                # A project scope's own doc (single-repo mode's default shape, or a doc glob
+                # wide enough to reach into a project dir): that scope's own pass over its
+                # governed docs, below, checks its links already.
+                seen.append((ctx.rel(p), p))
         scopes = ctx.registry.scopes
     else:
         scopes = [scope]
@@ -61,15 +60,19 @@ def _docs(ctx, scope=None):
 
 def _history_repo(ctx, path: Path) -> tuple[Path, str] | None:
     """Where to ask git about `path`, as `(repo, rel)` — or `None` when no checkout can answer
-    at all. `path` outside any `--path` snapshot: the ordinary checkout, `ctx.root`. Inside one:
-    `--history-from`'s checkout, with `path`'s place there, since the snapshot itself carries no
-    history of its own — or `None` when no `--history-from` was given to ask instead."""
-    if ctx.snapshot is None:
-        return ctx.root, ctx.rel(path)
+    at all. `path` outside any `--path` snapshot: the repo that contains it (`repo_of`: a nested
+    checkout is its own repo, and the repo around it may ignore it entirely), or `None` when none
+    does. Inside one: `--history-from`'s checkout, with `path`'s place there, since the snapshot
+    itself carries no history of its own — or `None` when no `--history-from` was given to ask
+    instead."""
     try:
-        rel = path.relative_to(ctx.snapshot)
+        rel = path.relative_to(ctx.snapshot) if ctx.snapshot is not None else None
     except ValueError:
-        return ctx.root, ctx.rel(path)
+        rel = None
+    if rel is None:
+        real = path.resolve()
+        repo = repo_of(real)
+        return None if repo is None else (repo, real.relative_to(repo).as_posix())
     if ctx.history_from is None:
         return None
     return ctx.history_from, rel.as_posix()
