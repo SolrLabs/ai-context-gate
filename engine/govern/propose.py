@@ -19,9 +19,10 @@ recommendation. An existing registry is never edited: its unselected governed en
 and proposed again before their layout is known.
 
 `propose` writes nothing. It reads the project's registry file (to note entries missing an id
-range) and asks whether a log it would create already exists. `validate` loads a proposed config
-the way the engine will, in a temporary root, so a proposal that would not load is caught before
-adopt installs it.
+range), asks whether a log it would create already exists, and with no docs dir reads the
+GitHub-facing files it proposes to exclude (`COMMUNITY_FILES`) for frontmatter. `validate` loads
+a proposed config the way the engine will, in a temporary root, so a proposal that would not load
+is caught before adopt installs it.
 """
 from __future__ import annotations
 
@@ -36,6 +37,7 @@ from pathlib import Path, PurePosixPath
 from govern import __version__, config, layout, registry, tomlw
 from govern import profile as profiles
 from govern.measure import Measurement, ScopeMeasure, TrapSet
+from govern.text import parse_frontmatter, read_text
 
 DEFAULT_LOG = "DECISIONS.md"
 FRONTMATTER_ONLY = "only files with frontmatter"
@@ -44,6 +46,10 @@ SINGLE, WORKSPACE = "single", "workspace"
 # The registry adopt writes for a workspace that has none: one `[[project]]` per selected repo.
 REGISTRY_FILE, REGISTRY_ENTRIES = "projects.toml", "project"
 PENDING = "<pending>"        # a question was asked; the setting waits for its answer
+# A repo's GitHub-facing files (upper-cased names), proposed as `[projects] exclude` when no
+# docs dir narrows `[projects] docs`: GitHub shows them to visitors, not to agents.
+COMMUNITY_FILES = frozenset({"README.MD", "CHANGELOG.MD", "CONTRIBUTING.MD", "CODE_OF_CONDUCT.MD",
+                             "SECURITY.MD", "LICENSE.MD", "SUPPORT.MD"})
 
 
 @dataclass
@@ -409,6 +415,37 @@ class _Proposer:
                          f"'{FRONTMATTER_ONLY}' lists {', '.join(files) or 'none'}")
         if globs:
             cfg["projects"]["docs"] = globs
+            return
+        # No docs dir: the engine's default `**/*.md` governs every markdown file, and a repo's
+        # GitHub-facing files (which GitHub would render frontmatter in as a table) are not its
+        # governed docs. They go in `exclude`, where a reader sees them and can take one out.
+        community = self.community_files()
+        if community:
+            cfg["projects"]["exclude"] = community
+            self.notes.append(f"[projects] exclude lists {', '.join(community)}: GitHub-facing "
+                              f"files, not governed docs; remove from exclude to govern them")
+
+    def community_files(self) -> list[str]:
+        """The GitHub-facing markdown files at each scope's dir (`COMMUNITY_FILES`, in any case,
+        and any under `.github/`), relative to it and named as on disk, unless the file carries
+        this tool's own doc frontmatter (a `doc_type`), which makes it a governed doc on purpose.
+        Other frontmatter, such as a GitHub issue template's `name`/`about`, is GitHub's, not a
+        sign of governance. An unreadable file has no frontmatter to read."""
+        found: list[str] = []
+        for s in self.scopes:
+            base = Path(self.m.root) / s.dir
+            if not base.is_dir():
+                continue
+            paths = sorted(p for p in base.iterdir() if p.name.upper() in COMMUNITY_FILES) \
+                + sorted(base.glob(".github/**/*.md"))
+            for p in paths:
+                if not p.is_file():
+                    continue
+                rel = p.relative_to(base).as_posix()
+                got = read_text(p)
+                if rel not in found and (got.error or parse_frontmatter(got.text)[0].get("doc_type") is None):
+                    found.append(rel)
+        return found
 
     # ------------------------------------------------------------------------ the whole config
     def project_blocks(self, cfg: dict) -> set[tuple[str, str]]:

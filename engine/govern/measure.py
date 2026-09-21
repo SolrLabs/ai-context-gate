@@ -6,10 +6,11 @@ logs, trap files, working files and docs are, read from the tree itself.
 Read-only, and needs no config: nothing is installed yet. `propose` turns a `Measurement` into a
 config and the questions measurement cannot settle. Every path is repo-relative `as_posix()`.
 
-Never descended into: `.context-gate/`, `.git/`, `backup/`, the trees in
-`DEFAULT_DOC_EXCLUDES`, and anything git ignores, asked of the repo that contains it (a registry
-member's checkout is its own repo, so a scope dir is never skipped because the workspace root
-ignores it). Of a registry member's checkout only its scope dir is measured, never its code.
+Never descended into: `.git/`, `backup/`, the trees in `DEFAULT_DOC_EXCLUDES` (which include
+`.context-gate/` and `.claude/`, so an agent's worktree there is never a nested checkout), and
+anything git ignores, asked of the repo that contains it (a registry member's checkout is its own
+repo, so a scope dir is never skipped because the workspace root ignores it). Of a registry
+member's checkout only its scope dir is measured, never its code.
 
 A git call that fails (git missing, `safe.directory`, a lock) raises `MeasureError` rather than
 reading every file as not ignored.
@@ -28,7 +29,7 @@ from pathlib import Path
 
 from govern import layout
 from govern.config import REGISTRY_KEYS
-from govern.context import DEFAULT_DOC_EXCLUDES, git
+from govern.context import DEFAULT_DOC_EXCLUDES, git, repo_of
 from govern.decisions import mask_lines
 from govern.migrate import BULLET_RE, INDEX_HEADING_RE, INDEX_ITEM_RE
 from govern.registry import dig
@@ -172,13 +173,6 @@ def _load(path: Path, root: Path, notes: list[str]) -> _Doc | None:
 
 # ---------------------------------------------------------------------------- walking
 
-def _repo_of(path: Path) -> Path | None:
-    for d in (path, *path.parents):
-        if (d / ".git").exists():
-            return d
-    return None
-
-
 class _Ignores:
     """What git ignores, asked of the repo that contains each path (a nested checkout is its
     own repo, so its files are asked of it, and the checkout itself of the repo around it).
@@ -198,7 +192,7 @@ class _Ignores:
         return self._cache[repo]
 
     def __call__(self, path: Path, is_dir: bool) -> bool:
-        repo = _repo_of(path.parent)
+        repo = repo_of(path)
         if repo is None:
             return False
         rel = path.relative_to(repo).as_posix()

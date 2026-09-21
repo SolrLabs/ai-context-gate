@@ -4,11 +4,10 @@ registry says; and, wherever agents run, that a checkout's own repo ignores the 
 create."""
 from __future__ import annotations
 
-import os
 import subprocess
 from pathlib import Path
 
-from govern.context import git
+from govern.context import git, git_env
 from govern.findings import Findings
 from govern.manifest import Param, check
 
@@ -71,10 +70,6 @@ def checkout_hygiene(ctx, params, scope) -> Findings:
 # Claude Code creates an agent's worktree under `.claude/worktrees/` at the top of the repo it
 # works in; this probe path stands for any of them.
 _WORKTREE_PROBE = ".claude/worktrees/x"
-# What a caller's environment can set to point git at a repo other than the one `-C` names — a
-# pre-commit hook in a linked worktree exports GIT_DIR, for one.
-_REPO_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
-             "GIT_OBJECT_DIRECTORY")
 
 
 def _checkout(ctx, scope) -> Path:
@@ -97,11 +92,10 @@ def _check_ignore(checkout: Path) -> tuple[int | None, str]:
     the same None as a real failure. The user's global excludes file is switched off, so a
     machine-local rule never hides what every other clone lacks. A git that could not run at
     all is `(None, reason)`."""
-    env = {k: v for k, v in os.environ.items() if k not in _REPO_ENV}
     try:
         res = subprocess.run(["git", "-C", str(checkout), "-c", "core.excludesFile=",
                               "check-ignore", "-q", _WORKTREE_PROBE],
-                             capture_output=True, timeout=20, env=env)
+                             capture_output=True, timeout=20, env=git_env())
     except (OSError, subprocess.SubprocessError) as exc:
         return None, str(exc)
     return res.returncode, res.stderr.decode("utf-8", errors="replace").strip()

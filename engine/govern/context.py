@@ -1,6 +1,7 @@
 """Everything a check needs about the governance root it is running against."""
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -13,15 +14,29 @@ from govern.registry import Registry, Scope
 from govern.text import Markers
 
 
+# What a caller's environment can set to point git at a repo other than the one `-C` names. A
+# git hook exports some of these (a pre-commit hook in a linked worktree sets GIT_DIR), and any
+# one of them overrides `-C`: a gate run from the hook would have every answer about another
+# checkout, a nested one above all, come from the hook's own repo instead.
+REPO_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_PREFIX")
+
+
+def git_env() -> dict[str, str]:
+    """The caller's environment minus `REPO_ENV`, for every git call the engine makes about a
+    repo on disk, so `-C <repo>` always means that repo."""
+    return {k: v for k, v in os.environ.items() if k not in REPO_ENV}
+
+
 def git(repo: Path, *args: str) -> str | None:
     """Run git and return its stdout, or `None` on any failure (missing git, no repo, a lock,
     a non-zero exit) so a caller fails closed rather than reading a failure as an empty answer.
     Output is decoded as UTF-8 with `errors="replace"`, never the platform's locale encoding
     (which is not UTF-8 by default on Windows), so a byte git wrote and the console's locale
-    disagree on never raises."""
+    disagree on never raises. Run with `git_env()`, so a hook's `GIT_DIR` never redirects it."""
     try:
         res = subprocess.run(["git", "-C", str(repo), *args],
-                             capture_output=True, timeout=20)
+                             capture_output=True, timeout=20, env=git_env())
     except (OSError, subprocess.SubprocessError):
         return None
     if res.returncode != 0:
@@ -29,11 +44,34 @@ def git(repo: Path, *args: str) -> str | None:
     return res.stdout.decode("utf-8", errors="replace").strip()
 
 
+def repo_of(path: Path) -> Path | None:
+    """The git repo that contains `path`: the nearest directory above it holding `.git` (a
+    directory, or a file in a linked worktree or submodule), or None when none does. Never
+    `path` itself, so a nested checkout's own directory belongs to the repo around it while
+    every file inside it belongs to the checkout: a question git answers per repo (what is
+    ignored, what was committed) is asked of the repo that actually tracks the file, never of
+    an outer one that ignores the whole checkout."""
+    for d in path.parents:
+        if (d / ".git").exists():
+            return d
+    return None
+
+
 # A governed doc under one of these, in any scope, is skipped without a project having to
 # list it in its own [projects] exclude — vendored and build trees are never a project's own
-# documentation, in any project (generic, not one project's list of directory names).
+# documentation, in any project (generic, not one project's list of directory names). Nor are
+# this tool's own directory (its README and the reports install and adopt write there) or
+# `.claude/` (agents and skills have checks of their own): a fallback `**/*.md` would otherwise
+# turn a fresh install red on files the install itself just wrote.
 DEFAULT_DOC_EXCLUDES = ("node_modules/**", ".venv/**", "venv/**", "vendor/**", "dist/**",
-                        "build/**", "target/**", ".git/**")
+                        "build/**", "target/**", ".git/**", f"{layout.GOV_DIR}/**", ".claude/**")
+
+
+def doc_excluded(rel: str, extra=()) -> bool:
+    """Whether a doc at `rel` (posix, relative to the directory its glob ran from) is left out:
+    it matches `DEFAULT_DOC_EXCLUDES` or one of `extra`."""
+    from fnmatch import fnmatch
+    return any(fnmatch(rel, x) for x in (*DEFAULT_DOC_EXCLUDES, *extra))
 
 
 @dataclass
@@ -55,8 +93,8 @@ class Context:
     # names the snapshot's own (temporary) location.
     real_scope_dir: Path | None = None
     # Which of `governed_docs`'s candidate files git says are ignored, cached across the whole
-    # run: one `git check-ignore --stdin` call per batch of files not already answered, not one
-    # per file and not one per call site.
+    # run: one `git check-ignore --stdin` call per repo per batch of files not already answered,
+    # not one per file and not one per call site.
     _ignore_cache: dict = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -162,52 +200,79 @@ class Context:
         from the gate silently."""
         if not gov.is_dir():
             return []
-        from fnmatch import fnmatch
         patterns = self.projects("docs", ["**/*.md"])
-        exclude = list(DEFAULT_DOC_EXCLUDES) + list(self.projects("exclude", []))
+        exclude = list(self.projects("exclude", []))
         candidates: dict[str, Path] = {}
         for pattern in patterns:
             for p in gov.glob(pattern):
                 if not p.is_file():
                     continue
                 rel = p.relative_to(gov).as_posix()
-                if not any(fnmatch(rel, x) for x in exclude):
+                if not doc_excluded(rel, exclude):
                     candidates[rel] = p
         ignored = self._ignored(list(candidates.values()))
         return sorted((rel, p) for rel, p in candidates.items() if p not in ignored)
 
+    def workspace_docs(self) -> list[Path]:
+        """The workspace's own docs: every file its `[workspace] docs` globs match under the
+        root, in glob order, minus `DEFAULT_DOC_EXCLUDES` — the same always-on excludes a
+        project's governed docs have, so a wide workspace glob never sweeps in this tool's own
+        files or `.claude/`."""
+        seen: list[Path] = []
+        for pattern in self.workspace("docs", []):
+            for p in sorted(self.root.glob(pattern)):
+                if p.is_file() and p not in seen \
+                        and not doc_excluded(p.relative_to(self.root).as_posix()):
+                    seen.append(p)
+        return seen
+
     def _ignored(self, paths: list[Path]) -> set:
-        """Which of `paths` git ignores. One `git check-ignore --stdin` call for every batch not
-        already answered this run — cached on the context, so the same file asked about from more
-        than one scope or check costs one process, never one per call site, and never one per
-        file. A failing git call (missing git, no repo, a lock — exit code neither 0 nor 1)
-        answers "not ignored" for the whole batch: excluding a doc from the gate silently is
-        worse than checking one a real git would have skipped."""
+        """Which of `paths` git ignores, each asked of the repo that contains it (`repo_of`): a
+        nested checkout is its own repo, so an outer repo that ignores the whole checkout never
+        answers for the files inside it. Under `check --path`, the containing repo is the one
+        around the file's real path (`real_path`), since the snapshot is no repo at all. A path
+        in no repo is not ignored.
+
+        One `git check-ignore --stdin` call per repo for every batch not already answered this
+        run — cached on the context, so the same file asked about from more than one scope or
+        check costs one process, never one per call site, and never one per file. A failing git
+        call (missing git, a lock, `safe.directory` — exit code neither 0 nor 1) answers "not
+        ignored" for that repo's whole batch: excluding a doc from the gate silently is worse
+        than checking one a real git would have skipped."""
         resolved = {p: p.resolve() for p in paths}
         todo = {p: r for p, r in resolved.items() if r not in self._ignore_cache}
-        if todo:
-            real_root = self.root.resolve()
-            lines: dict[Path, str] = {}
-            for p, r in todo.items():
-                real = self.real_path(p).resolve()
-                try:
-                    lines[r] = real.relative_to(real_root).as_posix()
-                except ValueError:
-                    lines[r] = str(real)
+        by_repo: dict[Path, dict[Path, str]] = {}
+        for p, r in todo.items():
+            real = self.real_path(p).resolve()
+            repo = repo_of(real)
+            if repo is None:
+                self._ignore_cache[r] = False
+                continue
+            by_repo.setdefault(repo, {})[r] = real.relative_to(repo).as_posix()
+        for repo, lines in by_repo.items():
             try:
-                res = subprocess.run(["git", "-C", str(self.root), "check-ignore", "--stdin"],
+                res = subprocess.run(["git", "-C", str(repo), "check-ignore", "--stdin"],
                                      input="\n".join(lines.values()).encode("utf-8"),
-                                     capture_output=True, timeout=20)
+                                     capture_output=True, timeout=20, env=git_env())
             except (OSError, subprocess.SubprocessError):
                 res = None
             if res is None or res.returncode not in (0, 1):
-                for r in todo.values():
+                for r in lines:
                     self._ignore_cache[r] = False
             else:
                 hits = set(res.stdout.decode("utf-8", errors="replace").splitlines())
                 for r, line in lines.items():
                     self._ignore_cache[r] = line in hits
         return {p for p, r in resolved.items() if self._ignore_cache.get(r, False)}
+
+    def _repo_rel(self, path: Path) -> tuple[Path, str] | None:
+        """`(repo, path relative to it)` for the repo that contains `path` (`repo_of`), or None
+        when no repo does — the same answer a failing git call gives its caller."""
+        real = path.resolve()
+        repo = repo_of(real)
+        if repo is None:
+            return None
+        return repo, real.relative_to(repo).as_posix()
 
     # ------------------------------------------------------------------ time
 
@@ -237,13 +302,14 @@ class Context:
             if self.history_from is None:
                 return datetime.fromtimestamp(path.stat().st_mtime)
             return self._history_last_touched(rel, path)
-        rel_str = self.rel(path)
-        status = git(self.root, "status", "--porcelain", "--", rel_str)
+        found = self._repo_rel(path)
+        status = None if found is None else git(found[0], "status", "--porcelain", "--",
+                                                found[1])
         if status is None:
             # Not a git repo: the file's own mtime is the only history there is.
             return datetime.fromtimestamp(path.stat().st_mtime)
         if not status:
-            ts = git(self.root, "log", "-1", "--format=%at", "--", rel_str)
+            ts = git(found[0], "log", "-1", "--format=%at", "--", found[1])
             if ts:
                 return datetime.fromtimestamp(int(ts))
         return datetime.now()
@@ -276,4 +342,6 @@ class Context:
                 return False
             return bool(git(self.history_from, "log", "-1", "--format=%h", "--",
                             f"./{rel.as_posix()}"))
-        return bool(git(self.root, "log", "-1", "--format=%h", "--", self.rel(path)))
+        found = self._repo_rel(path)
+        return found is not None and bool(git(found[0], "log", "-1", "--format=%h", "--",
+                                              found[1]))

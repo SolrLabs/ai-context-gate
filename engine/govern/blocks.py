@@ -44,6 +44,20 @@ def replace(ctx, text: str, bid: str, content: str) -> tuple[str, bool]:
     return new, new != text
 
 
+def entries(content: str | None) -> int:
+    """How many rows `content`'s tables hold: every table line but each table's header and its
+    `|---|` separator. What `index` compares to tell a block it is about to empty."""
+    lines = [ln.strip() for ln in (content or "").splitlines()]
+    rows = 0
+    for i, ln in enumerate(lines):
+        if not ln.startswith("|") or ln.startswith("|-"):
+            continue
+        if i + 1 < len(lines) and lines[i + 1].startswith("|-"):
+            continue                                   # a header
+        rows += 1
+    return rows
+
+
 # ---------------------------------------------------------------------------- renderers
 
 RANK = {"control": 0, "reference": 1, "working": 2}

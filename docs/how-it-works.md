@@ -30,7 +30,7 @@ on. It runs the same way on every machine and in CI.
 | **Docs** | Every governed doc carries frontmatter (`doc_type`, `purpose`, `audience`, `load_when`, `last_reviewed`), is reviewed within 120 days if it is a control or reference doc, links only to files that exist, and is listed in the project's generated doc index when the project keeps one. The number of governed docs per project is bounded. |
 | **Working files** | The working-files directory holds at most 12 files. A file whose status says it is finished should be deleted a week after it was last touched (git keeps it); the gate warns until it is, and one that was never committed is flagged until it is. A working file and the HANDOFF have word limits. |
 | **Agents and skills** | Every agent definition pins its `name`, `description`, `model` and `effort`, and sets `omitClaudeMd` (a warning when missing); a turn cap, when set, stays under a configured ceiling, and prose never contradicts it. Every skill has a description. Hooks a rule depends on are wired. The Claude Code memory index stays short. |
-| **Generated blocks** | Index tables inside docs (decision index, trap index, doc registry, agent roster, project registry) are generated between markers by `govern index`, and the gate fails when one is stale. |
+| **Generated blocks** | Index tables inside docs (decision index, trap index, doc registry, agent roster, project registry) are generated between markers by `govern index`, and the gate fails when one is stale. When regenerating leaves a block that had entries empty, `index` still writes it but warns, naming the block and how many entries it removed. |
 
 Checks that only some projects need, such as fork hygiene, license conflicts, writing rules and
 retired names, ship turned off or do nothing until they are configured. Each check's level
@@ -342,7 +342,11 @@ Adopt measures the project (its registry if any, decision logs, traps, working f
 generated-block markers) and proposes a config. The proposal covers layout
 only: where things are. Check levels and limits come from the engine standard and your profile.
 Where the measurement allows two readings, adopt asks instead of guessing, and exits 3 while any
-question is open. It always asks the shape (`single` or `workspace`), and for a workspace, which
+question is open. With no docs directory, every markdown file is a governed doc, so adopt also
+proposes `[projects] exclude` for the repo's GitHub-facing files that carry no frontmatter
+(`README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`,
+`LICENSE.md`, `SUPPORT.md` and any under `.github/`); remove one from the list to govern it. It
+always asks the shape (`single` or `workspace`), and for a workspace, which
 repos to govern. Answers go in a TOML file, one `key = "option"` per line.
 
 `--apply` refuses while a question is open or while a file it would touch has uncommitted

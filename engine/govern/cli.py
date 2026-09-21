@@ -220,7 +220,10 @@ def cmd_principles(ctx: Context) -> int:
 
 def cmd_index(ctx: Context) -> int:
     """Every block is rendered before any file is written, so a failure part-way leaves the
-    tree as it was rather than half-regenerated."""
+    tree as it was rather than half-regenerated. A block that had entries and is regenerated
+    with none is still written — removing every doc or entry can be deliberate — but warned
+    about by name: an empty block is more often every source going missing (a git-ignored
+    checkout, a moved directory) than a project really emptied."""
     changed, missing = 0, 0
     pending: dict[Path, str] = {}
     lines = []
@@ -235,11 +238,17 @@ def cmd_index(ctx: Context) -> int:
             lines.append(f"  missing     {rel} :: {bid} (markers)")
             missing += 1
             continue
-        new, did = blocks.replace(ctx, text, bid, build())
+        content = build()
+        new, did = blocks.replace(ctx, text, bid, content)
         if did:
             pending[path] = new
             lines.append(f"  regenerated {rel} :: {bid}")
             changed += 1
+            had = blocks.entries(blocks.extract(ctx, text, bid))
+            if had and not blocks.entries(content):
+                lines.append(f"  warning     {rel} :: {bid} is now empty: regenerating removed "
+                             f"all {had} of its entries (check its sources still exist and "
+                             f"git does not ignore them)")
     for path, text in pending.items():
         write(path, text)
     for line in lines:

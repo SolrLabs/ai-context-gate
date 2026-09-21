@@ -128,13 +128,8 @@ def workspace_docs(ctx, params) -> Findings:
     for rel in ctx.workspace("required_docs", []):
         if not (ctx.root / rel).exists():
             f.error(f"{ctx.workspace_label}: {rel} missing")
-    seen: list[Path] = []
-    for pattern in ctx.workspace("docs", []):
-        for path in sorted(ctx.root.glob(pattern)):
-            if path.is_file() and path not in seen:
-                seen.append(path)
     doc_params = ctx.cfg.checks["doc-frontmatter"].params
-    for path in seen:
+    for path in ctx.workspace_docs():
         if ctx.owned_by_project(path):
             continue   # a project scope's own doc — same file, same rules, already checked
         check_doc(ctx, doc_params, path, ctx.rel(path), f)

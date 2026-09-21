@@ -4,6 +4,27 @@ Newest first. Each release says what changed and, under **Upgrading**, anything 
 do or decide. The upgrade report quotes every entry between the engine a project ran and the one
 it upgraded to.
 
+## 0.4.1 — 2026-09-21
+
+- **A project checkout nested in a workspace is governed again.** Where a workspace's root
+  `.gitignore` lists a project that is its own git repository, git questions about that project's
+  files were answered by the root, so its docs read as ignored: `index` emptied its doc registry
+  and the doc checks passed on no docs. Every git question now goes to the repository that holds
+  the file.
+- **A git hook's environment no longer redirects the gate.** `GIT_DIR`, `GIT_WORK_TREE` and the
+  other repository variables a hook sets are dropped from every git call the engine makes.
+- **`index` warns when it empties a block** that had entries.
+- **A fresh adopt is green on a typical repo.** The tool's own `.context-gate/` and `.claude/` are
+  never governed docs. With no `docs/` folder, adopt proposes `[projects] exclude` for the
+  GitHub-facing files it finds (README, CHANGELOG, CONTRIBUTING, issue templates, …), with a note;
+  a file that carries this tool's `doc_type` frontmatter stays governed.
+- **`git-repo`** (warn): says when the project is not inside a git repository, where the checks that
+  read git history or ignore rules check nothing.
+- Adopt no longer prints a development-tree note when its engine version is already installed.
+
+**Upgrading:** run `/context-gate:upgrade`. A workspace whose doc registry was emptied by 0.4.0:
+restore the block from git, then run `govern index`.
+
 ## 0.4.0 — 2026-09-21
 
 First release (Apache 2.0). context-gate is a governance gate for the documents AI agents read:
