@@ -76,6 +76,17 @@ Write the answers to a scratch file as TOML, one `key = "option"` per line (a `r
 comma-separated list of names), and rerun step 2 with `--answers <file>`. Answering can open
 follow-up questions; repeat until the exit code is 0.
 
+## 3a. Options
+
+Once the proposal has no questions, its JSON carries `options`: the checks that stay off until
+turned on. Ask them the way the options skill does, one question per option with On, Off,
+Chat about this, and the suggestion's choice first when there is one. Inherit applies only with a
+profile. Write each answer to the answers file as `"option:<id>" = "on"` (or `"off"`,
+`"inherit"`), and each setup answer as `"option:<id>:<setting>" = <value>`: a comma list for a
+list setting, TOML for a table. An off that overrides the profile takes
+`"option:<id>:reason" = "<why>"`. Rerun step 2. Unanswered options stay at their inherited level
+and never block the apply.
+
 ## 4. Apply
 
 Say what is about to happen: `.context-gate/` is created, the plugin (`context-gate@context-gate`)
@@ -98,6 +109,10 @@ Read `.context-gate/adopt-report.md` and tell the user, briefly:
   existing content the baseline can't absorb (a bad agent frontmatter, an unknown registry tier):
   walk the user through each fix it names. A red finding outside that section is an engine defect
   to report, not something to patch by hand
+- anything under the report's "Needs a person before committing" section: files the gate needs
+  committed that git ignores (a `bin/` rule for build output also matches `.context-gate/bin/`,
+  say). Each line names the rule and the line to add to which `.gitignore`; until it is added,
+  a commit leaves the gate out
 - what migrate left for a person (entries it could not convert)
 - how many breaches were baselined, and that each is a known debt, not a pass
 - the files to review and commit (`git status --short`)

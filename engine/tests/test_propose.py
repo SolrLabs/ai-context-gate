@@ -577,9 +577,9 @@ class TomlWriter(unittest.TestCase):
         return text
 
     def test_nested_inline_tables(self):
-        text = self.roundtrip({"checks": {"licences": {"conflicts": [
-            {"a": {"licences": ["GPL"], "roles": ["runtime"], "deep": {"x": 1}}}]}}})
-        self.assertIn('{ a = { licences = ["GPL"], roles = ["runtime"], deep = { x = 1 } } }', text)
+        text = self.roundtrip({"checks": {"licenses": {"conflicts": [
+            {"a": {"licenses": ["GPL"], "roles": ["runtime"], "deep": {"x": 1}}}]}}})
+        self.assertIn('{ a = { licenses = ["GPL"], roles = ["runtime"], deep = { x = 1 } } }', text)
 
     def test_lists_of_inline_tables(self):
         text = self.roundtrip({"blocks": {"project": [{"file": "D.md", "id": "decision-index"},

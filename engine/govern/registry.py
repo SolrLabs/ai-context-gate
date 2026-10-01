@@ -14,7 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from govern.config import CONFIG_NAME, REGISTRY_KEYS, Config, ConfigError
+from govern.config import (CONFIG_NAME, REGISTRY_KEYS, RENAMED_FACTS, Config, ConfigError,
+                           fact_name, rename_clash, renamed)
 
 RANGE_RE = re.compile(r"^(\d+)-(\d+)$")
 
@@ -48,6 +49,9 @@ class Scope:
     is_workspace: bool = False
 
     def get(self, key: str, default=None):
+        """A fact, by the name the engine reads it under; an old name (`config.RENAMED_FACTS`)
+        reads the new one, so a setting or an extension that still says it keeps working."""
+        key = fact_name(key)
         v = dig(self.entry, self.keys.get(key, key))
         return default if v is None else v
 
@@ -70,6 +74,26 @@ class Registry:
 
     def find(self, name: str) -> Scope | None:
         return next((s for s in self.scopes if s.name == name), None)
+
+
+def _renamed_facts(entries: list[dict], keys: dict[str, str], file: str,
+                   warnings: list[str]) -> list[dict]:
+    """Entries with a fact under the name an earlier engine read (`config.RENAMED_FACTS`), read
+    under the new one as well — when `[registry.keys]` leaves the new one where it always is —
+    and one warning per old name, naming the entries that use it. The old key stays, for
+    anything else that reads the registry file."""
+    for old, new in RENAMED_FACTS.items():
+        if keys.get(new) != new:
+            continue
+        using = [e for e in entries if old in e]
+        for e in using:
+            if new in e:
+                raise rename_clash(f"{file} ({e.get('name', '?')})", old, new)
+        if using:
+            names = ", ".join(str(e.get("name", "?")) for e in using)
+            warnings.append(renamed(f"{file} ({names})", old, new))
+            entries = [{**e, new: e[old]} if old in e else e for e in entries]
+    return entries
 
 
 class RegistryMissing(Exception):
@@ -101,7 +125,8 @@ def load(cfg: Config) -> Registry:
         raise ConfigError(f"{CONFIG_NAME}: [registry] skip names {', '.join(unknown)}, not an "
                           f"entry in {path.name}")
     # A skipped entry is dropped entirely: no scope, no check, no problem reported against it.
-    entries = [e for e in entries if e.get("name") not in skip]
+    entries = _renamed_facts([e for e in entries if e.get("name") not in skip], keys, path.name,
+                             cfg.warnings)
     ws = data.get(reg.get("workspace", "workspace"), {})
     problems: list[str] = []
     tiers = cfg.get("projects", "governed_tiers", ["full"])
@@ -153,7 +178,7 @@ def _load_single(cfg: Config) -> Registry:
     can only mean one thing when there is no registry at all default accordingly: `name` to the
     root directory's own name, `dir` and `governance` to the root itself ('.'), and `tier` to the
     first of `[projects] governed_tiers` (there being no other project's tier for it to be
-    compared against). An id range and a licence are still the project's to say, exactly as they
+    compared against). An id range and a license are still the project's to say, exactly as they
     would be in a registry entry that leaves them out.
 
     Project-scope checks apply to this one scope unconditionally (`doc_set` and `governed` are

@@ -26,6 +26,11 @@ def check_ratchet(ctx, params, scope=None) -> Findings:
         # another project's baselined breach is neither reported as new here nor offered as
         # "no longer breaches" — it simply is not this run's business.
         baseline = {k: v for k, v in baseline.items() if ratchet.owns(ctx, scope, k)}
+    elif ctx.workspace_only:
+        # `check --workspace-only`: no project's numbers were measured, so no project's
+        # recorded entries are compared either — only the workspace's own.
+        baseline = {k: v for k, v in baseline.items()
+                    if not any(ratchet.owns(ctx, s, k) for s in ctx.registry.scopes)}
     name = ctx.baseline_path.name
     for key, val in current.items():
         base = baseline.get(key)

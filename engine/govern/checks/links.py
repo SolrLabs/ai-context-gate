@@ -49,7 +49,7 @@ def _docs(ctx, scope=None):
                 # wide enough to reach into a project dir): that scope's own pass over its
                 # governed docs, below, checks its links already.
                 seen.append((ctx.rel(p), p))
-        scopes = ctx.registry.scopes
+        scopes = ctx.project_scopes
     else:
         scopes = [scope]
     for s in scopes:
@@ -119,7 +119,7 @@ def doc_links(ctx, params, scope=None) -> Findings:
                     # project's files, so it is resolved and checked against the real tree
                     # instead, from the real place `path` lives.
                     missing = Path(os.path.normpath(ctx.real_path(path).parent / rel))
-            if not missing.exists():
+            if not missing.exists() and not ctx.in_skipped_project(missing):
                 f.error(f"{label}: link target does not exist: {rel}"
                         f"{_deleted_hint(ctx, missing, cache)}")
     return f

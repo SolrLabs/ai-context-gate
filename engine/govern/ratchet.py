@@ -23,7 +23,7 @@ def compute(ctx, scope=None) -> dict[str, int]:
     checks = ctx.cfg.checks
     on = lambda cid: checks[cid].level != "off" and checks[cid].ratchet
     breaches: dict[str, int] = {}
-    scopes = ctx.registry.scopes if scope is None else [scope]
+    scopes = ctx.project_scopes if scope is None else [scope]
 
     if on("decision-log"):
         limit = checks["decision-log"].params["max_words"]

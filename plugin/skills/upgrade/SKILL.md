@@ -2,7 +2,7 @@
 name: upgrade
 description: Upgrade this project's context-gate to a newer engine and walk through what changed. Use when the user asks to upgrade or update governance, or agrees to after the "context-gate X available" notice. Never start it unprompted.
 argument-hint: "[version]"
-allowed-tools: Bash(git status:*), Bash(git log:*), Bash(git rev-list:*), Bash(git fetch:*), Bash(python3 .context-gate/bin/*), Read, Grep, Glob
+allowed-tools: Bash(git status:*), Bash(git log:*), Bash(git rev-list:*), Bash(git fetch:*), Bash(python3 .context-gate/bin/*), Read, Grep, Glob, AskUserQuestion, Edit
 ---
 
 # Upgrade context-gate
@@ -38,8 +38,9 @@ python3 .context-gate/bin/upgrade            # newest release
 python3 .context-gate/bin/upgrade --to X.Y.Z  # a specific one
 ```
 
-The upgrade pins `config.toml` to the new engine, refreshes `.context-gate/bin/`, and
-writes `.context-gate/upgrade-report.md`. If it reports "rolled back", nothing changed:
+The upgrade pins `config.toml` to the new engine, refreshes `.context-gate/bin/`,
+regenerates the generated blocks (the `index` line says how many changed), and writes
+`.context-gate/upgrade-report.md`. Those regenerated blocks are part of the upgrade's diff. If it reports "rolled back", nothing changed:
 show the user the error and stop.
 
 ## 3. Explain the report
@@ -58,6 +59,9 @@ Read `.context-gate/upgrade-report.md`. Tell the user, briefly:
   meaning or its default.
 
 For any check the user asks about: `python3 .context-gate/bin/govern explain <check>`.
+
+If the report has a **New options** section, offer those options the way the options skill does
+(its steps 2 to 5), limited to the ids listed there.
 
 ## 4. Decide policy with the user, one choice at a time
 

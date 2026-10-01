@@ -1,6 +1,6 @@
 """Propose a project's `config.toml` from what `measure` found: the layout
-only — registry, scopes, decision logs, traps, docs, blocks, markers — never check
-levels or limits, which come from the engine standard and the profile.
+only — registry, scopes, decision logs, traps, docs, blocks, markers — never check levels or
+limits, except the options the answers turn on or off (`option:<id>`).
 
 Where measurement settles a setting, it is proposed. Where two readings are left, it is a
 `Question` whose first option is the recommendation, and the setting stays out of the config
@@ -27,7 +27,6 @@ is caught before adopt installs it.
 from __future__ import annotations
 
 import copy
-import fnmatch
 import shutil
 import tempfile
 from collections import Counter
@@ -36,6 +35,7 @@ from pathlib import Path, PurePosixPath
 
 from govern import __version__, config, layout, registry, tomlw
 from govern import profile as profiles
+from govern.context import doc_excluded, glob_matches
 from govern.measure import Measurement, ScopeMeasure, TrapSet
 from govern.text import parse_frontmatter, read_text
 
@@ -46,6 +46,7 @@ SINGLE, WORKSPACE = "single", "workspace"
 # The registry adopt writes for a workspace that has none: one `[[project]]` per selected repo.
 REGISTRY_FILE, REGISTRY_ENTRIES = "projects.toml", "project"
 PENDING = "<pending>"        # a question was asked; the setting waits for its answer
+OPTION = "option:"           # an option's answer key: "option:<id>" or "option:<id>:<param>"
 # A repo's GitHub-facing files (upper-cased names), proposed as `[projects] exclude` when no
 # docs dir narrows `[projects] docs`: GitHub shows them to visitors, not to agents.
 COMMUNITY_FILES = frozenset({"README.MD", "CHANGELOG.MD", "CONTRIBUTING.MD", "CODE_OF_CONDUCT.MD",
@@ -68,6 +69,8 @@ class Proposal:
     migrate: bool             # measure found sectioned logs or bullet traps
     notes: list[str] = field(default_factory=list)
     registry_file: dict | None = None   # a workspace with no registry: the `projects.toml` to write
+    options: list = field(default_factory=list)            # options.FIELDS dicts, once settled
+    options_answered: list = field(default_factory=list)   # option ids the answers settled
 
 
 def _under(path: str, base: str) -> str | None:
@@ -84,25 +87,13 @@ def _join(base: str, rel: str) -> str:
     return rel if base in (".", "") else f"{base}/{rel}"
 
 
-def glob_matches(pattern: str, path: str) -> bool:
-    """Whether `Path.glob(pattern)` from a directory would yield `path` (both posix and relative
-    to it): `*` stays inside one path segment, `**` spans any number of them."""
-    def match(ps: list[str], xs: list[str]) -> bool:
-        if not ps:
-            return not xs
-        if ps[0] == "**":
-            return any(match(ps[1:], xs[i:]) for i in range(len(xs) + 1))
-        return bool(xs) and fnmatch.fnmatchcase(xs[0], ps[0]) and match(ps[1:], xs[1:])
-    return match(pattern.split("/"), path.split("/"))
-
-
 def _breadth(pattern: str) -> tuple[int, int]:
     """How much a glob matches, for picking the narrowest: fewer wildcards, then more literal."""
     return sum(pattern.count(c) for c in "*?["), -len(pattern)
 
 
 class _Proposer:
-    def __init__(self, m: Measurement, answers: dict[str, str]):
+    def __init__(self, m: Measurement, answers: dict[str, object]):
         self.m, self.answers = m, answers
         self.single = m.registry is None
         # A single repo's workspace measurement is its one project scope (never [workspace]).
@@ -425,6 +416,61 @@ class _Proposer:
             self.notes.append(f"[projects] exclude lists {', '.join(community)}: GitHub-facing "
                               f"files, not governed docs; remove from exclude to govern them")
 
+    def registry_rows(self, cfg: dict) -> None:
+        """A doc an existing doc-registry block lists stays listed: `index` renders only the
+        governed docs, so one the proposed `[projects] docs` globs miss (a mod's `../AGENTS.md`
+        from `docs/INDEX.md`) would lose its row silently. Such a doc, when it carries `doc_type`
+        frontmatter, is added to `docs` as an explicit path; one that can never be governed
+        (excluded, without `doc_type`, missing, outside its project) is noted instead, since its
+        row will go. `docs` is shared by every project, so the path is added only when every
+        selected project's file at that path is missing or carries `doc_type` too: one without
+        would turn the gate red. The projects that block it are named in the note."""
+        projects = cfg["projects"]
+        docs, exclude = projects.get("docs", ["**/*.md"]), projects.get("exclude", [])
+        for index, doc in self.m.registry_rows:
+            for s in self.scopes:
+                if _under(index, s.dir) is None:
+                    continue
+                rel = _under(doc, s.dir)
+                if rel is not None and any(glob_matches(g, rel) for g in docs) \
+                        and not doc_excluded(rel, exclude):
+                    break
+                why = ("is outside the project" if rel is None
+                       else "is excluded" if doc_excluded(rel, exclude)
+                       else self.untyped(_join(s.dir, rel)) or None)
+                if why is None and "docs" in projects:
+                    blocked = [(o.name, self.untyped(_join(o.dir, rel))) for o in self.scopes
+                               if o is not s]
+                    blocked = [(n, w) for n, w in blocked if w not in (None, "does not exist")]
+                    if blocked:
+                        self.notes.append(f"{index}'s doc registry lists {doc}, which the "
+                                          f"proposed docs globs miss; '{rel}' is not added to "
+                                          f"[projects] docs, which every project shares, since "
+                                          + "; ".join(f"{n}'s {rel} {w}" for n, w in blocked)
+                                          + ": `index` drops its row")
+                    elif rel not in docs:
+                        docs.append(rel)
+                        self.notes.append(f"{index}'s doc registry lists {doc}, which the "
+                                          f"proposed docs globs miss: [projects] docs lists "
+                                          f"'{rel}' so `index` keeps its row")
+                else:
+                    self.notes.append(f"{index}'s doc registry lists {doc}, which "
+                                      f"{why or 'is not governed'}: `index` drops its row")
+                break
+
+    def untyped(self, path: str) -> str | None:
+        """Why the doc at `path` (repo-relative) could not be governed as it stands, or None
+        when it carries `doc_type` frontmatter."""
+        full = Path(self.m.root) / path
+        if not full.is_file():
+            return "does not exist"
+        got = read_text(full)
+        if got.error:
+            return "cannot be read"
+        if parse_frontmatter(got.text)[0].get("doc_type") is None:
+            return "has no doc_type frontmatter"
+        return None
+
     def community_files(self) -> list[str]:
         """The GitHub-facing markdown files at each scope's dir (`COMMUNITY_FILES`, in any case,
         and any under `.github/`), relative to it and named as on disk, unless the file carries
@@ -560,9 +606,52 @@ class _Proposer:
         cfg["repo"] = {"name": Path(self.m.root).name, "id_prefix": prefix,
                        "id_range": f"{start}-{9999 if top > 900 else 999}"}
 
+    # ------------------------------------------------------------------------------ options
+    def option_answers(self, cfg: dict) -> list[str]:
+        """Answers keyed `option:<id>[:<param>]` become `[checks.<id>]` tables; returns the ids
+        whose on/off/inherit was answered. An id that is not an option stays unused, so it is
+        noted as matching no question."""
+        from govern import manifest, options
+        checks: dict = {}
+        answered = []
+        for key in sorted(k for k in self.answers if k.startswith(OPTION)):
+            old, _, param = key[len(OPTION):].partition(":")
+            cid = config.check_id(old)
+            if cid not in options.ids():
+                continue
+            if cid != old:
+                note = config.renamed(f"answer '{key}'", old, cid)
+                if note not in self.notes:
+                    self.notes.append(note)
+            value = self.answer(key)
+            if not param:
+                if value == "on":
+                    checks.setdefault(cid, {})["level"] = "error"
+                elif value == "off":
+                    checks.setdefault(cid, {})["level"] = "off"
+                elif value != "inherit":
+                    self.notes.append(f"answer '{key}' = '{value}' is not on, off or inherit; "
+                                      f"ignored")
+                    continue
+                answered.append(cid)
+            elif param == "reason":
+                checks.setdefault(cid, {})["reason"] = value
+            elif param in manifest.CHECKS[cid].params:
+                if manifest.CHECKS[cid].params[param].type == "list" and isinstance(value, str):
+                    value = [v.strip() for v in value.split(",") if v.strip()]
+                checks.setdefault(cid, {})[param] = value
+            else:
+                self.notes.append(f"answer '{key}': {cid} has no setting '{param}'; ignored")
+        for cid, t in list(checks.items()):
+            if not t:
+                del checks[cid]
+        if checks:
+            cfg["checks"] = checks
+        return answered
+
 
 def propose(m: Measurement, source: str | None, profile: str | None,
-            answers: dict[str, str]) -> Proposal:
+            answers: dict[str, object]) -> Proposal:
     """The config, questions and adopt steps for a measured project. Pure: it writes nothing."""
     p = _Proposer(m, answers)
     p.single = p.shape() == SINGLE
@@ -588,7 +677,7 @@ def propose(m: Measurement, source: str | None, profile: str | None,
         cfg["projects"]["governed_tiers"] = ["full"]
         p.repos(cfg)
         if (Path(m.root) / REGISTRY_FILE).exists():
-            p.notes.append(f"{REGISTRY_FILE} exists and is not a registry measure recognised; "
+            p.notes.append(f"{REGISTRY_FILE} exists and is not a registry measure recognized; "
                            f"adopt will not overwrite it")
         p.notes.append(f"the repos' layout is proposed once they are measured as members of "
                        f"{REGISTRY_FILE}: measure(root, planned=...), then propose again (adopt "
@@ -610,6 +699,7 @@ def propose(m: Measurement, source: str | None, profile: str | None,
         p.id_ranges(cfg)
     p.traps(cfg)
     p.docs(cfg)
+    p.registry_rows(cfg)
     if p.single:
         p.repo(cfg)
     kept = p.project_blocks(cfg)
@@ -619,24 +709,35 @@ def propose(m: Measurement, source: str | None, profile: str | None,
                            f"after install to keep it generated")
     cfg["blocks"] = {k: v for k, v in cfg["blocks"].items() if v}
     cfg = {k: v for k, v in cfg.items() if v}
-    # The workspace comes before [projects], as in a hand-written config.
-    order = ["governance", "dialect", "registry", "repo", "workspace", "projects", "blocks"]
-    cfg = {k: cfg[k] for k in order if k in cfg}
     if not p.single:
         p.id_notes(cfg)
+    options_answered = p.option_answers(cfg)
+    # The workspace comes before [projects], as in a hand-written config.
+    order = ["governance", "dialect", "registry", "repo", "workspace", "projects", "blocks",
+             "checks"]
+    cfg = {k: cfg[k] for k in order if k in cfg}
+    opts: list = []
+    if not p.questions:
+        from dataclasses import asdict
+        from govern import options
+        from govern.context import Context
+        try:
+            cfg_obj, reg = load_proposed(cfg, m, layout.home(), p.registry_file)
+            ctx = Context(root=Path(m.root), home=layout.home(), cfg=cfg_obj, registry=reg,
+                          prog="govern")
+            opts = [asdict(o) for o in options.collect(ctx, set(options_answered))]
+        except (config.ConfigError, registry.RegistryMissing) as exc:
+            p.notes.append(f"options not offered: the proposed config does not load ({exc})")
     for key in sorted(set(answers) - p.used):
         p.notes.append(f"answer '{key}' matches no question; ignored")
     return Proposal(config=cfg, questions=p.questions, create=p.create,
-                    migrate=p.migrate, notes=p.notes, registry_file=p.registry_file)
+                    migrate=p.migrate, notes=p.notes, registry_file=p.registry_file,
+                    options=opts, options_answered=options_answered)
 
 
-def validate(cfg: dict, m: Measurement, home: Path, registry_file: dict | None = None
-             ) -> list[str]:
-    """Load a proposed config as the engine will: written to a temporary root's config.toml,
-    beside a copy of the registry file (or `registry_file`, the one adopt will write), through
-    `config.load` and `registry.load`. Raises
-    `config.ConfigError` (or `registry.RegistryMissing`) when it would not load; returns the
-    registry's problems."""
+def load_proposed(cfg: dict, m: Measurement, home: Path, registry_file: dict | None = None):
+    """Load a proposed config as the engine will, in a temporary root: `(Config, Registry)`.
+    Raises `config.ConfigError` or `registry.RegistryMissing` when it would not load."""
     raw = copy.deepcopy(cfg)
     gov = raw.get("governance", {})
     url, _ = profiles.split_source(gov.get("profile", ""))
@@ -654,4 +755,11 @@ def validate(cfg: dict, m: Measurement, home: Path, registry_file: dict | None =
         elif m.registry and "registry" in raw:
             shutil.copyfile(Path(m.root) / m.registry, root / m.registry)
         cfg_obj = config.load(root, home)
-        return list(registry.load(cfg_obj).problems)
+        return cfg_obj, registry.load(cfg_obj)
+
+
+def validate(cfg: dict, m: Measurement, home: Path, registry_file: dict | None = None
+             ) -> list[str]:
+    """Load a proposed config as the engine will (see `load_proposed`); returns the registry's
+    problems."""
+    return list(load_proposed(cfg, m, home, registry_file)[1].problems)

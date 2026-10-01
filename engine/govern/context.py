@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from fnmatch import fnmatchcase
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -57,21 +58,49 @@ def repo_of(path: Path) -> Path | None:
     return None
 
 
-# A governed doc under one of these, in any scope, is skipped without a project having to
-# list it in its own [projects] exclude — vendored and build trees are never a project's own
-# documentation, in any project (generic, not one project's list of directory names). Nor are
-# this tool's own directory (its README and the reports install and adopt write there) or
-# `.claude/` (agents and skills have checks of their own): a fallback `**/*.md` would otherwise
-# turn a fresh install red on files the install itself just wrote.
-DEFAULT_DOC_EXCLUDES = ("node_modules/**", ".venv/**", "venv/**", "vendor/**", "dist/**",
-                        "build/**", "target/**", ".git/**", f"{layout.GOV_DIR}/**", ".claude/**")
+# A governed doc under one of these directories, at any depth and in any scope, is skipped
+# without a project having to list it in its own [projects] exclude — vendored and build trees
+# are never a project's own documentation, in any project (generic, not one project's list of
+# directory names). Nor are this tool's own directory (its README and the reports install and
+# adopt write there) or `.claude/` (agents and skills have checks of their own): a fallback
+# `**/*.md` would otherwise turn a fresh install red on files the install itself just wrote.
+# One rule for the docs scan and for `measure`, which never descends into them either.
+ALWAYS_EXCLUDED_DIRS = ("node_modules", ".venv", "venv", "vendor", "dist", "build", "target",
+                        ".git", layout.GOV_DIR, ".claude")
+DEFAULT_DOC_EXCLUDES = tuple(f"**/{d}/**" for d in ALWAYS_EXCLUDED_DIRS)
+# Matched without regard to case, the same on every OS: `Build/` is as much a build tree as
+# `build/`, and the engine before these rules matched them so on Windows (an upgrade must not
+# start governing a project's `Build/` docs there).
+EXCLUDED_BY_CASEFOLD = {d.casefold(): d for d in ALWAYS_EXCLUDED_DIRS}
+
+
+def default_exclude(rel: str) -> str | None:
+    """The `DEFAULT_DOC_EXCLUDES` pattern that leaves a doc at `rel` (posix, relative to the
+    directory its glob ran from) out — the outermost always-excluded directory on its path, at
+    any depth — or None when none does. Matched by name in any case, exactly as `measure`
+    prunes."""
+    return next((f"**/{EXCLUDED_BY_CASEFOLD[part.casefold()]}/**" for part in rel.split("/")[:-1]
+                 if part.casefold() in EXCLUDED_BY_CASEFOLD), None)
 
 
 def doc_excluded(rel: str, extra=()) -> bool:
     """Whether a doc at `rel` (posix, relative to the directory its glob ran from) is left out:
     it matches `DEFAULT_DOC_EXCLUDES` or one of `extra`."""
     from fnmatch import fnmatch
-    return any(fnmatch(rel, x) for x in (*DEFAULT_DOC_EXCLUDES, *extra))
+    return default_exclude(rel) is not None or any(fnmatch(rel, x) for x in extra)
+
+
+def glob_matches(pattern: str, path: str) -> bool:
+    """Whether `Path.glob(pattern)` from a directory would yield `path` (both posix and relative
+    to it): `*` stays inside one path segment, `**` spans any number of them. Case-sensitive on
+    every OS."""
+    def match(ps: list[str], xs: list[str]) -> bool:
+        if not ps:
+            return not xs
+        if ps[0] == "**":
+            return any(match(ps[1:], xs[i:]) for i in range(len(xs) + 1))
+        return bool(xs) and fnmatchcase(xs[0], ps[0]) and match(ps[1:], xs[1:])
+    return match(pattern.split("/"), path.split("/"))
 
 
 @dataclass
@@ -92,6 +121,12 @@ class Context:
     # `snapshot` back to this directory, so a finding, a ratchet key, or a baseline lookup never
     # names the snapshot's own (temporary) location.
     real_scope_dir: Path | None = None
+    # `check --workspace-only`: an orchestrator's CI, with none of its projects' checkouts. The
+    # workspace checks skip every project's blocks, docs and ratchet numbers (`project_scopes`),
+    # and a link into a project's directory is not followed (`in_skipped_project`). A checkout
+    # that is present anyway can still be looked at by a check that works across the tree (the
+    # workspace pass of `agent-worktrees`, a `writing-rules` glob that reaches into it).
+    workspace_only: bool = False
     # Which of `governed_docs`'s candidate files git says are ignored, cached across the whole
     # run: one `git check-ignore --stdin` call per repo per batch of files not already answered,
     # not one per file and not one per call site.
@@ -124,6 +159,25 @@ class Context:
 
     def owned_by_project(self, path: Path) -> bool:
         return not self.owner(path).is_workspace
+
+    @property
+    def project_scopes(self) -> list[Scope]:
+        """The project scopes whose own files a workspace-wide check reads (their blocks, docs
+        and ratchet entries): every one, or none under `check --workspace-only`."""
+        return [] if self.workspace_only else self.registry.scopes
+
+    def in_skipped_project(self, path: Path) -> bool:
+        """Under `check --workspace-only`, whether `path` lies in a project's checkout (`dir`)
+        or governance directory, neither of which this run has. Always False otherwise."""
+        if not self.workspace_only:
+            return False
+        resolved = path.resolve()
+        for s in self.registry.scopes:
+            dirs = [self.root / s.get("dir")] if s.get("dir") else []
+            dirs += [s.gov] if s.gov is not None else []
+            if any(resolved.is_relative_to(d.resolve()) for d in dirs):
+                return True
+        return False
 
     # ------------------------------------------------------------------ layout
 
@@ -229,8 +283,9 @@ class Context:
     def _ignored(self, paths: list[Path]) -> set:
         """Which of `paths` git ignores, each asked of the repo that contains it (`repo_of`): a
         nested checkout is its own repo, so an outer repo that ignores the whole checkout never
-        answers for the files inside it. Under `check --path`, the containing repo is the one
-        around the file's real path (`real_path`), since the snapshot is no repo at all. A path
+        answers for the files inside it. Under `check --path`, a snapshot file is asked of
+        `_snapshot_repo`: `--history-from`'s checkout, or the snapshot's own repo — never the
+        root's, which may ignore the project's directory, or not hold it at all. A path
         in no repo is not ignored.
 
         One `git check-ignore --stdin` call per repo for every batch not already answered this
@@ -243,12 +298,12 @@ class Context:
         todo = {p: r for p, r in resolved.items() if r not in self._ignore_cache}
         by_repo: dict[Path, dict[Path, str]] = {}
         for p, r in todo.items():
-            real = self.real_path(p).resolve()
-            repo = repo_of(real)
-            if repo is None:
+            found = self._snapshot_repo(p) if self._snapshot_rel(p) is not None \
+                else self._repo_rel(p)
+            if found is None:
                 self._ignore_cache[r] = False
                 continue
-            by_repo.setdefault(repo, {})[r] = real.relative_to(repo).as_posix()
+            by_repo.setdefault(found[0], {})[r] = found[1]
         for repo, lines in by_repo.items():
             try:
                 res = subprocess.run(["git", "-C", str(repo), "check-ignore", "--stdin"],
@@ -264,6 +319,25 @@ class Context:
                 for r, line in lines.items():
                     self._ignore_cache[r] = line in hits
         return {p for p, r in resolved.items() if self._ignore_cache.get(r, False)}
+
+    def _snapshot_repo(self, path: Path) -> tuple[Path, str] | None:
+        """`(repo, rel)` to ask what git ignores about `path`, a file inside a `--path`
+        snapshot: `--history-from`'s checkout with `path`'s place in the snapshot, when one was
+        named — the same checkout every other git question about the snapshot goes to — or else
+        the repo that holds the snapshot where it actually is (a project's own CI checks its
+        own checkout), unless that is the root's repo. Never the root's: mapped back to its
+        real path, the file would sit in a project directory the root's `.gitignore` may list,
+        or that is absent from the root's copy altogether. None when neither can
+        answer: not ignored."""
+        rel = self._snapshot_rel(path)
+        if self.history_from is not None:
+            return self.history_from, rel.as_posix()
+        found = self._repo_rel(path)
+        if found is None:
+            return None
+        root = self.root.resolve()
+        root_repo = root if (root / ".git").exists() else repo_of(root)
+        return None if found[0] == root_repo else found
 
     def _repo_rel(self, path: Path) -> tuple[Path, str] | None:
         """`(repo, path relative to it)` for the repo that contains `path` (`repo_of`), or None

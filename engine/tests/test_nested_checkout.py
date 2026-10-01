@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -259,6 +260,140 @@ class NestedCheckout(Fixture):
         code, out = self.run_cli("check")
         self.assertIn(f"{NESTED}/docs/b.md", out)
         self.assertIn("link target does not exist: a.md — deleted in", out)
+
+
+class SnapshotIgnores(Fixture):
+    """Under `check --path`, which snapshot files git ignores is asked of the snapshot's
+    own repo (or `--history-from`'s), never of the root. The shape is the project's own CI: a
+    copy of the workspace without the nested checkout, whose root `.gitignore` still lists it,
+    and the checkout somewhere else entirely."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        code, out = self.run_cli("index")
+        self.assertEqual(code, 0, out)
+        code, out = self.run_cli("baseline", "--allow-raise")
+        self.assertEqual(code, 0, out)
+        self.code, self.out = self.run_cli("check", "--project", NESTED)
+        self.assertEqual(self.code, 0, self.out)                # green in place
+
+    def _checkout_elsewhere(self) -> Path:
+        """The nested checkout, moved out of the workspace copy: its own CI's shape."""
+        checkout = self.tmp / "checkout"
+        shutil.move(str(self.mod), str(checkout))
+        self.assertTrue((self.root / ".gitignore").read_text(encoding="utf-8")
+                        .startswith(f"{NESTED}/"))              # the root still ignores it
+        return checkout
+
+    def test_checkout_outside_the_workspace_copy_is_green_as_in_place(self):
+        checkout = self._checkout_elsewhere()
+        code, out = self.run_cli("check", "--project", NESTED, "--path", str(checkout))
+        self.assertEqual((code, out), (self.code, self.out))
+
+    def test_history_from_answers_for_a_snapshot_with_no_repo(self):
+        checkout = self._checkout_elsewhere()
+        snap = self.tmp / "snapshot"
+        shutil.copytree(checkout, snap, ignore=shutil.ignore_patterns(".git"))
+        code, out = self.run_cli("check", "--project", NESTED, "--path", str(snap),
+                                 "--history-from", str(checkout))
+        self.assertEqual((code, out), (self.code, self.out))
+        self.assertNotIn("scratch.md", out)                    # the checkout's own ignore
+
+    def test_the_snapshots_own_gitignore_still_excludes(self):
+        checkout = self._checkout_elsewhere()
+        ctx = self.context()
+        ctx.snapshot = checkout
+        ctx.real_scope_dir = self.mod
+        self.assertEqual([rel for rel, _ in ctx.governed_docs(checkout)],
+                         ["DECISIONS.md", "docs/INDEX.md", *self.DOCS])
+
+    def test_the_root_never_answers_for_a_snapshot_inside_it(self):
+        # A snapshot with no repo of its own, exported under a directory the root ignores: the
+        # root would call every file ignored; with no `--history-from`, nothing answers instead.
+        self.write(".gitignore", f"{NESTED}/\nsnap/\n")
+        snap = self.root / "snap"
+        shutil.copytree(self.mod, snap, ignore=shutil.ignore_patterns(".git"))
+        ctx = self.context()
+        ctx.snapshot = snap
+        ctx.real_scope_dir = self.mod
+        self.assertEqual([rel for rel, _ in ctx.governed_docs(snap)],
+                         ["DECISIONS.md", "docs/INDEX.md", *self.DOCS, "docs/scratch.md"])
+
+
+class WorkspaceOnly(Fixture):
+    """`check --workspace-only` for an orchestrator's CI, which has none of its
+    projects' checkouts. Workspace docs, the agent roster, the registry and its declared id
+    ranges are checked; every project scope, project block, project doc and project ratchet
+    entry is skipped, and the output says which projects were."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.write(".claude/agents/scout.md", "---\nname: scout\ndescription: looks\n"
+                   "model: sonnet\neffort: low\n---\nLook.\n")
+        cfg = self.root / layout.CONFIG
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(
+            "[blocks]\n", '[blocks]\nworkspace = [{ file = "AGENTS.md", id = "agent-roster" }]\n'))
+        self.write("AGENTS.md", fm("control") + "# Agents\n\nSee [a](nested-mod/docs/a.md).\n\n"
+                   "<!-- t:generated:start id=agent-roster -->\n"
+                   "<!-- t:generated:end id=agent-roster -->\n")
+        for argv in (["index"], ["baseline", "--allow-raise"]):
+            code, out = self.run_cli(*argv)
+            self.assertEqual(code, 0, out)
+        code, out = self.run_cli("check")
+        self.assertEqual(code, 0, out)                          # green with the checkout
+
+    def _no_checkouts(self) -> None:
+        """The orchestrator's CI: none of its projects' checkouts."""
+        from govern.profile import rmtree
+        rmtree(self.mod)
+
+    def test_a_full_check_without_checkouts_fails(self):
+        self._no_checkouts()
+        code, out = self.run_cli("check")
+        self.assertEqual(code, 1, out)
+
+    def test_workspace_only_is_green_and_names_what_it_skipped(self):
+        self._no_checkouts()
+        code, out = self.run_cli("check", "--workspace-only")
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"skipped  project {NESTED} (--workspace-only): its checks, blocks, docs, "
+                      f"links into it and ratchet entries", out)
+        self.assertNotIn("no longer breaches", out)             # its baseline entry is kept
+        self.assertNotIn("ERROR", out)
+
+    def test_a_present_checkout_adds_no_project_findings(self):
+        self.write(f"{NESTED}/docs/d.md", fm(purpose=None) + "# Doc\n")   # a new ratchet breach
+        code, out = self.run_cli("check")
+        self.assertEqual(code, 1, out)
+        code, out = self.run_cli("check", "--workspace-only")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn(NESTED + "/", out)
+        self.assertNotIn("governed_docs", out)
+
+    def test_workspace_checks_still_run(self):
+        self._no_checkouts()
+        self.write("AGENTS.md", "# Agents\n\nSee [gone](gone.md).\n")
+        self.write("mods.toml", MODS.replace('id_prefix = "M"\nid_range = "100-199"',
+                                             'id_prefix = "W"\nid_range = "50-199"'))
+        code, out = self.run_cli("check", "--workspace-only")
+        self.assertEqual(code, 1, out)
+        self.assertIn("AGENTS.md", out)                         # workspace docs
+        self.assertIn("link target does not exist: gone.md", out)
+        self.assertIn("generated block 'agent-roster'", out)    # the agent roster
+        self.assertIn("id ranges overlap: workspace 1-99 and nested-mod 50-199", out)
+
+    def test_registry_well_formedness_still_runs(self):
+        self._no_checkouts()
+        self.write("mods.toml", MODS.replace('tier = "full"\n', ""))
+        code, out = self.run_cli("check", "--workspace-only")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"registry: '{NESTED}' is missing 'tier'", out)
+
+    def test_workspace_only_excludes_project_and_path(self):
+        code, out = self.run_cli("check", "--workspace-only", "--project", NESTED)
+        self.assertEqual(code, 2, out)
+        code, out = self.run_cli("check", "--workspace-only", "--path", str(self.mod))
+        self.assertEqual(code, 2, out)
 
 
 class IndexEmptiesABlock(Fixture):

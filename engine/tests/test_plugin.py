@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -69,6 +70,16 @@ class Plugin(unittest.TestCase):
         head = (PLUGIN / "skills" / "upgrade" / "SKILL.md").read_text().split("---")[1]
         self.assertNotIn("disable-model-invocation", head)
         self.assertIn("Never start it unprompted", head)
+
+    def test_options_skill_is_visible_to_the_agent(self):
+        text = (PLUGIN / "skills/options/SKILL.md").read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("---\nname: options\n"))
+        self.assertIn("govern options --json", text)
+        self.assertIn("Chat about this", text)
+        # Windows has no shebang: every call runs through python3, and the grant is no wider
+        # than the commands the skill actually needs.
+        self.assertIsNone(re.search(r"(?<!python3 )\.context-gate/bin/govern", text))
+        self.assertNotIn("git -C:*", text)
 
     def test_hook_is_silent_outside_a_governed_project(self):
         self.assertEqual(self.hook(self.tmp), "")

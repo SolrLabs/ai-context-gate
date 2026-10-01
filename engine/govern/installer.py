@@ -37,15 +37,17 @@ reverses exactly that before deleting the directory:
 Install writes `install-report.md`: a previous gate's findings (run from an `--entrypoint` before it
 is replaced) against the new gate's, grouped by the check that raised each new one, plus the
 settings that differ from the engine's defaults. Upgrade writes `upgrade-report.md` the same way,
-old engine against new, after pinning the project to the new engine and refreshing the tool's
-own files.
+old engine against new, after pinning the project to the new engine, refreshing the tool's
+own files and regenerating every generated block with the new engine (as `index` does), so a
+block the old engine rendered never reads as stale: an upgrade never turns a project red.
 
 Install also baselines: every current ratchet breach not already in the baseline (moved in by
 `--migrate-baseline`, or empty otherwise) is recorded, so the project starts green — never
 raising an entry already there. The keys added are listed in `install-report.md`.
 `--no-report` still baselines; it only skips the report.
 
-The project's own records (docs, decision logs, traps) are never moved, rewritten or removed.
+The project's own records (docs, decision logs, traps) are never moved, rewritten or removed;
+only their generated blocks are regenerated, on upgrade, exactly as `index` would.
 Install is refused over an existing install and rolled back if the policy does not load.
 Uninstall finds every conflict before changing anything, and changes nothing if there is one.
 """
@@ -67,10 +69,12 @@ from pathlib import Path
 
 import govern.checks  # noqa: F401  (registers the built-in checks the config refers to)
 from govern import __version__, config, layout, migrate, notice, ratchet, registry, releases, report
+from govern.checks import repo
 from govern.context import Context
+from govern.text import Unreadable, write
 
 TEMPLATES = Path(__file__).resolve().parent / "templates"
-TOOL_FILES = ("bin/govern", "bin/upgrade", "bin/uninstall")
+TOOL_FILES = layout.TOOL_FILES
 SOURCE_NONE = "none"      # `adopt --source none`: no [governance] source
 
 README = """# {gov_dir}
@@ -117,6 +121,9 @@ def toml_str(value: str) -> str:
 def write_manifest(path: Path, data: dict) -> None:
     lines = [f"# What {layout.DISPLAY_NAME} touched outside {layout.GOV_DIR}/. Read by uninstall.",
              f"engine = {toml_str(data['engine'])}", f"installed = {toml_str(data['installed'])}"]
+    if data.get("options_answered"):
+        lines.append("options_answered = ["
+                     + ", ".join(toml_str(c) for c in data["options_answered"]) + "]")
     for stub in data["entrypoint"]:
         lines += ["", "[[entrypoint]]", f"path = {toml_str(stub['path'])}",
                   f"sha256 = {toml_str(stub['sha256'])}", f"backup = {toml_str(stub['backup'])}"]
@@ -145,6 +152,11 @@ def read_manifest(root: Path) -> dict:
         data = tomllib.load(fh)
     for key in ("entrypoint", "moved", "retired", "plugin", "marketplace", "settings"):
         data.setdefault(key, [])
+    if "options_answered" in data:
+        # An option recorded under an old name (`config.RENAMED`) is written back under its
+        # new one: this file is the engine's own, so the engine renames it.
+        data["options_answered"] = list(dict.fromkeys(
+            config.check_id(c) for c in data["options_answered"]))
     return data
 
 
@@ -164,8 +176,26 @@ def _load_context(root: Path) -> Context:
 
 
 def _new_findings(ctx: Context):
+    """Every finding the new engine reports, its load warnings (`Config.warnings`) first, under
+    `config`: the old gate's `warning:` lines are read as findings (`report.FINDING_RE`), so the
+    new side counts the same lines, and one said by both reads as unchanged."""
     from govern import cli
-    return cli.collect(ctx, ctx.registry.scopes, workspace=True)
+    from govern.findings import Findings
+    found = cli.collect(ctx, ctx.registry.scopes, workspace=True)
+    if ctx.cfg.warnings:
+        said = Findings()
+        for msg in ctx.cfg.warnings:
+            said.warn(msg)
+        found = [("config", said), *found]
+    return found
+
+
+def say_warnings(ctx: Context) -> None:
+    """What loading found that is legal but almost certainly not meant, said once as every
+    `govern` command says it (`cli.main`): install and upgrade (and adopt, through install) load
+    the config in-process, not through it."""
+    for msg in ctx.cfg.warnings:
+        print(f"warning: {msg}", file=sys.stderr)
 
 
 def _write_tool_files(gov: Path) -> None:
@@ -565,7 +595,9 @@ def install(root: Path, config_file: Path, entrypoints: list[str], migrate_basel
         _rollback(root, record)
         return fail(f"install rolled back: {exc}")
 
+    say_warnings(ctx)
     added = _baseline_new(ctx)
+    needs = repo.ignored_findings(root)
 
     print(f"installed {layout.DISPLAY_NAME} {__version__} into {gov}")
     for stub in record["entrypoint"]:
@@ -581,8 +613,11 @@ def install(root: Path, config_file: Path, entrypoints: list[str], migrate_basel
         print(f"  plugin       {item['id']} enabled in {item['settings']}")
     if added:
         print(f"  baseline     {len(added)} breach(es) recorded so the project starts green")
+    for msg in needs:
+        print(f"  needs a person  {msg}")
     if with_report:
-        _report(ctx, gov / "install-report.md", "Install report", old, baseline=added)
+        _report(ctx, gov / "install-report.md", "Install report", old, baseline=added,
+                needs_person=needs)
     return 0
 
 
@@ -607,9 +642,11 @@ def _baseline_new(ctx: Context) -> list[str]:
     return added
 
 
-def _report(ctx: Context, path: Path, title: str, old, notes=None, baseline=None) -> None:
+def _report(ctx: Context, path: Path, title: str, old, notes=None, baseline=None,
+            needs_person=None, options=None) -> None:
     counts = report.write(path, title, old, _new_findings(ctx),
-                          report.non_default_settings(ctx), __version__, notes, baseline)
+                          report.non_default_settings(ctx), __version__, notes, baseline,
+                          needs_person, options)
     rel = path.relative_to(ctx.root).as_posix()
     if old is None:
         print(f"  report       {rel}: {counts['new']} finding(s); no previous gate to compare")
@@ -649,10 +686,17 @@ def upgrade(root: Path, with_report: bool = True) -> int:
     if not (root / layout.MANIFEST).is_file():
         return fail(f"no {layout.MANIFEST} — install first")
     cfg_path = root / layout.CONFIG
-    text = cfg_path.read_text(encoding="utf-8")
+    original = cfg_path.read_bytes()
+    # Decoded from the bytes, never read with newline translation: only the pin line changes,
+    # and a CRLF file stays CRLF. A BOM is kept out of what tomllib reads here, so the loader
+    # below reports it rather than this line raising.
+    try:
+        text = original.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        return fail(f"{layout.CONFIG}: not valid UTF-8 (byte {exc.start})")
     if not PIN_RE.search(text):
         return fail(f"{layout.CONFIG} has no [governance] engine pin to upgrade")
-    old_pin = tomllib.loads(text).get("governance", {}).get("engine")
+    old_pin = tomllib.loads(text.removeprefix("\ufeff")).get("governance", {}).get("engine")
     old_engine = notice.resolve(old_pin, layout.home()) if isinstance(old_pin, str) else None
     old = None
     if with_report:
@@ -660,26 +704,94 @@ def upgrade(root: Path, with_report: bool = True) -> int:
                                   _gate_env())
         old.engine = old_engine
     new_text = PIN_RE.sub(lambda m: f'{m.group(1)}"{__version__}"', text, count=1)
-    cfg_path.write_text(new_text, encoding="utf-8")
+    write(cfg_path, new_text)
     try:
         ctx = _load_context(root)
     except (config.ConfigError, registry.RegistryMissing) as exc:
-        cfg_path.write_text(text, encoding="utf-8")
+        cfg_path.write_bytes(original)
         return fail(f"upgrade rolled back: the policy does not load on engine {__version__}: {exc}")
-    _write_tool_files(root / layout.GOV_DIR)
+    say_warnings(ctx)
+    # Every generated block, built with the new engine before anything else is written: a file
+    # it cannot read leaves the project exactly as it was, never pinned to an engine whose
+    # blocks it could not refresh (they would read as stale, an error).
+    from govern import cli
+    try:
+        blocks_new, index_lines, _, _ = cli.render_index(ctx)
+    except Unreadable as exc:
+        cfg_path.write_bytes(original)
+        return fail(f"upgrade rolled back: {ctx.rel(exc.path)}: {exc.reason}, so its generated "
+                    f"blocks cannot be refreshed — nothing was changed")
+    stuck = _refresh_tool_files(root / layout.GOV_DIR)
+    if stuck is not None:
+        exc, unrestored = stuck
+        cfg_path.write_bytes(original)
+        where = f"{exc.filename}: " if exc.filename else ""
+        return fail(f"upgrade rolled back: {where}{exc.strerror or exc} — "
+                    + ("nothing was changed" if not unrestored else
+                       f"the pin, manifest and generated blocks are as they were, but "
+                       f"{', '.join(unrestored)} could not be put back: run the upgrade again "
+                       f"once the file can be written"))
     record = read_manifest(root)
     record["engine"] = __version__
     write_manifest(root / layout.MANIFEST, record)
     ran = f"{old_pin} (ran {old_engine})" if old_engine and old_engine != old_pin else old_pin
     print(f"upgraded {layout.DISPLAY_NAME} {ran} -> {__version__} in {root / layout.GOV_DIR}")
+    _refresh_blocks(blocks_new, index_lines)
     if with_report:
         notes = releases.between(old_engine, __version__)
+        from govern import options as opts_mod
+        opts = [o for o in opts_mod.collect(ctx, opts_mod.answered(root))
+                if o.new or o.state == "inert"]
         _report(ctx, root / layout.GOV_DIR / "upgrade-report.md",
-                f"Upgrade report: {ran} to {__version__}", old, notes)
+                f"Upgrade report: {ran} to {__version__}", old, notes, options=opts)
         if notes:
             print(f"  notes        {len(notes)} release(s) in the report: "
                   f"{', '.join(v for v, _ in notes)}")
+        if opts:
+            print(f"  options      {len(opts)} to review: {', '.join(o.id for o in opts)}")
     return 0
+
+
+def _refresh_tool_files(gov: Path) -> tuple[OSError, list[str]] | None:
+    """`_write_tool_files`, all or none: on an `OSError` (a file held open, no permission), every
+    tool file is put back as it was. Returns None when written, else the error and the tool
+    files (relative to the root) that could not be put back."""
+    saved = {rel: (gov / rel).read_bytes() for rel in TOOL_FILES if (gov / rel).is_file()}
+    try:
+        _write_tool_files(gov)
+        return None
+    except OSError as exc:
+        unrestored = []
+        for rel in TOOL_FILES:
+            dest = gov / rel
+            try:
+                if rel in saved:
+                    if dest.is_file() and dest.read_bytes() == saved[rel]:
+                        continue                  # never touched: nothing to put back
+                    if dest.exists():
+                        dest.chmod(0o755)
+                    dest.write_bytes(saved[rel])
+                elif dest.exists():
+                    dest.unlink()
+            except OSError:
+                unrestored.append(f"{layout.GOV_DIR}/{rel}")
+        return exc, unrestored
+
+
+def _refresh_blocks(pending: dict[Path, str], lines: list[str]) -> None:
+    """Write the generated blocks `cli.render_index` built with the engine just pinned, so an
+    upgrade never turns a project red: a new engine may render a block differently, or govern a
+    different set of docs (the always-excluded directories now match at any depth), and a block
+    the old engine wrote would otherwise read as stale — an error — until someone ran `index`.
+    Says how many blocks changed, and repeats anything `index` warns about (a block it emptied,
+    a block whose file or markers are missing)."""
+    for path, text in pending.items():
+        write(path, text)
+    refreshed = sum(1 for line in lines if line.startswith("  regenerated "))
+    print(f"  index        {refreshed} block(s) refreshed")
+    for line in lines:
+        if not line.startswith("  regenerated "):
+            print(line)
 
 
 # ---------------------------------------------------------------------------- uninstall

@@ -3,16 +3,33 @@ from __future__ import annotations
 
 import json
 
+from pathlib import PurePosixPath
+
 from govern.findings import Findings
 from govern.manifest import Param, check
 from govern.text import read
+
+HOOK_DIR = ".claude/hooks"
 
 
 def _prefix(hook: dict) -> str:
     return f"{hook['rule']}: " if hook.get("rule") else ""
 
 
-@check("hooks-wired", scope="workspace", since="0.4.0", default="off",
+def _suggest(ctx, s) -> str | None:
+    d = ctx.root / HOOK_DIR
+    if not d.is_dir():
+        return None
+    wired = {PurePosixPath(h["script"]).name for h in s.params["hooks"]}
+    loose = sorted(p.name for p in d.iterdir()
+                   if p.is_file() and not p.name.startswith(".") and p.name not in wired)
+    if not loose:
+        return None
+    return (f"{HOOK_DIR}/ has {len(loose)} script(s) nothing requires to be wired: "
+            f"{', '.join(loose)}")
+
+
+@check("hooks-wired", scope="workspace", since="0.4.0", default="off", suggest=_suggest,
        summary="Each configured hook script exists and is wired in .claude/settings.json on "
                "its event and matcher.",
        question="Does any rule of yours rely on a Claude Code hook (blocking outbound actions, "
@@ -25,7 +42,8 @@ def _prefix(hook: dict) -> str:
                           fields={"script": "str", "event": "str", "matcher": "str",
                                   "rule": "str", "missing": "str", "unwired": "str"},
                           required=("script", "event", "matcher")),
-       })
+       },
+       needs=("hooks",))
 def hooks_wired(ctx, params) -> Findings:
     f = Findings()
     hooks = params["hooks"]

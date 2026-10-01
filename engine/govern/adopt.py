@@ -47,7 +47,8 @@ from datetime import date
 from pathlib import Path
 
 from govern import __version__, cli, config, installer, layout, measure, migrate, propose, ratchet
-from govern import registry, tomlw
+from govern import registry, report as reports, tomlw
+from govern.checks import repo
 from govern.text import Unreadable, write
 
 PLUGIN = layout.PLUGIN_ID
@@ -65,18 +66,19 @@ def fail(msg: str, code: int = 2) -> int:
     return code
 
 
-def load_answers(path: Path) -> dict[str, str]:
+def load_answers(path: Path) -> dict[str, object]:
     try:
         data = tomllib.loads(path.read_bytes().decode("utf-8"))
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise AdoptError(f"--answers {path}: not readable TOML ({exc})") from exc
-    bad = [k for k, v in data.items() if not isinstance(v, str)]
+    bad = [k for k, v in data.items()
+          if not isinstance(v, str) and not (k.startswith("option:") and k.count(":") == 2)]
     if bad:
         raise AdoptError(f"--answers {path}: {', '.join(bad)} must be a string (key = \"option\")")
     return data
 
 
-def plan(root: Path, source: str | None, profile: str | None, answers: dict[str, str]
+def plan(root: Path, source: str | None, profile: str | None, answers: dict[str, object]
          ) -> tuple[measure.Measurement, propose.Proposal]:
     """Measure and propose. A workspace with no registry is proposed twice: once to choose the
     repos, then again with them measured as members of the registry adopt will write."""
@@ -211,7 +213,7 @@ def apply(root: Path, m: measure.Measurement, p: propose.Proposal,
     if p.registry_file is not None:
         reg_path = root / p.config["registry"]["file"]
         if reg_path.exists():
-            return fail(f"{reg_path.name} exists and is not a registry measure recognised; "
+            return fail(f"{reg_path.name} exists and is not a registry measure recognized; "
                         f"adopt will not overwrite it")
     blockers = migrate._apply_blockers(touched(root, m, p))
     if blockers:
@@ -250,6 +252,9 @@ def apply(root: Path, m: measure.Measurement, p: propose.Proposal,
         print(f"  engine       {note}")
 
     ctx = installer._load_context(root)
+    if p.options_answered:
+        from govern import options
+        options.record(root, p.options_answered)
     unfilled: dict[str, list[str]] = {}
     for rel in p.create:
         path = root / rel
@@ -285,9 +290,12 @@ def apply(root: Path, m: measure.Measurement, p: propose.Proposal,
     except Unreadable:
         red = []                  # the gate's own output above already names the file
 
+    # Every file adopt or its install wrote that a commit must carry, git asked about each.
+    ignored = repo.ignored_findings(root, [ctx.rel(c) for c in created])
+
     report = root / REPORT
     write(report, _report(ctx, m, p, migrated, unfilled, added, index_out, check_code,
-                          check_out, created, red))
+                          check_out, created, red, ignored))
     if check_code:
         print(f"  report       {REPORT}: gate red — {len(red)} finding(s) in content adopt "
               f"cannot baseline or fix need a person first; they are listed at the top")
@@ -319,7 +327,7 @@ def needs_a_person(ctx) -> list[tuple[str, str, str, str]]:
 # ---------------------------------------------------------------------------- report
 
 def _report(ctx, m, p, migrated, unfilled, added, index_out, check_code, check_out,
-            created, red) -> str:
+            created, red, ignored=()) -> str:
     L = ["# Adopt report", "",
          f"Adopted with {layout.DISPLAY_NAME} {ctx.cfg.raw['governance']['engine']} on "
          f"{date.today().isoformat()}. The gate is **{'green' if check_code == 0 else 'red'}**.",
@@ -334,6 +342,9 @@ def _report(ctx, m, p, migrated, unfilled, added, index_out, check_code, check_o
             L.append(f"- {f'`{where}`: ' if where else ''}{finding} (`{cid}`)"
                      + (f". Fix: {fix}" if fix else ""))
         L.append("")
+
+    if ignored:
+        L += reports.NEEDS_PERSON + [f"- {msg}" for msg in ignored] + [""]
 
     L += ["## Measured", ""]
     L.append(f"- Registry: {m.registry or 'none'}"

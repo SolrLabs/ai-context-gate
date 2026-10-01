@@ -28,6 +28,8 @@ BASELINE = f"{GOV_DIR}/baseline.json"
 ENTRYPOINT = f"{GOV_DIR}/bin/govern"
 MANIFEST = f"{GOV_DIR}/installed.toml"
 BACKUP = f"{GOV_DIR}/backup"
+# The one script installed under these names in `{GOV_DIR}/`; it acts on the name it runs as.
+TOOL_FILES = ("bin/govern", "bin/upgrade", "bin/uninstall")
 
 
 def home() -> Path:

@@ -54,10 +54,25 @@ def _norm(msg: str) -> str:
     return " ".join(msg.split())
 
 
+# The heading and lead of the section the install and adopt reports open with when git ignores
+# files the gate needs committed.
+NEEDS_PERSON = ["## Needs a person before committing", "",
+                "Git ignores these files, which the gate needs committed: a commit would leave "
+                "them out, and every other clone would have no gate. Fix each, then run the "
+                "gate again.", ""]
+
+# The lead under `config` in the new findings: the warnings loading the config said.
+CONFIG_LEAD = ("Said while loading the config: legal, but almost certainly not meant. Each says "
+               "what to change.")
+
+
 def write(path: Path, title: str, old: GateRun | None, new: list[tuple[str, object]],
           explain: str, engine: str, notes: list[tuple[str, str]] | None = None,
-          baseline: list[str] | None = None) -> dict:
-    """Write the report; return the counts for a one-line summary."""
+          baseline: list[str] | None = None, needs_person: list[str] | None = None,
+          options: list | None = None) -> dict:
+    """Write the report; return the counts for a one-line summary. `needs_person`: files the
+    install wrote that git ignores (`checks.repo.ignored_findings`), listed first. `options`:
+    the opt-in checks to review (`options.collect`), listed before the new findings."""
     new_flat = [(cid, lvl, msg) for cid, f in new
                 for lvl, msgs in (("error", f.errors), ("warn", f.warnings)) for msg in msgs]
     old_set = {_norm(m) for _, m in old.findings} if old else set()
@@ -67,6 +82,8 @@ def write(path: Path, title: str, old: GateRun | None, new: list[tuple[str, obje
     same = len(new_flat) - len(fresh)
 
     lines = [f"# {title}", "", f"Engine {engine}.", ""]
+    if needs_person:
+        lines += NEEDS_PERSON + [f"- {msg}" for msg in needs_person] + [""]
     if old is None:
         lines += ["No previous gate to compare with: every finding below is new.", ""]
     else:
@@ -99,6 +116,17 @@ def write(path: Path, title: str, old: GateRun | None, new: list[tuple[str, obje
                   "starts green — never raising an entry already there.", ""]
         lines += [f"- `{row}`" for row in baseline] or ["None."]
         lines += [""]
+    if options:
+        lines += ["## New options", "",
+                  "Checks that stay off until a project turns them on, not yet answered here, "
+                  "and any turned on without what they need to run. `/context-gate:options` "
+                  "walks through them.", ""]
+        for o in options:
+            why = o.suggestion or (f"on, but needs {', '.join(o.missing)}"
+                                   if o.state == "inert" else "")
+            lines.append(f"- `{o.id}` ({o.state}, since {o.since}): {o.summary}"
+                         + (f" **Suggested:** {why}" if why else ""))
+        lines += [""]
     lines += ["## New findings", ""]
     if not fresh:
         lines += ["None.", ""]
@@ -106,8 +134,10 @@ def write(path: Path, title: str, old: GateRun | None, new: list[tuple[str, obje
     for cid, lvl, msg in fresh:
         by_check.setdefault(cid, []).append((lvl, msg))
     for cid, items in by_check.items():
-        chk = manifest.CHECKS[cid]
-        lines += [f"### `{cid}`", "", f"{chk.summary} *Why:* {chk.rationale}", ""]
+        # Not every finding is a check's: the config's own load warnings come under `config`.
+        chk = manifest.CHECKS.get(cid)
+        lead = f"{chk.summary} *Why:* {chk.rationale}" if chk else CONFIG_LEAD
+        lines += [f"### `{cid}`", "", lead, ""]
         lines += [f"- **{lvl}** {msg}" for lvl, msg in items] + [""]
     if old is not None:
         lines += ["## No longer reported", "",

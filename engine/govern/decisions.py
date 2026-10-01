@@ -70,24 +70,35 @@ def mask_lines(lines: list[str], markers: Markers) -> list[bool]:
     Fences close only on the same character at least as long as the opening (CommonMark), and
     a comment or marker mentioned inside inline code is text, not markup.
     """
+    return [kind == LIVE for kind in line_kinds(lines, markers)]
+
+
+# What `line_kinds` says a line is: live markdown, or masked as a fenced code block (its fence
+# lines included), an HTML comment, or a generated block (its marker lines included).
+LIVE, FENCE, COMMENT, BLOCK = "live", "fence", "comment", "block"
+
+
+def line_kinds(lines: list[str], markers: Markers) -> list[str]:
+    """`mask_lines`, saying why a line is masked: for a scan that treats code differently
+    from other masked text (writing-rules)."""
     bid = r"[\w-]+"
     open_marker = re.escape(markers.open("X")).replace("X", bid)
     close_marker = re.escape(markers.close("X")).replace("X", bid)
     open_re = re.compile(rf"^\s*{open_marker}\s*$")
     close_re = re.compile(rf"^\s*{close_marker}\s*$")
-    live: list[bool] = []
+    kinds: list[str] = []
     fence: str | None = None
     in_comment = in_block = False
     for line in lines:
         if fence is not None:
-            live.append(False)
+            kinds.append(FENCE)
             m = FENCE_RE.match(line)
             if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) \
                     and not line.strip().strip(fence[0]):
                 fence = None
             continue
         if in_block:
-            live.append(False)
+            kinds.append(BLOCK)
             in_block = not close_re.match(line)
             continue
         starts_in_comment = in_comment
@@ -105,19 +116,19 @@ def mask_lines(lines: list[str], markers: Markers) -> list[bool]:
                     break
                 in_comment, pos = True, j + 4
         if starts_in_comment:
-            live.append(False)
+            kinds.append(COMMENT)
             continue
         if open_re.match(line):
-            live.append(False)
+            kinds.append(BLOCK)
             in_block, in_comment = True, False
             continue
         m = FENCE_RE.match(line)
         if m:
-            live.append(False)
+            kinds.append(FENCE)
             fence = m.group(1)
             continue
-        live.append(not line.lstrip().startswith("<!--"))
-    return live
+        kinds.append(COMMENT if line.lstrip().startswith("<!--") else LIVE)
+    return kinds
 
 
 @dataclass

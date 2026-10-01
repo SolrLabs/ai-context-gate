@@ -3,7 +3,7 @@ doc_type: reference
 purpose: How context-gate works for a user adopting it — what it governs, its pieces, how settings resolve, the ratchet, what it installs, and how engines are pinned and upgraded.
 audience: human
 load_when: adopting context-gate, or deciding how to configure or upgrade a governed project
-last_reviewed: 2026-09-21
+last_reviewed: 2026-09-23
 ---
 
 # How context-gate works
@@ -98,6 +98,13 @@ For a git pre-commit hook, `check --project NAME --path DIR --history-from REPO`
 directory swapped in for the project's own (the staged tree, say) and answers questions about
 file history from `REPO`, since the snapshot has none.
 
+For a workspace's own CI, which has none of its projects' checkouts, `check --workspace-only`
+checks the workspace alone: its docs, agents, generated blocks, registry and declared ID ranges.
+It skips every project's checks, blocks, docs, the links into it and its ratchet entries, and
+prints one `skipped` line per project. A checkout that is present anyway can still be looked at
+by a check that works across the tree, such as `agent-worktrees` or a `writing-rules` glob that
+reaches into it.
+
 ## How settings are decided
 
 Each check's level and parameters are resolved in layers. A later layer wins, key by key:
@@ -115,7 +122,9 @@ keys that choose governed docs (`[projects] docs` and `exclude`).
 
 A setting that relaxes a check past the engine standard carries a `reason`: a lower level than
 the check's default, a limit moved in its looser direction (a higher word limit, say), or the
-ratchet turned off for a check. Without one, the config does not load. Relaxing a rule is allowed, but it is done in the open, where the
+ratchet turned off for a check. A list widened past what the project or profile inherits (a value
+added to an allow-list, a value removed from a required list, an allow-list emptied) carries its
+own entry in the check's `reasons` table. Without one, the config does not load. Relaxing a rule is allowed, but it is done in the open, where the
 next reader can see why.
 
 ```toml
@@ -128,13 +137,10 @@ Some differences are reported as warnings by the `standard-overrides` check inst
 
 - a format setting (`[dialect]`) that differs from the standard, with no entry in
   `[dialect.reasons]`;
-- a project setting that changes what its profile set, with no `reason`;
-- a list widened past what the project inherits (a value added to an allow-list, a value removed
-  from a required list, an allow-list emptied), with no entry for that list in the check's
-  `reasons` table.
+- a project setting that changes what its profile set, with no `reason`.
 
 `[governance] require_reasons = false` turns the reason requirement off for teams that find it
-heavy.
+heavy; a widened list with no reason is then a `standard-overrides` warning.
 
 ### Seeing the result
 
@@ -362,6 +368,16 @@ defaults to that fork).
 Teammates install the plugin once, in Claude Code: `/plugin marketplace add
 SolrLabs/ai-context-gate`, then `/plugin install context-gate@context-gate`. The gate itself needs
 nothing installed: it fetches its engine from the source.
+
+## Options
+
+Checks that only some projects need — `writing-rules`, `hooks-wired`, `checkout-hygiene`,
+`licenses` — ship off. Adopt shows an options panel once the layout questions are settled, and an
+unanswered option stays off (or at what the profile sets) and never blocks the apply. Upgrade's
+report carries a **New options** section for any option this project has not answered yet, plus
+any turned on without what it needs; `/context-gate:options` walks through those, and can also be
+run any time to review or change every option. See [configuration.md](configuration.md#options)
+for the states and the command.
 
 ## Profiles
 

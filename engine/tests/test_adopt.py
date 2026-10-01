@@ -28,8 +28,8 @@ sys.path.insert(0, str(ENGINE))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from govern import cli, config, installer, layout, migrate, profile, registry  # noqa: E402
-from test_measure import (BODY, FM, example_workspace, commit, orbit, put, snapshot,  # noqa: E402
-                          single_repo)
+from test_measure import (BODY, FM, example_workspace, commit, orbit, pair, put,  # noqa: E402
+                          single_repo, snapshot)
 
 
 def run(*args: str) -> tuple[int, str, str]:
@@ -107,7 +107,8 @@ class SingleRepo(Base):
         self.assertEqual(code, 3)
         data = json.loads(out)
         self.assertEqual(list(data), ["config", "questions", "create", "migrate", "notes",
-                                      "registry_file", "measurement"])
+                                      "registry_file", "options", "options_answered",
+                                      "measurement"])
         self.assertEqual(data["questions"][0]["key"], "shape")
         self.assertEqual(data["measurement"]["workspace"]["doc_files"],
                          {"engine": ["engine/README.md"]})
@@ -144,6 +145,92 @@ class SingleRepo(Base):
         code, _, err = self.adopt("shape = 1\n")
         self.assertEqual(code, 2)
         self.assertIn("must be a string", err)
+
+    def test_options_offered_once_structure_is_settled(self):
+        code, out, _ = self.adopt(self.ANSWERS, "--json")
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertEqual(sorted(o["id"] for o in data["options"]),
+                         ["checkout-hygiene", "hooks-wired", "licenses", "writing-rules"])
+        self.assertTrue(all(o["new"] for o in data["options"]))
+
+    def test_an_option_answered_on_is_written_and_recorded(self):
+        self.green(self.ANSWERS + '"option:writing-rules" = "on"\n'
+                   '"option:writing-rules:files" = "docs/**/*.md, engine/README.md"\n'
+                   '"option:writing-rules:rules" = [{ text = "colour", use = "color" }]\n')
+        cfg = tomllib.loads((self.root / ".context-gate/config.toml").read_text("utf-8"))
+        self.assertEqual(cfg["checks"]["writing-rules"],
+                         {"level": "error", "files": ["docs/**/*.md", "engine/README.md"],
+                          "rules": [{"text": "colour", "use": "color"}]})
+        man = tomllib.loads((self.root / ".context-gate/installed.toml").read_text("utf-8"))
+        self.assertEqual(man["options_answered"], ["writing-rules"])
+
+    def test_an_answer_for_a_check_that_is_not_an_option_is_ignored(self):
+        code, out, _ = self.adopt(self.ANSWERS + '"option:agents" = "on"\n', "--json")
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertNotIn("checks", data["config"])
+        self.assertIn("answer 'option:agents' matches no question; ignored", data["notes"])
+
+    def test_a_bad_option_value_is_noted(self):
+        _, out, _ = self.adopt(self.ANSWERS + '"option:licenses" = "maybe"\n', "--json")
+        self.assertIn("answer 'option:licenses' = 'maybe' is not on, off or inherit; ignored",
+                      json.loads(out)["notes"])
+
+    def test_off_over_a_profile_on_loads_and_warns(self):
+        prof = self.tmp / "prof"
+        prof.mkdir()
+        (prof / "principles.toml").write_text(
+            '[checks.writing-rules]\nlevel = "error"\n'
+            'rules = [{ text = "colour", use = "color" }]\n', encoding="utf-8")
+        code, out, err = self.adopt(self.ANSWERS + '"option:writing-rules" = "off"\n',
+                                    "--apply", "--profile", prof.as_posix())
+        self.assertEqual(code, 0, out + err)
+        code, out = gate(self.root)
+        self.assertIn("[checks.writing-rules] level overrides the profile with no reason", out)
+
+    def test_off_with_no_profile_still_writes_level_off(self):
+        code, out, _ = self.adopt(self.ANSWERS + '"option:licenses" = "off"\n', "--json")
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertEqual(data["config"]["checks"]["licenses"], {"level": "off"})
+
+    def test_an_option_answered_under_its_old_name_is_written_under_the_new_one(self):
+        # `licences` is `licenses` now: an answers file written before the rename still works.
+        code, out, _ = self.adopt(self.ANSWERS + '"option:licences" = "on"\n', "--json")
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertEqual(data["config"]["checks"], {"licenses": {"level": "error"}})
+        self.assertEqual(data["options_answered"], ["licenses"])
+        self.assertIn("answer 'option:licences': 'licences' is now 'licenses' (the old name "
+                      "still works; rename it)", data["notes"])
+
+    def test_an_answer_for_an_old_fact_name_matches_no_question(self):
+        code, out, _ = self.adopt(self.ANSWERS + '"option:licence" = "on"\n', "--json")
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertNotIn("checks", data["config"])
+        self.assertIn("answer 'option:licence' matches no question; ignored", data["notes"])
+
+    def test_inherit_writes_no_table_and_records_the_id(self):
+        code, out, _ = self.adopt(self.ANSWERS + '"option:licenses" = "inherit"\n', "--json")
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertNotIn("checks", data["config"])
+        self.assertEqual(data["options_answered"], ["licenses"])
+
+    def test_a_mismatched_param_type_is_refused_and_notes_no_options(self):
+        answers = self.ANSWERS + '"option:writing-rules:files" = 3\n'
+        code, out, _ = self.adopt(answers, "--json")
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertEqual(data["options"], [])
+        self.assertTrue(any("options not offered" in n for n in data["notes"]), data["notes"])
+        before = snapshot(self.root)
+        code, _, err = self.adopt(answers, "--apply")
+        self.assertEqual(code, 2)
+        self.assertIn("does not load", err)
+        self.assertEqual(snapshot(self.root), before)
 
     def test_a_log_with_entries_keeps_them_in_range(self):
         log = self.root / "docs/DECISIONS.md"
@@ -335,6 +422,80 @@ class SharedPrefix(Base):
         self.assertIn('id_range = "1000-1999"', text)
 
 
+class ExistingDocRegistryRows(Base):
+    """A workspace whose project's hand-kept `docs/INDEX.md` doc registry lists the project's
+    own `../AGENTS.md`, outside the `docs/**/*.md` glob measurement proposes: the proposal
+    covers it, so the first `index` keeps its row rather than dropping it silently."""
+
+    ANSWERS = 'shape = "workspace"\nrepos = "alpha"\n'
+    ROWS = ("| Doc | Load when |\n|---|---|\n| [`../AGENTS.md`](../AGENTS.md) | test |\n"
+            "| [`guide.md`](guide.md) | test |\n| [`../NOTES.md`](../NOTES.md) | test |\n"
+            "| [`site`](https://example.com/x.md) | test |\n")
+
+    def setUp(self) -> None:
+        super().setUp()
+        put(self.root / "mods.toml", '[[mod]]\nname = "alpha"\ndir = "alpha"\ntier = "full"\n'
+            'id_prefix = "A"\nid_range = "100-199"\n')
+        put(self.root / "alpha/AGENTS.md", FM + "# Alpha agents\n")
+        put(self.root / "alpha/NOTES.md", "# Notes, no frontmatter\n")
+        put(self.root / "alpha/docs/INDEX.md", FM + "# Index\n\n" + pair("gov", "doc-registry",
+                                                                         self.ROWS))
+        put(self.root / "alpha/docs/guide.md", FM + "# Guide\n")
+        put(self.root / "alpha/docs/DECISIONS.md", FM + "# Decisions\n\n"
+            + pair("gov", "decision-index") + "\n## A-100 — First\n" + BODY)
+        commit(self.root)
+
+    def test_measure_reads_each_row_relative_to_its_index(self):
+        from govern import measure
+        rows = measure.measure(self.root).registry_rows
+        self.assertEqual(rows, [("alpha/docs/INDEX.md", "alpha/AGENTS.md"),
+                                ("alpha/docs/INDEX.md", "alpha/NOTES.md"),
+                                ("alpha/docs/INDEX.md", "alpha/docs/guide.md")])
+
+    def test_a_listed_doc_outside_the_proposed_glob_is_proposed_and_keeps_its_row(self):
+        report = self.green(self.ANSWERS)
+        cfg = tomllib.loads((self.root / layout.CONFIG).read_text(encoding="utf-8"))
+        self.assertEqual(cfg["projects"]["docs"], ["docs/**/*.md", "AGENTS.md"])
+        index = (self.root / "alpha/docs/INDEX.md").read_text(encoding="utf-8")
+        self.assertIn("[`../AGENTS.md`](../AGENTS.md)", index)
+        self.assertIn("[`guide.md`](guide.md)", index)
+        self.assertIn("alpha/docs/INDEX.md's doc registry lists alpha/AGENTS.md, which the "
+                      "proposed docs globs miss: [projects] docs lists 'AGENTS.md' so `index` "
+                      "keeps its row", report)
+        # A listed file that could never be governed is not added: it is named instead.
+        self.assertNotIn("../NOTES.md", index)
+        self.assertIn("alpha/docs/INDEX.md's doc registry lists alpha/NOTES.md, which has no "
+                      "doc_type frontmatter: `index` drops its row", report)
+
+    def test_a_path_another_project_holds_without_frontmatter_is_not_added(self):
+        # `[projects] docs` is shared: adding 'AGENTS.md' would govern beta's too, which has no
+        # frontmatter, and turn the gate red. It is left out, and the note names beta.
+        put(self.root / "mods.toml", '[[mod]]\nname = "alpha"\ndir = "alpha"\ntier = "full"\n'
+            'id_prefix = "A"\nid_range = "100-199"\n\n[[mod]]\nname = "beta"\ndir = "beta"\n'
+            'tier = "full"\nid_prefix = "B"\nid_range = "200-299"\n')
+        put(self.root / "beta/AGENTS.md", "# Beta agents, no frontmatter\n")
+        put(self.root / "beta/docs/guide.md", FM + "# Guide\n")
+        put(self.root / "beta/docs/DECISIONS.md", FM + "# Decisions\n\n"
+            + pair("gov", "decision-index") + "\n## B-200 — First\n" + BODY)
+        commit(self.root)
+        report = self.green('shape = "workspace"\nrepos = "alpha,beta"\n')
+        cfg = tomllib.loads((self.root / layout.CONFIG).read_text(encoding="utf-8"))
+        self.assertEqual(cfg["projects"]["docs"], ["docs/**/*.md"])
+        self.assertIn("alpha/docs/INDEX.md's doc registry lists alpha/AGENTS.md, which the "
+                      "proposed docs globs miss; 'AGENTS.md' is not added to [projects] docs, "
+                      "which every project shares, since beta's AGENTS.md has no doc_type "
+                      "frontmatter: `index` drops its row", report)
+
+    def test_a_second_proposal_adds_nothing_more(self):
+        from govern import measure, propose
+        m = measure.measure(self.root)
+        answers = tomllib.loads(self.ANSWERS)
+        first = propose.propose(m, None, None, answers).config["projects"]["docs"]
+        again = propose.propose(m, None, None, answers).config["projects"]["docs"]
+        self.assertEqual(first, again)
+        self.assertEqual(first.count("AGENTS.md"), 1)
+
+
 class NeedsAPerson(Base):
     """Content outside the ratchet keeps the gate red: adopt exits 1 and lists it first."""
 
@@ -366,6 +527,117 @@ class NeedsAPerson(Base):
 def commit_all_new(root: Path) -> None:
     subprocess.run(["git", "-C", str(root), "add", "-A"], check=True, capture_output=True)
     commit_all(root)
+
+
+# ---------------------------------------------------------------------------- ignored tool files
+
+class IgnoredToolFiles(Base):
+    """A project's `bin/` rule for build output also ignores `.context-gate/bin/`, so a
+    commit would ship a config with nothing to run it. Adopt names the ignored files as needing
+    a person, with the fix, and `check` warns until the fix is in."""
+
+    BIN = (".context-gate/bin/govern, .context-gate/bin/upgrade, .context-gate/bin/uninstall: "
+           "ignored by git (.gitignore:2 'bin/'), so a commit leaves out what the gate needs — "
+           "add '!.context-gate/bin/' to .gitignore")
+
+    def setUp(self) -> None:
+        super().setUp()
+        single_repo(self.root)
+        put(self.root / ".gitignore", "scratch/\nbin/\n")
+        commit_all(self.root)
+
+    def test_adopt_names_the_ignored_files_as_needing_a_person(self):
+        code, out, err = self.adopt(SingleRepo.ANSWERS, "--apply")
+        self.assertEqual(code, 0, out + err)                  # a warning, never red
+        self.assertIn(f"needs a person  {self.BIN}", out)
+        for name in ("adopt-report.md", "install-report.md"):
+            report = (self.root / layout.GOV_DIR / name).read_text(encoding="utf-8")
+            head = report.index("## Needs a person before committing")
+            self.assertIn(f"- {self.BIN}\n", report[head:])
+        report = (self.root / layout.GOV_DIR / "adopt-report.md").read_text(encoding="utf-8")
+        self.assertLess(report.index("## Needs a person"), report.index("## Measured"))
+
+    def test_check_warns_until_the_fix_is_in(self):
+        self.adopt(SingleRepo.ANSWERS, "--apply")
+        code, out = gate(self.root)
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"warn   {self.BIN}", out)
+        gitignore = self.root / ".gitignore"
+        put(gitignore, gitignore.read_text(encoding="utf-8") + "!.context-gate/bin/\n")
+        code, out = gate(self.root)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("ignored by git", out)
+
+    def test_a_tracked_file_is_not_reported(self):
+        self.adopt(SingleRepo.ANSWERS, "--apply")
+        subprocess.run(["git", "-C", str(self.root), "add", "-f", ".context-gate/bin/"],
+                       check=True, capture_output=True)
+        code, out = gate(self.root)
+        self.assertNotIn("ignored by git", out)
+
+    def test_a_failing_git_call_warns_never_reads_as_clean(self):
+        self.adopt(SingleRepo.ANSWERS, "--apply")
+        real = subprocess.run
+
+        def failing(argv, *a, **kw):
+            if "check-ignore" in argv and "-v" in argv:
+                return subprocess.CompletedProcess(argv, 128, b"", b"fatal: lock held")
+            return real(argv, *a, **kw)
+        with mock.patch("govern.checks.repo.subprocess.run", failing):
+            code, out = gate(self.root)
+        self.assertEqual(code, 0, out)
+        self.assertIn("warn   .context-gate/: could not ask git whether it ignores the files the "
+                      "gate needs committed (fatal: lock held)", out)
+
+    def test_a_root_in_a_subdirectory_is_told_which_gitignore_and_the_advice_works(self):
+        from govern.checks import repo
+        top = self.tmp / "mono"
+        put(top / ".gitignore", "bin/\n")
+        commit(top)
+        root = top / "tools" / "gate"
+        for rel in (layout.CONFIG, *(f"{layout.GOV_DIR}/{t}" for t in layout.TOOL_FILES)):
+            put(root / rel, "x\n")
+        found = repo.ignored_findings(root)
+        self.assertEqual(len(found), 1, found)
+        self.assertTrue(found[0].endswith("add '!.context-gate/bin/' to tools/gate/.gitignore"),
+                        found)
+        put(root / ".gitignore", "!.context-gate/bin/\n")
+        self.assertEqual(repo.ignored_findings(root), [])
+
+
+class IgnoredToolFilesInANestedCheckout(Base):
+    """A `mods.toml` workspace whose root `.gitignore` lists its member's checkout, a repo of
+    its own, where adopt creates the member's decision log. The root's ignore rule is not the
+    question for that file: its own repo is, and that repo does not ignore it. Advising
+    `!mods/x/` would sweep the nested repo into the root's next `git add -A`."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        put(self.root / "mods.toml", '[workspace]\nid_prefix = "W"\nid_range = "1-99"\n\n'
+            '[[mod]]\nname = "x"\ndir = "mods/x"\ntier = "full"\nid_prefix = "M"\n'
+            'id_range = "100-199"\n')
+        put(self.root / ".gitignore", "mods/x/\n")
+        put(self.root / "AGENTS.md", FM + "# Agents\n")
+        commit(self.root)
+        put(self.root / "mods/x/README.md", FM + "# X\n")
+        commit(self.root / "mods/x")
+
+    def test_a_log_created_in_a_nested_checkout_is_asked_of_that_checkout(self):
+        code, out, err = self.adopt('shape = "workspace"\nrepos = "x"\n', "--apply")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("created      mods/x/DECISIONS.md", out)
+        report = (self.root / layout.GOV_DIR / "adopt-report.md").read_text(encoding="utf-8")
+        self.assertNotIn("Needs a person before committing", report)
+        self.assertNotIn("!mods/x/", report + out)
+
+    def test_the_nested_checkouts_own_ignore_rule_is_reported_against_its_own_file(self):
+        put(self.root / "mods/x/.gitignore", "DECISIONS.md\n")
+        commit_all_new(self.root / "mods/x")
+        code, out, err = self.adopt('shape = "workspace"\nrepos = "x"\n', "--apply")
+        report = (self.root / layout.GOV_DIR / "adopt-report.md").read_text(encoding="utf-8")
+        self.assertIn("- mods/x/DECISIONS.md: ignored by git (.gitignore:1 'DECISIONS.md'), so a "
+                      "commit leaves out what the gate needs — add '!DECISIONS.md' to "
+                      "mods/x/.gitignore", report)
 
 
 # ---------------------------------------------------------------------------- [registry] skip

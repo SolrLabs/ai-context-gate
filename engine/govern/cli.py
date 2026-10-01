@@ -116,12 +116,24 @@ def collect(ctx: Context, targets: list, workspace: bool) -> list[tuple[str, Fin
 
 
 def cmd_check(ctx: Context, project: str | None, path: str | None = None,
-             history_from: str | None = None) -> int:
+             history_from: str | None = None, workspace_only: bool = False) -> int:
     """`--path` checks a scope's files from a directory swapped in for the one the registry
     names — a git pre-commit hook's staged-tree snapshot, say — instead of the checkout on disk.
     `--history-from` then answers every git question a project-scope check asks about those
     files (last touched, committed) from that checkout instead, since the snapshot carries no
-    history of its own."""
+    history of its own.
+
+    `--workspace-only` checks the workspace alone, for an orchestrator's CI that has none of its
+    projects' checkouts: its docs, agents, generated blocks, registry and declared id ranges.
+    Every project scope is skipped, with its blocks, docs, the links into it and its ratchet
+    entries, and the output names each project it skipped. A checkout that is present anyway
+    can still be looked at by a check that works across the tree (the workspace pass of
+    `agent-worktrees`, a `writing-rules` glob that reaches into it)."""
+    if workspace_only and (project or path is not None):
+        return fail("--workspace-only checks no project: drop --project and --path")
+    if workspace_only and ctx.registry.single:
+        return fail("--workspace-only needs a registry workspace: a single repo is its one "
+                    "project, so there is no workspace to check without it")
     if path is not None and not project:
         return fail("--path needs --project")
     if history_from is not None and path is None:
@@ -142,6 +154,12 @@ def cmd_check(ctx: Context, project: str | None, path: str | None = None,
             if history_from is not None:
                 ctx.history_from = ctx.root / history_from
         targets = [scope]
+    elif workspace_only:
+        ctx.workspace_only = True
+        targets = []
+        for s in ctx.registry.scopes:
+            print(f"skipped  project {s.name} (--workspace-only): its checks, blocks, docs, "
+                  f"links into it and ratchet entries")
     else:
         targets = ctx.registry.scopes
     results = collect_scoped(ctx, targets, workspace=not project)
@@ -165,6 +183,10 @@ from govern.report import value as _value
 def cmd_explain(ctx: Context, only: str | None) -> int:
     """Every effective setting and where it came from: the engine default, the profile, or the
     project's config.toml."""
+    if only and config.check_id(only) != only:
+        print(f"warning: {config.renamed('explain', only, config.check_id(only))}",
+              file=sys.stderr)
+        only = config.check_id(only)
     if only and only not in manifest.CHECKS:
         return fail(f"no check '{only}' — `{ctx.prog} explain` lists them all")
     if not only:
@@ -200,6 +222,36 @@ def cmd_explain(ctx: Context, only: str | None) -> int:
     return 0
 
 
+def cmd_options(ctx: Context, global_: bool, as_json: bool, rec: list[str] | None) -> int:
+    """The opt-in checks, each with its state, where that comes from and whether it is worth
+    turning on; with --record, mark options as answered."""
+    from govern import options
+    if rec:
+        for cid in rec:
+            if config.check_id(cid) != cid:
+                print(f"warning: {config.renamed('options --record', cid, config.check_id(cid))}",
+                      file=sys.stderr)
+        rec = [config.check_id(cid) for cid in rec]
+        try:
+            options.record(ctx.root, rec)
+        except FileNotFoundError:
+            return fail(f"no {layout.MANIFEST}: install first")
+        except ValueError as exc:
+            return fail(str(exc))
+        print(f"recorded as answered: {', '.join(rec)}")
+        return 0
+    try:
+        opts = options.collect_global(ctx) if global_ \
+            else options.collect(ctx, options.answered(ctx.root))
+    except ValueError as exc:
+        return fail(str(exc))
+    if as_json:
+        print(json.dumps([dataclasses.asdict(o) for o in opts], indent=2, ensure_ascii=False))
+    else:
+        print(options.table(opts, global_))
+    return 0
+
+
 def cmd_principles(ctx: Context) -> int:
     """The doctrine this project works by: its own PRINCIPLES.md if it keeps one, else its
     profile's."""
@@ -224,6 +276,21 @@ def cmd_index(ctx: Context) -> int:
     with none is still written — removing every doc or entry can be deliberate — but warned
     about by name: an empty block is more often every source going missing (a git-ignored
     checkout, a moved directory) than a project really emptied."""
+    pending, lines, changed, missing = render_index(ctx)
+    for path, text in pending.items():
+        write(path, text)
+    for line in lines:
+        print(line)
+    status = "FAIL" if missing else "OK"
+    extra = f", {missing} missing" if missing else ""
+    print(f"[{status}] index  ({changed} block(s) updated{extra})")
+    return 1 if missing else 0
+
+
+def render_index(ctx: Context) -> tuple[dict[Path, str], list[str], int, int]:
+    """What `index` would write, built in memory and writing nothing: `(new text per file,
+    report lines, blocks changed, blocks missing)`. Raises `Unreadable` for a file it cannot
+    read, before anything is written — `index` and `upgrade` both build first, then write."""
     changed, missing = 0, 0
     pending: dict[Path, str] = {}
     lines = []
@@ -249,14 +316,7 @@ def cmd_index(ctx: Context) -> int:
                 lines.append(f"  warning     {rel} :: {bid} is now empty: regenerating removed "
                              f"all {had} of its entries (check its sources still exist and "
                              f"git does not ignore them)")
-    for path, text in pending.items():
-        write(path, text)
-    for line in lines:
-        print(line)
-    status = "FAIL" if missing else "OK"
-    extra = f", {missing} missing" if missing else ""
-    print(f"[{status}] index  ({changed} block(s) updated{extra})")
-    return 1 if missing else 0
+    return pending, lines, changed, missing
 
 
 # ---------------------------------------------------------------------------- baseline
@@ -477,6 +537,9 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     c.add_argument("--history-from", dest="history_from", default=None, metavar="DIR",
                    help="date --path's files from this checkout's git history instead, for a "
                         "snapshot that carries none of its own")
+    c.add_argument("--workspace-only", dest="workspace_only", action="store_true",
+                   help="check the workspace alone, skipping every project (an orchestrator's "
+                        "CI without its projects' checkouts)")
     sub.add_parser("index", help="regenerate generated blocks")
     bl = sub.add_parser("baseline", help="rewrite the ratchet baseline (lower/remove only)")
     bl.add_argument("--allow-raise", action="store_true",
@@ -500,6 +563,13 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     sub.add_parser("principles", help="the doctrine this project works by")
     ex = sub.add_parser("explain", help="every effective setting and where it came from")
     ex.add_argument("check", nargs="?", help="one check id; all of them if omitted")
+    op = sub.add_parser("options", help="the opt-in checks: which are on, off or inherited, and "
+                                        "which are worth turning on")
+    op.add_argument("--global", action="store_true", dest="global_",
+                    help="the profile's layer only")
+    op.add_argument("--json", action="store_true", dest="as_json")
+    op.add_argument("--record", nargs="+", metavar="CHECK",
+                    help="record these options as answered in installed.toml")
     fd = sub.add_parser("find", help="which entries mention this, without reading the files")
     fd.add_argument("--project", "--repo", dest="project", required=True)
     fd.add_argument("pattern", help="regex, case-insensitive")
@@ -525,6 +595,8 @@ def main(argv: list[str] | None = None, root: Path | None = None,
         return fail(str(exc))
     except registry.RegistryMissing as exc:
         return fail(f"{exc} not found")
+    for warning in ctx.cfg.warnings:
+        print(f"warning: {warning}", file=sys.stderr)
     try:
         return dispatch(ctx, args)
     except Unreadable as exc:
@@ -546,9 +618,11 @@ def dispatch(ctx: Context, args) -> int:
         return cmd_trap_add(ctx, args.project, args.title, args.bites, args.body, args.file)
     if args.cmd == "find":
         return cmd_find(ctx, args.project, args.pattern, args.ids_only, args.context)
+    if args.cmd == "options":
+        return cmd_options(ctx, args.global_, args.as_json, args.record)
     if args.cmd == "explain":
         return cmd_explain(ctx, args.check)
     if args.cmd == "principles":
         return cmd_principles(ctx)
     return cmd_check(ctx, getattr(args, "project", None), getattr(args, "path", None),
-                     getattr(args, "history_from", None))
+                     getattr(args, "history_from", None), getattr(args, "workspace_only", False))

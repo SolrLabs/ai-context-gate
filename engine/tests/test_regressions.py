@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import unicodedata
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
@@ -60,8 +61,12 @@ project = [{{ file = "DECISIONS.md", id = "decision-index" }}]
 
 [checks.decision-log]
 statuses = ["locked", "provisional", "superseded"]
+reasons = {{ statuses = "older entries predate the standard" }}
 {extra}
 """
+
+# The fixture's reason for re-allowing 'superseded'; a test takes it out to see a widening refused.
+REASON_LINE = 'reasons = { statuses = "older entries predate the standard" }\n'
 
 REGISTRY = """
 [workspace]
@@ -75,7 +80,7 @@ tier = "full"
 governance = "projects/alpha"
 id_prefix = "A"
 id_range = "{alpha_range}"
-licence = "MIT"
+license = "MIT"
 {alpha_extra}
 
 [project.profile]
@@ -210,6 +215,425 @@ rules = [{ text = "colour", use = "color", ignore_case = true, why = "house styl
         self.assertIn("warn   two/pr-draft.md: 1 × 'monster' (use 'mob')", out)
 
 
+class WritingRulesSkipEngineVocabulary(Base):
+    """A project cannot rename the engine's own names (a check id, a setting, a registry fact),
+    so writing-rules never flags one where it is used as a name: in the config, profile and
+    registry files, and in Markdown code. Prose, and every other file, is checked in full, so a
+    spelling rule holds whichever spelling the engine uses."""
+
+    AMERICAN = '{ text = "licence", use = "license", ignore_case = true }'
+    BRITISH = '{ text = "license", use = "licence" }'
+
+    def rules_ws(self, rule: str, files: str = '["notes/*", ".context-gate/config.toml", '
+                                                '"projects.toml"]', extra: str = "") -> Workspace:
+        return self.ws(extra=f"""
+[checks.writing-rules]
+level = "error"
+files = {files}
+rules = [{rule}]
+{extra}""")
+
+    def findings(self, w: Workspace) -> list[str]:
+        _, out, _ = w.run("check")
+        return [line.strip() for line in out.splitlines() if " × " in line]
+
+    def test_an_engine_name_in_a_markdown_code_span_is_not_flagged(self):
+        w = self.rules_ws(self.AMERICAN)
+        w.write("notes/a.md", "Turn on `licences`, set `[checks.licences]` and "
+                              "`checks.licences.conflicts`; each entry sets `licence`.\n")
+        self.assertEqual(self.findings(w), [])
+
+    def test_an_engine_name_in_a_fenced_block_is_not_flagged(self):
+        w = self.rules_ws(self.AMERICAN)
+        w.write("notes/a.md", "Example:\r\n\r\n```toml\r\n[checks.licences]\r\n"
+                              "require_declared = true\r\n```\r\n")
+        self.assertEqual(self.findings(w), [])
+
+    def test_the_old_check_name_in_the_config_is_not_flagged(self):
+        # The config is always left out now (it is in the tool's own directory); this guards
+        # the engine-owned exemption in case that ever changes.
+        w = self.rules_ws(self.AMERICAN, extra='\n[checks.licences]\nrequire_declared = true\n')
+        self.assertEqual(self.findings(w), [])
+
+    def test_the_old_check_name_in_the_profile_is_not_flagged(self):
+        w = self.rules_ws(self.AMERICAN, files='["prof/*"]')
+        w.write("prof/principles.toml", f"[checks.writing-rules]\nrules = [{self.AMERICAN}]\n\n"
+                                        "[checks.licences]\nrequire_declared = true\n")
+        cfg = w.root / CFG
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(
+            "schema = 1", 'schema = 1\nprofile = "prof"', 1))
+        self.assertEqual(self.findings(w), [])
+
+    def test_a_registry_fact_in_the_registry_file_is_not_flagged(self):
+        w = self.rules_ws(self.AMERICAN)
+        reg = w.root / "projects.toml"
+        wtext(reg, reg.read_text(encoding="utf-8").replace('license = "MIT"', 'licence = "MIT"'))
+        self.assertEqual(self.findings(w), [])
+
+    def test_prose_is_flagged(self):
+        w = self.rules_ws(self.AMERICAN)
+        w.write("notes/a.md", "## Licence\n\nThe `licences` check reads each licence.\n")
+        self.assertEqual(self.findings(w), ["ERROR  notes/a.md: 2 × 'licence' (use 'license')"])
+
+    def test_the_projects_own_code_is_flagged(self):
+        w = self.rules_ws(self.AMERICAN)
+        w.write("notes/b.py", "LICENCE_TEXT = 1\n")
+        self.assertEqual(self.findings(w), ["ERROR  notes/b.py: 1 × 'licence' (use 'license')"])
+
+    def test_a_code_span_that_is_not_an_engine_name_is_flagged(self):
+        w = self.rules_ws(self.AMERICAN)
+        w.write("notes/a.md", "Call `my_licence` here.\n")
+        self.assertEqual(self.findings(w), ["ERROR  notes/a.md: 1 × 'licence' (use 'license')"])
+
+    def test_a_british_rule_skips_the_new_names_and_flags_prose(self):
+        w = self.rules_ws(self.BRITISH, extra='\n[checks.licenses]\nrequire_declared = true\n')
+        w.write("notes/a.md", "Turn on `licenses` and set `license` per entry.\n")
+        self.assertEqual(self.findings(w), [])
+        w.write("notes/a.md", "Every repo needs a license.\n")
+        self.assertEqual(self.findings(w), ["ERROR  notes/a.md: 1 × 'license' (use 'licence')"])
+
+    def test_an_extension_check_id_is_an_engine_name(self):
+        w = self.rules_ws('{ text = "colour", use = "color" }',
+                          files='["notes/*"]')
+        cfg = w.root / CFG
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(
+            "schema = 1", 'schema = 1\nextensions = ["gov-ext"]', 1))
+        w.write("gov-ext/colour.py", """
+from govern.findings import Findings
+from govern.manifest import check
+
+@check("colour-names", scope="workspace", since="0.1.1", origin="test-ext",
+       summary="s.", question="q", rationale="r")
+def colour_names(ctx, params):
+    return Findings()
+""")
+        self.addCleanup(manifest.forget, "test-ext")
+        w.write("notes/a.md", "Turn on `colour-names`.\n")
+        self.assertEqual(self.findings(w), [])
+
+
+class WritingRulesSelectsFilesLikeTheGate(Base):
+    """writing-rules leaves out every file the gate never governs as a doc, however a `files`
+    glob or path reaches it: this tool's own directory (whose reports quote the configured rules
+    back), `.claude/`, the always-excluded directories at any depth and in any case, and files
+    git ignores. `exclude` leaves out more, and adding to it is a loosening that needs a reason."""
+
+    RULE = '{ text = "colour", use = "color" }'
+    HIT = "ERROR  notes/a.md: 1 × 'colour' (use 'color')"
+
+    def rules_ws(self, files: str = '["**/*.md"]', extra: str = "") -> Workspace:
+        w = self.ws(extra=f"""
+[checks.writing-rules]
+level = "error"
+files = {files}
+rules = [{self.RULE}]
+{extra}""")
+        w.write("notes/a.md", "The colour of it.\n")
+        return w
+
+    def findings(self, w: Workspace) -> list[str]:
+        code, out, err = w.run("check")
+        self.assertNotEqual(code, 2, err)
+        return [line.strip() for line in out.splitlines() if " × " in line]
+
+    def test_the_tools_own_reports_are_never_checked(self):
+        w = self.rules_ws()
+        w.write(".context-gate/install-report.md", "Rule: colour → color.\n")
+        w.write(".context-gate/upgrade-report.md", "A colour finding was fixed.\n")
+        self.assertEqual(self.findings(w), [self.HIT])
+
+    def test_a_listed_path_in_the_tools_own_dir_is_left_out_too(self):
+        w = self.rules_ws(files='["notes/*.md", ".context-gate/install-report.md"]')
+        w.write(".context-gate/install-report.md", "Rule: colour → color.\n")
+        self.assertEqual(self.findings(w), [self.HIT])
+
+    def test_claude_dir_and_excluded_dirs_at_any_depth_are_skipped(self):
+        w = self.rules_ws()
+        w.write(".claude/agents/helper.md", "colour\n")
+        w.write("sub/Build/notes.md", "colour\n")
+        w.write("sub/node_modules/pkg/README.md", "colour\n")
+        self.assertEqual(self.findings(w), [self.HIT])
+
+    def test_a_gitignored_file_is_skipped(self):
+        w = self.rules_ws()
+        subprocess.run(["git", "-C", str(w.root), "init", "-q"], check=True)
+        w.write(".gitignore", "scratch/\n")
+        w.write("scratch/draft.md", "colour\n")
+        self.assertEqual(self.findings(w), [self.HIT])
+
+    def test_a_file_a_nested_checkout_tracks_is_asked_of_that_checkout(self):
+        # The root ignores the nested checkout wholesale; its own files are still checked.
+        w = self.rules_ws()
+        subprocess.run(["git", "-C", str(w.root), "init", "-q"], check=True)
+        w.write(".gitignore", "alpha/\n")
+        w.write("alpha/doc.md", "colour\n")
+        subprocess.run(["git", "-C", str(w.root / "alpha"), "init", "-q"], check=True)
+        self.assertEqual(self.findings(w), ["ERROR  alpha/doc.md: 1 × 'colour' (use 'color')",
+                                            self.HIT])
+
+    def test_exclude_with_a_reason_skips_its_files(self):
+        w = self.rules_ws(files='["**/*.md", "**/*.py"]',
+                          extra='exclude = ["engine/tests/**"]\n'
+                                'reasons = { exclude = "fixtures spell it both ways" }\n')
+        w.write("engine/tests/test_x.py", "COLOUR = 'colour'\n")
+        w.write("engine/tests/data/sample.md", "colour\n")
+        w.write("engine/x.py", "colour = 1\n")
+        self.assertEqual(self.findings(w), ["ERROR  engine/x.py: 1 × 'colour' (use 'color')",
+                                            self.HIT])
+
+    def git_ignoring(self, w: Workspace, ignore: str) -> None:
+        subprocess.run(["git", "-C", str(w.root), "init", "-q"], check=True)
+        w.write(".gitignore", ignore)
+
+    INCLUDE = "list it in include_ignored to check it anyway"
+
+    def test_a_nested_checkouts_own_ignores_apply_below_its_root(self):
+        # The root ignores the checkout wholesale; each file is asked of the checkout itself.
+        w = self.rules_ws(files='["notes/*.md", "alpha/**/*.md"]')
+        self.git_ignoring(w, "alpha/\n")
+        w.write("alpha/.gitignore", "docs/scratch.md\n")
+        w.write("alpha/docs/keep.md", "colour\n")
+        w.write("alpha/docs/scratch.md", "colour\n")
+        subprocess.run(["git", "-C", str(w.root / "alpha"), "init", "-q"], check=True)
+        self.assertEqual(self.findings(w), [
+            "ERROR  alpha/docs/keep.md: 1 × 'colour' (use 'color')", self.HIT])
+
+    def drafts_ws(self, extra: str = "") -> Workspace:
+        # The usual idiom ignores the files, not the directory, keeping it with a `.gitkeep`.
+        w = self.rules_ws(files='["notes/*.md", "outbound/*.md"]', extra=extra)
+        self.git_ignoring(w, "outbound/*\n!outbound/.gitkeep\n")
+        w.write("outbound/.gitkeep", "")
+        w.write("outbound/pr-1.md", "colour\n")
+        return w
+
+    def test_ignored_drafts_are_skipped_with_a_warning_naming_include_ignored(self):
+        w = self.drafts_ws()
+        _, out, _ = w.run("check")
+        self.assertIn("writing-rules: 'outbound/*.md' matched 1 file(s), all left out "
+                      f"(gitignored) — {self.INCLUDE}", out)
+        self.assertEqual([line.strip() for line in out.splitlines() if " × " in line],
+                         [self.HIT])
+
+    def test_include_ignored_checks_ignored_drafts(self):
+        w = self.drafts_ws(extra='include_ignored = ["outbound/*.md"]\n')
+        self.assertEqual(self.findings(w), [
+            self.HIT, "ERROR  outbound/pr-1.md: 1 × 'colour' (use 'color')"])
+
+    def test_always_excluded_wins_over_include_ignored(self):
+        w = self.rules_ws(extra='include_ignored = ["sub/build/*.md", ".context-gate/*.md"]\n')
+        w.write("sub/build/x.md", "colour\n")
+        w.write(".context-gate/install-report.md", "colour\n")
+        self.assertEqual(self.findings(w), [self.HIT])
+
+    def test_backslashes_and_a_leading_dot_slash_in_every_list(self):
+        w = self.rules_ws(
+            files="['./notes/*.md', './outbound/*.md', 'tests/**/*.md']",
+            extra="exclude = ['tests\\fixtures\\**', './notes/skip.md']\n"
+                  "include_ignored = ['.\\outbound\\*.md']\n"
+                  'reasons = { exclude = "fixtures spell it both ways" }\n')
+        self.git_ignoring(w, "outbound/\n")
+        w.write("outbound/pr-1.md", "colour\n")
+        w.write("notes/skip.md", "colour\n")
+        w.write("tests/fixtures/f.md", "colour\n")
+        w.write("tests/t.md", "colour\n")
+        self.assertEqual(self.findings(w), [
+            self.HIT, "ERROR  outbound/pr-1.md: 1 × 'colour' (use 'color')",
+            "ERROR  tests/t.md: 1 × 'colour' (use 'color')"])
+
+    def test_files_is_case_sensitive_on_every_os(self):
+        # A case-insensitive file system answers `Notes/*.md` with `notes/a.md`: it is not
+        # checked, and the entry says which file it reaches only in another spelling. A
+        # case-sensitive one finds nothing, and says nothing.
+        w = self.rules_ws(files='["Notes/*.md", "notes/*.MD"]')
+        _, out, _ = w.run("check")
+        self.assertNotIn(" × ", out)
+        self.assertNotIn("matched", out)
+        warning = "writing-rules: 'Notes/*.md' matches 'notes/a.md' only in another spelling"
+        if (w.root / "NOTES").exists():
+            self.assertIn(warning, out)
+        else:
+            self.assertNotIn("Notes/*.md", out)
+
+    def test_an_entry_that_matches_nothing_says_nothing(self):
+        w = self.rules_ws(files='["notes/*.md", "outbound/*.md"]')
+        (w.root / "outbound").mkdir()
+        _, out, _ = w.run("check")
+        self.assertNotIn("outbound", out)
+
+    def test_a_name_stored_in_another_unicode_form_is_on_disk(self):
+        # A file system may store a name decomposed (NFD) that a config spells composed (NFC).
+        from govern.checks.writing import _on_disk
+        nfc, nfd = (unicodedata.normalize(f, "café.md") for f in ("NFC", "NFD"))
+        wtext(self.tmp / nfd, "colour\n")
+        self.assertTrue(_on_disk(self.tmp, nfc, {}))
+        self.assertFalse(_on_disk(self.tmp, "cafe.md", {}))
+
+    def test_a_directory_in_another_unicode_form_is_checked(self):
+        nfc, nfd = (unicodedata.normalize(f, "café") for f in ("NFC", "NFD"))
+        w = self.rules_ws(files=f'["notes/*.md", "{nfc}/*.md"]')
+        (w.root / nfd).mkdir()
+        wtext(w.root / nfd / "x.md", "colour\n")
+        if not (w.root / nfc).exists():
+            self.skipTest("this file system tells the two forms apart")
+        self.assertEqual(len(self.findings(w)), 2)
+
+    def test_repeated_slashes_are_one(self):
+        w = self.rules_ws(files='["notes//*.md"]')
+        self.assertEqual(self.findings(w), [self.HIT])
+
+    def test_a_dot_segment_is_dropped(self):
+        # `notes/./*.md` is `notes/*.md`: its file is checked, not reported as another spelling.
+        for raw, want in (("notes/./*.md", "notes/*.md"), ("a/.", "a"), ("./a/./b/", "a/b/"),
+                          (".\\a\\.\\b", "a/b"), ("a//./b", "a/b"), ("./", ""), (".", "")):
+            self.assertEqual(config.normalize_glob(raw), want, raw)
+        w = self.rules_ws(files='["notes/./*.md", "notes/."]')
+        _, out, _ = w.run("check")
+        self.assertNotIn("another spelling", out)
+        self.assertEqual([line.strip() for line in out.splitlines() if " × " in line],
+                         [self.HIT])
+
+    def test_an_absolute_entry_is_refused(self):
+        # `Path.glob` refuses one with a bare NotImplementedError; the load names the entry.
+        cases = [(key, value) for key in ("files", "exclude", "include_ignored")
+                 for value in ("/notes/*.md", "C:/x/*.md", r"C:\x\*.md", r"\\server\x",
+                               "./C:/x")]
+        for i, (key, value) in enumerate(cases):
+            with self.subTest(key=key, value=value):
+                files = f"['notes/*.md', '{value}']" if key == "files" else "['notes/*.md']"
+                listed = "" if key == "files" else f"{key} = ['{value}']\n"
+                (self.tmp / str(i)).mkdir()
+                w = Workspace(self.tmp / str(i), extra=f"""
+[checks.writing-rules]
+level = "error"
+files = {files}
+rules = [{self.RULE}]
+{listed}reasons = {{ exclude = "r" }}
+""")
+                code, _, err = w.run("check")
+                self.assertEqual(code, 2, err)
+                self.assertIn(f"[checks.writing-rules] {key}: '{value}' must be relative to "
+                              f"the governance root, not absolute", err)
+
+    def test_an_entry_that_names_no_path_is_refused(self):
+        for i, (key, value) in enumerate((("files", "./"), ("files", ""), ("exclude", "."),
+                                          ("include_ignored", ".//"))):
+            with self.subTest(key=key, value=value):
+                files = f'["notes/*.md", "{value}"]' if key == "files" else '["notes/*.md"]'
+                listed = "" if key == "files" else f'{key} = ["{value}"]\n'
+                (self.tmp / str(i)).mkdir()
+                w = Workspace(self.tmp / str(i), extra=f"""
+[checks.writing-rules]
+level = "error"
+files = {files}
+rules = [{self.RULE}]
+{listed}reasons = {{ exclude = "r" }}
+""")
+                code, _, err = w.run("check")
+                self.assertEqual(code, 2, err)
+                self.assertIn(f"[checks.writing-rules] {key}: '{value}' names no path", err)
+
+    def test_a_pattern_whose_matches_are_all_left_out_warns(self):
+        w = self.rules_ws(files='["notes/*.md", "*/draft.md", "build/**/*.md", "none/*.md"]')
+        self.git_ignoring(w, "scratch/\n")
+        w.write("scratch/draft.md", "colour\n")
+        w.write("build/a.md", "colour\n")
+        w.write("build/out/b.md", "colour\n")
+        code, out, _ = w.run("check")
+        self.assertIn("writing-rules: '*/draft.md' matched 1 file(s), all left out (gitignored) "
+                      f"— {self.INCLUDE}", out)
+        self.assertIn("writing-rules: 'build/**/*.md' matched 2 file(s), all left out "
+                      "(always excluded)", out)
+        self.assertNotIn("(always excluded) —", out)
+        self.assertNotIn("notes/*.md' matched", out)
+        self.assertNotIn("none/*.md", out)
+        self.assertEqual([line.strip() for line in out.splitlines() if " × " in line],
+                         [self.HIT])
+
+    def test_exclude_is_matched_as_a_glob_is(self):
+        # `**` spans any number of directories, none included; `*` stays inside one.
+        w = self.rules_ws(files='["**/*.md", "**/*.py"]',
+                          extra='exclude = ["**/fixtures/**", "engine/tests/*"]\n'
+                                'reasons = { exclude = "fixtures spell it both ways" }\n')
+        w.write("fixtures/a.md", "colour\n")
+        w.write("engine/tests/c.py", "colour = 1\n")
+        w.write("engine/tests/a/b.py", "colour = 1\n")
+        self.assertEqual(self.findings(w), [
+            "ERROR  engine/tests/a/b.py: 1 × 'colour' (use 'color')", self.HIT])
+
+    def test_exclude_is_case_sensitive_on_every_os(self):
+        w = self.rules_ws(extra='exclude = ["Notes/**"]\n'
+                                'reasons = { exclude = "fixtures spell it both ways" }\n')
+        self.assertEqual(self.findings(w), [self.HIT])
+
+    def test_exclude_without_a_reason_is_refused(self):
+        w = self.rules_ws(extra='exclude = ["engine/tests/**"]\n')
+        code, _, err = w.run("check")
+        self.assertEqual(code, 2)
+        self.assertIn("[checks.writing-rules] exclude adds 'engine/tests/**' — loosens past what "
+                      "the project inherits without a reason", err)
+
+
+class WritingRulesAllowMarker(Base):
+    """A line carrying `writing-rules: allow <text>[, <text>...]` keeps that spelling: a rule
+    whose `text` it names (in any case) is not counted on that line, the marker's own mention
+    included. Every other line, and every other rule on that line, is checked as before."""
+
+    RULES = ('[{ text = "colour", use = "color" }, '
+             '{ text = "licence", use = "license", ignore_case = true }]')
+
+    def rules_ws(self) -> Workspace:
+        return self.ws(extra=f"""
+[checks.writing-rules]
+level = "error"
+files = ["notes/*"]
+rules = {self.RULES}
+""")
+
+    def findings(self, w: Workspace) -> list[str]:
+        code, out, err = w.run("check")
+        self.assertNotEqual(code, 2, err)
+        return [line.strip() for line in out.splitlines() if " × " in line]
+
+    def test_the_marker_skips_the_named_text_on_its_line(self):
+        w = self.rules_ws()
+        w.write("notes/a.py", 'OLD = {"licences": "licenses"}  # writing-rules: allow Licence\n')
+        self.assertEqual(self.findings(w), [])
+
+    def test_the_same_text_on_the_next_line_still_flags(self):
+        w = self.rules_ws()
+        w.write("notes/a.py", 'OLD = "licence"  # writing-rules: allow licence\n'
+                              'NEW = "licence"\n')
+        self.assertEqual(self.findings(w), ["ERROR  notes/a.py: 1 × 'licence' (use 'license')"])
+
+    def test_another_rules_text_on_the_marked_line_still_flags(self):
+        w = self.rules_ws()
+        w.write("notes/a.py", 'OLD = "licence colour"  # writing-rules: allow licence\n')
+        self.assertEqual(self.findings(w), ["ERROR  notes/a.py: 1 × 'colour' (use 'color')"])
+
+    def test_several_texts_in_one_marker(self):
+        w = self.rules_ws()
+        w.write("notes/a.py", 'OLD = "licence colour"  # writing-rules: allow licence, colour\n')
+        self.assertEqual(self.findings(w), [])
+
+    def test_a_marker_in_an_html_comment_in_markdown(self):
+        w = self.rules_ws()
+        w.write("notes/a.md", "The old colour stays. <!-- writing-rules: allow colour -->\r\n"
+                              "A new colour does not.\r\n")
+        self.assertEqual(self.findings(w), ["ERROR  notes/a.md: 1 × 'colour' (use 'color')"])
+
+    def test_a_quoted_or_punctuated_text_and_any_case_keywords(self):
+        w = self.rules_ws()
+        w.write("notes/a.md", "A licence. <!-- writing-rules: allow licence. -->\n"
+                              "A licence. <!-- writing-rules: allow \"licence\" -->\n"
+                              "A licence. <!-- Writing-Rules: ALLOW `licence`; -->\n")
+        self.assertEqual(self.findings(w), [])
+
+    def test_allowing_a_text_no_rule_has_is_harmless(self):
+        w = self.rules_ws()
+        w.write("notes/a.md", "The colour. <!-- writing-rules: allow flavour -->\n")
+        self.assertEqual(self.findings(w), ["ERROR  notes/a.md: 1 × 'colour' (use 'color')"])
+
+
 class GenericChecks(Base):
     """Generic engine checks, each configured from config.toml rather than hard-coded."""
 
@@ -234,11 +658,11 @@ unwired = "the rule is unenforced"
         code, out, _ = w.run("check")
         self.assertEqual(code, 0, out)
 
-    def test_licences(self):
+    def test_licenses(self):
         w = self.ws(alpha_extra='role = "own"', extra="""
-[checks.licences]
+[checks.licenses]
 level = "error"
-conflicts = [{ a = { licences = ["MIT"] }, b = { licences = ["MIT"], roles = ["own"] }, decision = "W-9" }]
+conflicts = [{ a = { licenses = ["MIT"] }, b = { licenses = ["MIT"], roles = ["own"] }, decision = "W-9" }]
 """)
         code, out, _ = w.run("check")
         self.assertIn("W-9 is not a recorded decision", out)
@@ -262,6 +686,169 @@ setup_hint = "run ./bootstrap.sh"
     def test_generic_checks_are_off_until_configured(self):
         code, out, _ = self.ws().run("check")
         self.assertEqual(code, 0, out)
+
+
+class RenamedNamesStillLoad(Base):
+    """A name the engine has since respelled (the check `licences` is now `licenses`, the
+    registry fact `licence` is now `license`) still loads, read as the new name, with one
+    warning per place saying what to rename: an upgrade never turns a project red. Both
+    spellings in one place is an error, since neither can be read over the other."""
+
+    RENAMED = "(the old name still works; rename it)"
+
+    def load(self, w: Workspace) -> config.Config:
+        return config.load(w.root, w.home)
+
+    def test_an_old_check_id_runs_as_the_new_check(self):
+        w = self.ws(alpha_extra='role = "own"', extra="""
+[checks.licences]
+level = "error"
+conflicts = [{ a = { licences = ["MIT"] }, b = { licences = ["MIT"], roles = ["own"] }, decision = "W-9" }]
+""")
+        code, out, err = w.run("check")
+        self.assertIn("W-9 is not a recorded decision", out)
+        self.assertIn(f"warning: {CFG} [checks]: 'licences' is now 'licenses' {self.RENAMED}",
+                      err)
+        self.assertIn(f"warning: {CFG} [checks.licenses] conflicts: 'licences' is now "
+                      f"'licenses' {self.RENAMED}", err)
+        self.assertEqual(err.count("warning:"), 2, err)
+        s = self.load(w).checks["licenses"]
+        self.assertEqual((s.level, s.source["level"]), ("error", "project"))
+
+    def test_an_old_check_id_in_a_profile_loads_as_the_new_check(self):
+        prof = self.tmp / "prof"
+        prof.mkdir()
+        wtext(prof / "principles.toml", '[checks.licences]\nlevel = "warn"\n')
+        w = self.ws()
+        cfg = w.root / CFG
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(
+            "schema = 1", f'schema = 1\nprofile = "{prof.as_posix()}"', 1))
+        loaded = self.load(w)
+        s = loaded.checks["licenses"]
+        self.assertEqual((s.level, s.source["level"]), ("warn", "profile"))
+        self.assertEqual(loaded.warnings, [
+            f"profile {prof.as_posix()} (principles.toml) [checks]: 'licences' is now "
+            f"'licenses' {self.RENAMED}"])
+
+    def test_old_and_new_check_ids_together_are_an_error(self):
+        w = self.ws(extra='\n[checks.licences]\nlevel = "error"\n'
+                          '\n[checks.licenses]\nlevel = "warn"\n')
+        code, out, err = w.run("check")
+        self.assertEqual(code, 2, out + err)
+        self.assertIn(f"{CFG} [checks]: 'licences' and 'licenses' are both set", err)
+
+    def test_an_old_check_id_in_the_run_order_reads_as_the_new_one(self):
+        w = self.ws(extra='\n[checks]\nworkspace_order = ["licences"]\n')
+        loaded = self.load(w)
+        self.assertEqual(loaded.raw["checks"]["workspace_order"], ["licenses"])
+        self.assertEqual(loaded.warnings, [f"{CFG} [checks] workspace_order: 'licences' is now "
+                                           f"'licenses' {self.RENAMED}"])
+
+    def test_old_and_new_check_ids_in_one_run_order_are_an_error(self):
+        w = self.ws(extra='\n[checks]\nworkspace_order = ["licences", "licenses"]\n')
+        with self.assertRaisesRegex(config.ConfigError, r"\[checks\] workspace_order: "
+                                    r"'licences' and 'licenses' are both set"):
+            self.load(w)
+
+    def test_an_old_registry_fact_reads_as_the_new_one(self):
+        w = self.ws(extra='\n[checks.licenses]\nlevel = "error"\n')
+        reg = w.root / "projects.toml"
+        wtext(reg, reg.read_text(encoding="utf-8").replace('license = "MIT"', 'licence = "MIT"'))
+        beta = ('\n[[project]]\nname = "beta"\ndir = "beta"\ntier = "registered"\n'
+                'licence = "MIT"\n')
+        wtext(reg, reg.read_text(encoding="utf-8") + beta)
+        code, out, err = w.run("check")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f"warning: projects.toml (alpha, beta): 'licence' is now 'license' "
+                      f"{self.RENAMED}", err)
+        self.assertEqual(err.count("warning:"), 1, err)
+        wtext(reg, reg.read_text(encoding="utf-8").replace(beta, ""))
+        wtext(reg, reg.read_text(encoding="utf-8").replace('licence = "MIT"', ""))
+        code, out, _ = w.run("check")
+        self.assertIn("alpha: no license declared", out)
+
+    def test_an_entry_with_both_registry_facts_is_an_error(self):
+        w = self.ws()
+        reg = w.root / "projects.toml"
+        wtext(reg, reg.read_text(encoding="utf-8").replace(
+            'license = "MIT"', 'license = "MIT"\nlicence = "MIT"'))
+        code, out, err = w.run("check")
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("projects.toml (alpha): 'licence' and 'license' are both set", err)
+
+    def test_an_old_registry_keys_mapping_reads_as_the_new_one(self):
+        w = self.ws(extra='\n[checks.licenses]\nlevel = "error"\n')
+        cfg, reg = w.root / CFG, w.root / "projects.toml"
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(
+            'handoff = "profile.handoff"', 'handoff = "profile.handoff"\nlicence = "profile.lic"'))
+        wtext(reg, reg.read_text(encoding="utf-8").replace('license = "MIT"\n', "").replace(
+            "[project.profile]\n", '[project.profile]\nlic = "MIT"\n'))
+        code, out, err = w.run("check")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f"warning: {CFG} [registry.keys]: 'licence' is now 'license' "
+                      f"{self.RENAMED}", err)
+
+    def test_a_registry_that_keeps_the_old_name_maps_it_without_a_warning(self):
+        # A registry file other tools read too keeps `licence` by saying where the fact lives.
+        w = self.ws(extra='\n[checks.licenses]\nlevel = "error"\n')
+        cfg, reg = w.root / CFG, w.root / "projects.toml"
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(
+            'handoff = "profile.handoff"', 'handoff = "profile.handoff"\nlicense = "licence"'))
+        wtext(reg, reg.read_text(encoding="utf-8").replace('license = "MIT"', 'licence = "MIT"'))
+        code, out, err = w.run("check")
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn("warning:", err)
+
+    def test_an_old_registry_keys_mapping_still_serves_the_old_name(self):
+        # Required under the old name, mapped under the old name: both read the one fact.
+        w = self.ws(extra='\n[checks.registry]\nrequired_keys = ["name", "dir", "tier", '
+                          '"licence"]\n')
+        cfg, reg = w.root / CFG, w.root / "projects.toml"
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(
+            'handoff = "profile.handoff"', 'handoff = "profile.handoff"\nlicence = "profile.lic"'))
+        wtext(reg, reg.read_text(encoding="utf-8").replace('license = "MIT"\n', "").replace(
+            "[project.profile]\n", '[project.profile]\nlic = "MIT"\n'))
+        code, out, err = w.run("check")
+        self.assertEqual(code, 0, out + err)
+        ctx = cli.load_context(w.root, "govern")
+        self.assertEqual(ctx.registry.scopes[0].get("licence"), "MIT")
+
+    def test_a_word_that_is_only_an_old_fact_name_is_not_a_check_id(self):
+        # `licence` was a registry fact, never a check: as a check id it is an unknown name.
+        w = self.ws(extra='\n[checks]\nworkspace_order = ["licence"]\n')
+        with self.assertRaisesRegex(config.ConfigError, "names 'licence', which is not a "
+                                                        "registered check"):
+            self.load(w)
+
+    def test_an_old_fact_name_in_a_conflict_side_is_left_as_written(self):
+        w = self.ws(extra='\n[checks.licenses]\nconflicts = [{ a = { licence = ["MIT"] }, '
+                          'b = { licenses = ["MIT"] }, decision = "W-9" }]\n')
+        loaded = self.load(w)
+        self.assertEqual(loaded.warnings, [])
+        self.assertEqual(loaded.checks["licenses"].params["conflicts"][0]["a"],
+                         {"licence": ["MIT"]})
+
+    def test_explain_and_record_accept_the_old_check_id(self):
+        w = self.ws()
+        code, out, err = w.run("explain", "licences")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out, w.run("explain", "licenses")[1])
+        self.assertIn("warning: explain: 'licences' is now 'licenses'", err)
+        wtext(w.root / layout.MANIFEST, 'engine = "0.5.0"\ninstalled = "2026-09-23"\n')
+        code, out, err = w.run("options", "--record", "licences")
+        self.assertEqual(code, 0, err)
+        self.assertIn("recorded as answered: licenses", out)
+        self.assertIn("warning: options --record: 'licences' is now 'licenses'", err)
+
+    def test_an_old_registry_fact_in_required_when_reads_as_the_new_one(self):
+        w = self.ws()
+        cfg = w.root / CFG
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(
+            "[projects]\n", '[projects]\nrequired_when = [{ key = "licence", docs = ["NOTICE"] }]\n', 1))
+        loaded = self.load(w)
+        self.assertEqual(loaded.raw["projects"]["required_when"][0]["key"], "license")
+        self.assertEqual(loaded.warnings, [f"{CFG} [projects] required_when[0] key: 'licence' is "
+                                           f"now 'license' {self.RENAMED}"])
 
 
 class Extensions(Base):
@@ -624,6 +1211,17 @@ class Config(Base):
     def test_unknown_key_rejected(self):
         code, _, err = self.ws(extra="\n[checks.decision-log]\nmax_wrods = 5\n").run("check")
         self.assertEqual(code, 2)
+
+    def test_a_retired_key_is_named_no_longer_used(self):
+        w = self.ws()
+        cfg = w.root / CFG
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(
+            "[blocks]\n", '[blocks]\nplaceholder = "_Run index._"\n', 1))
+        code, _, err = w.run("check")
+        self.assertEqual(code, 2)
+        self.assertIn(f"{CFG}: [blocks] placeholder is no longer used (it was never read): "
+                      f"remove it", err)
+        self.assertNotIn("unknown key", err)
 
     def test_loosening_needs_a_reason(self):
         # agents.max_turns is excluded from this test: its engine default (0) means no ceiling,
@@ -1208,6 +1806,182 @@ class InstallReportAndUpgrade(Base):
         self.assertIn(f"upgraded context-gate {__version__} -> {newer}", res.stdout)
 
 
+class UpgradeRefreshesBlocks(Base):
+    """An upgrade regenerates every generated block with the engine it pins, so it never turns a
+    project red: a doc under a nested `build/` that 0.4.1 governed (its excludes matched only at
+    the top) is left out now, and the doc registry 0.4.1 wrote would otherwise read as stale."""
+
+    @staticmethod
+    def _top_level_only(rel: str):
+        """0.4.1's rule: an always-excluded directory matched only at the top."""
+        from fnmatch import fnmatch
+        from govern.context import ALWAYS_EXCLUDED_DIRS
+        return next((f"{d}/**" for d in ALWAYS_EXCLUDED_DIRS if fnmatch(rel, f"{d}/**")), None)
+
+    def test_a_doc_under_a_nested_build_dir_upgrades_green(self):
+        from unittest import mock
+        w = self.ws()
+        cfg_text = (w.root / CFG).read_text(encoding="utf-8").replace(
+            'project = [{ file = "DECISIONS.md", id = "decision-index" }]',
+            'project = [{ file = "DECISIONS.md", id = "decision-index" },\n'
+            '           { file = "INDEX.md", id = "doc-registry" }]').replace(
+            f'engine = "{__version__}"', f'engine = "{SERIES}"')
+        cfg = self.tmp / "config.toml"
+        wtext(cfg, cfg_text)
+        (w.root / CFG).unlink()
+        (w.root / layout.GOV_DIR).rmdir()
+        w.write("projects/alpha/INDEX.md", fm() + "# Index\n\n"
+                "<!-- t:generated:start id=doc-registry -->\n"
+                "<!-- t:generated:end id=doc-registry -->\n")
+        w.write("projects/alpha/sub/build/notes.md", fm("reference") + "# Notes\n")
+        with mock.patch("govern.context.default_exclude", self._top_level_only), \
+                contextlib.redirect_stdout(io.StringIO()):
+            installer.main(["install", "--root", str(w.root), "--config", str(cfg),
+                            "--no-report"])
+            w.run("index")
+            code, out, _ = w.run("check")
+        self.assertEqual(code, 0, out)                          # green on the old rule
+        self.assertIn("sub/build/notes.md", (w.root / "projects/alpha/INDEX.md")
+                      .read_text(encoding="utf-8"))
+        code, out, _ = w.run("check")
+        self.assertIn("generated block 'doc-registry' is stale", out)   # what upgrade must fix
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = installer.main(["upgrade", "--root", str(w.root), "--no-report"])
+        self.assertEqual(code, 0, buf.getvalue())
+        self.assertIn("  index        1 block(s) refreshed", buf.getvalue())
+        code, out, _ = w.run("check")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("sub/build/notes.md", (w.root / "projects/alpha/INDEX.md")
+                         .read_text(encoding="utf-8"))
+
+    def _installed(self) -> Workspace:
+        w = self.ws()
+        cfg = self.tmp / "config.toml"
+        wtext(cfg, (w.root / CFG).read_text(encoding="utf-8").replace(
+            f'engine = "{__version__}"', f'engine = "{SERIES}"'))
+        (w.root / CFG).unlink()
+        (w.root / layout.GOV_DIR).rmdir()
+        with contextlib.redirect_stdout(io.StringIO()):
+            installer.main(["install", "--root", str(w.root), "--config", str(cfg),
+                            "--no-report"])
+        return w
+
+    def test_a_tool_file_that_cannot_be_written_rolls_everything_back(self):
+        # The first tool file is written, the next fails: the written one is put back too.
+        from unittest import mock
+        w = self._installed()
+        gov = w.root / layout.GOV_DIR
+        before = {p: p.read_bytes() for p in sorted(w.root.rglob("*")) if p.is_file()
+                  and ".git" not in p.parts}
+        def partial(dest_dir):
+            (dest_dir / installer.TOOL_FILES[0]).write_bytes(b"half an upgrade\n")
+            raise PermissionError(13, "Permission denied",
+                                  str(dest_dir / installer.TOOL_FILES[-1]))
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(installer, "_write_tool_files", side_effect=partial), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = installer.main(["upgrade", "--root", str(w.root), "--no-report"])
+        self.assertEqual(code, 2)
+        self.assertIn("upgrade rolled back:", err.getvalue())
+        self.assertIn("Permission denied — nothing was changed", err.getvalue())
+        after = {p: p.read_bytes() for p in sorted(w.root.rglob("*")) if p.is_file()
+                 and ".git" not in p.parts}
+        self.assertEqual(after, before)
+        self.assertIn(f'engine = "{SERIES}"', (w.root / CFG).read_text(encoding="utf-8"))
+        self.assertTrue((gov / installer.TOOL_FILES[0]).is_file())
+
+    def test_a_tool_file_that_cannot_be_put_back_is_named(self):
+        from unittest import mock
+        w = self._installed()
+        def failing(dest_dir):
+            (dest_dir / installer.TOOL_FILES[0]).write_bytes(b"half an upgrade\n")
+            raise PermissionError(13, "Permission denied")
+        real = Path.write_bytes
+        def no_restore(self, data):
+            if self.parent.name == "bin" and data != b"half an upgrade\n":
+                raise PermissionError(13, "Permission denied")
+            return real(self, data)
+        err = io.StringIO()
+        with mock.patch.object(installer, "_write_tool_files", side_effect=failing), \
+                mock.patch.object(Path, "write_bytes", no_restore), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            code = installer.main(["upgrade", "--root", str(w.root), "--no-report"])
+        self.assertEqual(code, 2)
+        self.assertNotIn("nothing was changed", err.getvalue())
+        self.assertIn(f"but {layout.GOV_DIR}/{installer.TOOL_FILES[0]} could not be put back",
+                      err.getvalue())
+        self.assertIn(f'engine = "{SERIES}"', (w.root / CFG).read_text(encoding="utf-8"))
+
+    def test_the_pin_rewrite_changes_only_the_pin_line(self):
+        # A CRLF config: the upgrade rewrites the pin and nothing else, byte for byte.
+        w = self.ws()
+        cfg = self.tmp / "config.toml"
+        wtext(cfg, (w.root / CFG).read_text(encoding="utf-8").replace(
+            f'engine = "{__version__}"', f'engine = "{SERIES}"'))
+        (w.root / CFG).unlink()
+        (w.root / layout.GOV_DIR).rmdir()
+        with contextlib.redirect_stdout(io.StringIO()):
+            installer.main(["install", "--root", str(w.root), "--config", str(cfg),
+                            "--no-report"])
+        text = (w.root / CFG).read_text(encoding="utf-8")
+        before = text.replace("\n", "\r\n").encode("utf-8")
+        (w.root / CFG).write_bytes(before)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = installer.main(["upgrade", "--root", str(w.root), "--no-report"])
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertEqual((w.root / CFG).read_bytes(), before.replace(
+            f'engine = "{SERIES}"\r\n'.encode(), f'engine = "{__version__}"\r\n'.encode()))
+
+    def test_a_config_that_does_not_load_is_restored_byte_for_byte(self):
+        # CRLF line endings survive the rollback: the original bytes return, not a re-encoded
+        # copy of the text.
+        w = self.ws()
+        cfg = self.tmp / "config.toml"
+        wtext(cfg, (w.root / CFG).read_text(encoding="utf-8").replace(
+            f'engine = "{__version__}"', f'engine = "{SERIES}"'))
+        (w.root / CFG).unlink()
+        (w.root / layout.GOV_DIR).rmdir()
+        with contextlib.redirect_stdout(io.StringIO()):
+            installer.main(["install", "--root", str(w.root), "--config", str(cfg),
+                            "--no-report"])
+        text = (w.root / CFG).read_text(encoding="utf-8").replace(
+            "[blocks]\n", '[blocks]\nplaceholder = "x"\n', 1)
+        original = text.replace("\n", "\r\n").encode("utf-8")
+        (w.root / CFG).write_bytes(original)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = installer.main(["upgrade", "--root", str(w.root), "--no-report"])
+        self.assertNotEqual(code, 0, out.getvalue())
+        self.assertIn("upgrade rolled back", err.getvalue())
+        self.assertIn("[blocks] placeholder is no longer used", err.getvalue())
+        self.assertEqual((w.root / CFG).read_bytes(), original)
+
+    def test_an_unreadable_doc_rolls_the_upgrade_back_and_changes_nothing(self):
+        w = self.ws()
+        cfg = self.tmp / "config.toml"
+        wtext(cfg, (w.root / CFG).read_text(encoding="utf-8").replace(
+            f'engine = "{__version__}"', f'engine = "{SERIES}"'))
+        (w.root / CFG).unlink()
+        (w.root / layout.GOV_DIR).rmdir()
+        with contextlib.redirect_stdout(io.StringIO()):
+            installer.main(["install", "--root", str(w.root), "--config", str(cfg),
+                            "--no-report"])
+        log = w.root / "projects/alpha/DECISIONS.md"
+        log.write_bytes(log.read_bytes() + b"\xff\xfe not UTF-8\n")   # the block's own file
+        gov = w.root / layout.GOV_DIR
+        before = {p: p.read_bytes() for p in sorted(gov.rglob("*")) if p.is_file()}
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = installer.main(["upgrade", "--root", str(w.root), "--no-report"])
+        self.assertNotEqual(code, 0, out.getvalue())
+        self.assertIn("projects/alpha/DECISIONS.md: not valid UTF-8", err.getvalue())
+        self.assertIn("nothing was changed", err.getvalue())
+        after = {p: p.read_bytes() for p in sorted(gov.rglob("*")) if p.is_file()}
+        self.assertEqual(after, before)             # config.toml and installed.toml included
+
+
 class UpgradeReportAndPluginOptIn(Base):
     """The upgrade report when both runs used one engine, the report's settings format, and the
     plugin opt-in recorded on install and reversed on uninstall."""
@@ -1239,6 +2013,105 @@ class UpgradeReportAndPluginOptIn(Base):
         self.assertIn(f"Both runs used engine {__version__}", rep)
         self.assertNotIn("## What changed in the engine", rep)   # same engine: nothing new
         self.assertIn(f"| Engine | {__version__} | {__version__} |", rep)
+
+    def test_upgrade_lists_new_options_and_keeps_the_answered_ones(self):
+        # The merged upgrade: blocks refreshed, then the report with the options not yet
+        # answered; the install record's answers survive the manifest rewrite.
+        from govern import options
+        w, cfg = self.project()
+        with contextlib.redirect_stdout(io.StringIO()):
+            installer.main(["install", "--root", str(w.root), "--config", str(cfg), "--no-report"])
+        first, *rest = options.ids()
+        options.record(w.root, [first])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(installer.main(["upgrade", "--root", str(w.root)]), 0)
+        self.assertEqual(options.answered(w.root), {first})
+        self.assertIn("  index        ", out.getvalue())
+        self.assertIn(f"  options      {len(rest)} to review: {', '.join(rest)}", out.getvalue())
+        rep = (w.root / layout.GOV_DIR / "upgrade-report.md").read_text(encoding="utf-8")
+        section = rep[rep.index("## New options"):rep.index("## New findings")]
+        self.assertNotIn(f"`{first}`", section)
+        for cid in rest:
+            self.assertIn(f"`{cid}`", section)
+
+    def test_a_list_valued_registry_license_never_breaks_options_or_upgrade(self):
+        w, cfg = self.project()
+        reg = w.root / "projects.toml"
+        wtext(reg, reg.read_text(encoding="utf-8").replace(
+            'license = "MIT"', 'license = ["MIT", "Apache-2.0"]')
+            + '\n[[project]]\nname = "beta"\ndir = "beta"\ntier = "registered"\n'
+              'license = "GPL-3.0"\n')
+        with contextlib.redirect_stdout(io.StringIO()):
+            installer.main(["install", "--root", str(w.root), "--config", str(cfg), "--no-report"])
+        code, out, err = w.run("options", "--json")
+        self.assertEqual(code, 0, err)
+        lic = next(o for o in json.loads(out) if o["id"] == "licenses")
+        self.assertEqual(lic["suggestion"],
+                         "2 registry entries; licenses: GPL-3.0, MIT + Apache-2.0")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(installer.main(["upgrade", "--root", str(w.root)]), 0)
+        self.assertIn("## New options", (w.root / layout.GOV_DIR / "upgrade-report.md")
+                      .read_text(encoding="utf-8"))
+
+    def test_an_upgrade_from_the_old_check_name_stays_green_and_reports_the_rename(self):
+        # A project written for 0.4.1, when the check was `licences`: the old gate (a stand-in
+        # engine that reports nothing) passed, the upgrade passes, and the report names the
+        # rename as a new finding, so the project sees what to rename.
+        w = self.ws(extra='\n[checks.licences]\nlevel = "error"\n')
+        cfg = self.tmp / "config.toml"
+        shutil.move(str(w.root / CFG), str(cfg))
+        (w.root / layout.GOV_DIR).rmdir()
+        old = layout.engines_dir(w.home) / "0.4.1" / "govern"
+        old.mkdir(parents=True)
+        wtext(old / "__init__.py", '__version__ = "0.4.1"\n')
+        wtext(old / "cli.py", "def main(root=None, prog=None):\n    return 0\n")
+        old_home = os.environ.get("HOME")
+        os.environ["HOME"] = str(w.home)
+        self.addCleanup(lambda: os.environ.__setitem__("HOME", old_home) if old_home
+                        else os.environ.pop("HOME", None))
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(installer.main(["install", "--root", str(w.root), "--config",
+                                             str(cfg), "--no-report"]), 0)
+        pinned = w.root / CFG
+        wtext(pinned, pinned.read_text(encoding="utf-8").replace(
+            f'engine = "{__version__}"', 'engine = "0.4.1"'))
+        said = ("'licences' is now 'licenses' (the old name still works; rename it)")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(installer.main(["upgrade", "--root", str(w.root)]), 0,
+                             err.getvalue())
+        self.assertIn(said, err.getvalue())
+        rep = (w.root / layout.GOV_DIR / "upgrade-report.md").read_text(encoding="utf-8")
+        self.assertIn(f"- **warn** {CFG} [checks]: {said}", rep[rep.index("## New findings"):])
+        code, out, _ = w.run("check")
+        self.assertEqual(code, 0, out)
+
+    def test_load_warnings_are_said_and_read_as_unchanged_by_the_upgrade_report(self):
+        # The old gate prints `warning: ...` for a docs entry it can never govern, and the
+        # report reads that line as a finding: the new side counts the same warning, so it is
+        # unchanged, never "no longer reported". Install and upgrade say it too.
+        w, cfg = self.project()
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(
+            f'engine = "{__version__}"', f'engine = "{SERIES}"').replace(
+            "[projects]\n", '[projects]\ndocs = ["**/*.md", ".claude/x.md"]\n', 1))
+        shutil.copytree(ENGINE / "govern", layout.engines_dir(w.home) / __version__ / "govern",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        old_home = os.environ.get("HOME")
+        os.environ["HOME"] = str(w.home)
+        self.addCleanup(lambda: os.environ.__setitem__("HOME", old_home) if old_home
+                        else os.environ.pop("HOME", None))
+        said = "warning: [projects] docs entry '.claude/x.md' is never governed"
+        for argv in (["install", "--root", str(w.root), "--config", str(cfg), "--no-report"],
+                     ["upgrade", "--root", str(w.root)]):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                self.assertEqual(installer.main(argv), 0, err.getvalue())
+            self.assertEqual(err.getvalue().count(said), 1, argv[0])
+        self.assertIn(" 0 no longer reported", out.getvalue())
+        rep = (w.root / layout.GOV_DIR / "upgrade-report.md").read_text(encoding="utf-8")
+        self.assertNotIn(".claude/x.md", rep[rep.index("## New findings"):])
 
     def test_report_settings_use_explain_format(self):
         w, cfg = self.project()
@@ -1429,71 +2302,101 @@ class Standard(Base):
         code, out, _ = w.run("check")
         self.assertNotIn("differs from the standard", out)
 
+    def unreasoned(self, w: Workspace, extra: str = "") -> None:
+        """Take away the fixture's `reasons.statuses`, so its re-allowed 'superseded' is a
+        widening with no reason; `extra` goes in the same [checks.decision-log] table."""
+        cfg = w.root / CFG
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(REASON_LINE, extra))
+
     def test_widened_list_names_only_the_loosening_side(self):
         # The fixture's own [checks.decision-log] re-allows 'superseded':
-        # statuses = ["locked", "provisional", "superseded"], no reason. It also drops
-        # 'deferred', which tightens — a tightening must never be named as loosening.
+        # statuses = ["locked", "provisional", "superseded"]. It also drops 'deferred', which
+        # tightens — a tightening must never be named as loosening.
         w = self.ws()
-        code, out, _ = w.run("check")
-        self.assertIn("[checks.decision-log] statuses adds 'superseded' — loosens past what "
-                      "the project inherits with no reason (say why in reasons.statuses)",
-                      out)
-        self.assertNotIn("deferred", out)
+        self.unreasoned(w)
+        code, _, err = w.run("check")
+        self.assertEqual(code, 2)
+        self.assertIn("project: [checks.decision-log] statuses adds 'superseded' — loosens past "
+                      "what the project inherits without a reason: say why in "
+                      "[checks.decision-log.reasons] statuses, or keep the inherited list", err)
+        self.assertNotIn("deferred", err)
         wtext(w.root / CFG, (w.root / CFG).read_text(encoding="utf-8").replace(
             'statuses = ["locked", "provisional", "superseded"]',
             'statuses = ["locked", "provisional", "superseded"]\n\n[checks.decision-log.reasons]'
             '\nstatuses = "our older entries predate the standard"'))
-        code, out, _ = w.run("check")
-        self.assertNotIn("statuses adds", out)
+        code, out, err = w.run("check")
+        self.assertNotEqual(code, 2, err)
+        self.assertNotIn("statuses adds", out + err)
 
     def test_table_reason_does_not_silence_a_list_loosening(self):
         # A reason written for one setting (max_words) must never silently excuse another
         # (statuses re-allowing 'superseded') — only a per-setting reasons.statuses does.
         w = self.ws()
-        cfg = w.root / CFG
-        wtext(cfg, cfg.read_text(encoding="utf-8").replace(
-            'statuses = ["locked", "provisional", "superseded"]',
-            'statuses = ["locked", "provisional", "superseded"]\n'
-            'max_words = 400\nreason = "measured elsewhere"'))
-        code, out, _ = w.run("check")
-        self.assertIn("[checks.decision-log] statuses adds 'superseded'", out)
-        wtext(cfg, cfg.read_text(encoding="utf-8").replace(
+        self.unreasoned(w, 'max_words = 400\nreason = "measured elsewhere"\n')
+        code, _, err = w.run("check")
+        self.assertEqual(code, 2)
+        self.assertIn("[checks.decision-log] statuses adds 'superseded'", err)
+        wtext(w.root / CFG, (w.root / CFG).read_text(encoding="utf-8").replace(
             'reason = "measured elsewhere"',
             'reason = "measured elsewhere"\n\n[checks.decision-log.reasons]\n'
             'statuses = "our older entries predate the standard"'))
-        code, out, _ = w.run("check")
-        self.assertNotIn("statuses adds", out)
+        code, out, err = w.run("check")
+        self.assertNotEqual(code, 2, err)
+        self.assertNotIn("statuses adds", out + err)
 
     def test_emptied_required_list_needs_a_reason(self):
         w = self.ws(extra='required_fields = ["Rule"]\n')
-        code, out, _ = w.run("check")
-        self.assertIn("[checks.decision-log] required_fields drops 'Why' — loosens past what "
-                      "the project inherits with no reason (say why in reasons.required_fields)",
-                      out)
+        code, _, err = w.run("check")
+        self.assertEqual(code, 2)
+        self.assertIn("project: [checks.decision-log] required_fields drops 'Why' — loosens "
+                      "past what the project inherits without a reason: say why in "
+                      "[checks.decision-log.reasons] required_fields", err)
         wtext(w.root / CFG, (w.root / CFG).read_text(encoding="utf-8").replace(
             'required_fields = ["Rule"]',
             'required_fields = ["Rule"]\nreason = "traps carry no Why field"'))
-        code, out, _ = w.run("check")
-        self.assertIn("required_fields drops", out)   # a table-level reason no longer covers it
+        code, _, err = w.run("check")
+        self.assertIn("required_fields drops", err)   # a table-level reason does not cover it
         wtext(w.root / CFG, (w.root / CFG).read_text(encoding="utf-8").replace(
-            'reason = "traps carry no Why field"',
-            'reason = "traps carry no Why field"\n\n[checks.decision-log.reasons]\n'
-            'required_fields = "traps carry no Why field"'))
-        code, out, _ = w.run("check")
-        self.assertNotIn("required_fields drops", out)
+            REASON_LINE, 'reasons = { statuses = "older entries predate the standard", '
+                         'required_fields = "traps carry no Why field" }\n'))
+        code, out, err = w.run("check")
+        self.assertNotEqual(code, 2, err)
+        self.assertNotIn("required_fields drops", out + err)
 
     def test_emptying_an_anything_goes_list_needs_a_reason(self):
         w = self.ws(extra='\n[checks.doc-frontmatter]\nworking_statuses = []\n')
-        code, out, _ = w.run("check")
-        self.assertIn("[checks.doc-frontmatter] working_statuses drops 'active', 'held', "
-                      "'planned', 'complete', 'superseded' — loosens past what the project "
-                      "inherits with no reason (say why in reasons.working_statuses)", out)
+        code, _, err = w.run("check")
+        self.assertEqual(code, 2)
+        self.assertIn("project: [checks.doc-frontmatter] working_statuses drops 'active', "
+                      "'held', 'planned', 'complete', 'superseded' — loosens past what the "
+                      "project inherits without a reason", err)
         wtext(w.root / CFG, (w.root / CFG).read_text(encoding="utf-8").replace(
             "working_statuses = []",
             'working_statuses = []\n\n[checks.doc-frontmatter.reasons]\n'
             'working_statuses = "this project writes free-text status notes"'))
-        code, out, _ = w.run("check")
-        self.assertNotIn("working_statuses drops", out)
+        code, out, err = w.run("check")
+        self.assertNotEqual(code, 2, err)
+        self.assertNotIn("working_statuses drops", out + err)
+
+    def test_every_widened_list_of_a_check_is_named_at_once(self):
+        w = self.ws()
+        self.unreasoned(w, 'required_fields = ["Rule"]\n')
+        code, _, err = w.run("check")
+        self.assertEqual(code, 2)
+        self.assertIn("statuses adds 'superseded'", err)
+        self.assertIn("required_fields drops 'Why'", err)
+
+    def test_without_require_reasons_a_widened_list_is_a_warning(self):
+        w = self.ws()
+        self.unreasoned(w)
+        cfg = w.root / CFG
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(
+            "schema = 1", "schema = 1\nrequire_reasons = false", 1))
+        code, out, err = w.run("check")
+        self.assertNotEqual(code, 2, err)
+        self.assertIn("config: [checks.decision-log] statuses adds 'superseded' — loosens past "
+                      "what the project inherits with no reason (say why in reasons.statuses)",
+                      out)
 
     def test_repo_alias_and_default_subcommand(self):
         w = self.ws()
@@ -1863,17 +2766,19 @@ class DecisionHistory(Base):
         # loosening.
         w = self.ws(extra='\n[checks.decision-history]\n'
                           'labels = ["Earlier", "Previously", "Formerly", "Was"]\n')
-        code, out, _ = w.run("check")
-        self.assertIn("[checks.decision-history] labels drops 'Superseded' — loosens past what "
-                      "the project inherits with no reason (say why in reasons.labels)",
-                      out)
+        code, _, err = w.run("check")
+        self.assertEqual(code, 2)
+        self.assertIn("project: [checks.decision-history] labels drops 'Superseded' — loosens "
+                      "past what the project inherits without a reason: say why in "
+                      "[checks.decision-history.reasons] labels", err)
         wtext(w.root / CFG, (w.root / CFG).read_text(encoding="utf-8").replace(
             'labels = ["Earlier", "Previously", "Formerly", "Was"]',
             'labels = ["Earlier", "Previously", "Formerly", "Was"]\n\n'
             '[checks.decision-history.reasons]\n'
             'labels = "\'Superseded\' collides with our status of the same name"'))
-        code, out, _ = w.run("check")
-        self.assertNotIn("labels drops", out)
+        code, out, err = w.run("check")
+        self.assertNotEqual(code, 2, err)
+        self.assertNotIn("labels drops", out + err)
 
 
 class ProfileLayer(Base):
@@ -1929,35 +2834,106 @@ extend_rules = [{ text = "monster", use = "mob", level = "warn" }]
         prof = self.make_profile(self.tmp / "prof", '[checks.decision-log]\nstatuses = '
                                  '["locked"]\nreason = "profile default"\n')
         w = self.with_profile(prof.as_posix())
-        code, out, _ = w.run("check")
-        self.assertIn("[checks.decision-log] statuses adds", out)
-        self.assertIn("'provisional'", out)
-        self.assertIn("'superseded'", out)
+        cfg = w.root / CFG
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(REASON_LINE, ""))
+        code, _, err = w.run("check")
+        self.assertEqual(code, 2)
+        self.assertIn("project: [checks.decision-log] statuses adds 'provisional', 'superseded'",
+                      err)
 
     def test_list_widening_is_silent_when_the_project_matches_the_profile(self):
         prof = self.make_profile(self.tmp / "prof", '[checks.decision-log]\nstatuses = '
                                  '["locked", "provisional", "superseded"]\n'
-                                 'reason = "profile default"\n')
+                                 'reasons = { statuses = "profile default" }\n')
         w = self.with_profile(prof.as_posix())
-        code, out, _ = w.run("check")
-        self.assertNotIn("statuses adds", out)
+        cfg = w.root / CFG
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(REASON_LINE, ""))
+        code, out, err = w.run("check")
+        self.assertNotEqual(code, 2, err)
+        self.assertNotIn("statuses adds", out + err)
 
     def test_list_widening_reports_once_not_also_as_a_profile_override(self):
-        # A project loosening a list its profile set, with no reason, gets the list message
-        # naming the values — not also the generic "overrides the profile" warning (one
-        # warning per override).
+        # Under require_reasons = false, a project loosening a list its profile set gets the
+        # list message naming the values — not also the generic "overrides the profile"
+        # warning (one warning per override).
         prof = self.make_profile(self.tmp / "prof", '[checks.decision-log]\nstatuses = '
                                  '["locked"]\nreason = "profile default"\n')
         w = self.with_profile(prof.as_posix())
+        cfg = w.root / CFG
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(REASON_LINE, "").replace(
+            "schema = 1", "schema = 1\nrequire_reasons = false", 1))
         code, out, _ = w.run("check")
-        self.assertIn("[checks.decision-log] statuses adds", out)
+        self.assertIn("config: [checks.decision-log] statuses adds", out)
         self.assertNotIn("statuses overrides the profile with no reason", out)
+
+    def test_a_profile_widening_a_list_needs_a_reason_in_either_direction(self):
+        # Each is a loosening past the engine standard, refused in the profile as in a project:
+        # a value added (looser "more"), a value removed (looser "fewer"), a list emptied where
+        # empty means anything goes.
+        cases = {
+            "adding": ('[checks.decision-log]\nstatuses = ["locked", "provisional", "deferred", '
+                       '"superseded"]\n', "[checks.decision-log] statuses adds 'superseded'",
+                       '[checks.decision-log.reasons]\nstatuses = "old logs"\n'),
+            "removing": ('[checks.decision-history]\nlabels = ["Earlier"]\n',
+                         "[checks.decision-history] labels drops 'Previously', 'Formerly', "
+                         "'Superseded', 'Was'",
+                         '[checks.decision-history.reasons]\nlabels = "one label here"\n'),
+            "emptying": ('[checks.doc-frontmatter]\nworking_statuses = []\n',
+                         "[checks.doc-frontmatter] working_statuses drops 'active', 'held', "
+                         "'planned', 'complete', 'superseded'",
+                         '[checks.doc-frontmatter.reasons]\nworking_statuses = "free text"\n'),
+        }
+        for name, (table, finding, reasons) in cases.items():
+            with self.subTest(name):
+                prof = self.make_profile(self.tmp / f"prof-{name}", table)
+                (self.tmp / name).mkdir()
+                w = Workspace(self.tmp / name)
+                cfg = w.root / CFG
+                wtext(cfg, cfg.read_text(encoding="utf-8").replace(
+                    "schema = 1", f'schema = 1\nprofile = "{prof.as_posix()}"', 1))
+                code, _, err = w.run("check")
+                self.assertEqual(code, 2)
+                self.assertIn(f"profile {prof.as_posix()} (principles.toml): {finding} — "
+                              f"loosens past the engine standard without a reason: say why "
+                              f"under [checks.", err)
+                self.assertIn("in the profile's principles.toml (a pinned profile: then tag "
+                              "it and move the project's pin)", err)
+                wtext(prof / "principles.toml", table + reasons)
+                code, _, err = w.run("check")
+                self.assertNotEqual(code, 2, err)
 
     def test_profile_may_not_set_layout(self):
         prof = self.make_profile(self.tmp / "prof", "[projects]\ndocs = []\n")
         code, _, err = self.with_profile(prof.as_posix()).run("check")
         self.assertEqual(code, 2)
         self.assertIn("a profile holds [checks.*] and [dialect] only", err)
+
+    def test_a_profile_dialect_value_is_checked_against_its_choices(self):
+        prof = self.make_profile(self.tmp / "prof", '[dialect]\nagent_turns_prose = "never"\n')
+        code, _, err = self.with_profile(prof.as_posix()).run("check")
+        self.assertEqual(code, 2)
+        self.assertIn(f"profile {prof.as_posix()} (principles.toml): [dialect] agent_turns_prose "
+                      f"= 'never' is not one of ('forbid', 'must-match')", err)
+
+    def test_an_unknown_profile_dialect_key_names_the_profile(self):
+        prof = self.make_profile(self.tmp / "prof", '[dialect]\nheading_style = "x"\n')
+        code, _, err = self.with_profile(prof.as_posix()).run("check")
+        self.assertEqual(code, 2)
+        self.assertIn(f"profile {prof.as_posix()} (principles.toml): unknown [dialect] key "
+                      f"'heading_style'", err)
+
+    def test_a_profile_dialect_value_of_the_wrong_type_is_named(self):
+        prof = self.make_profile(self.tmp / "prof", "[dialect]\nmarkers = 3\n")
+        code, _, err = self.with_profile(prof.as_posix()).run("check")
+        self.assertEqual(code, 2)
+        self.assertIn(f"profile {prof.as_posix()} (principles.toml): [dialect] markers: "
+                      f"expected str, got int", err)
+
+    def test_a_valid_profile_dialect_value_loads(self):
+        prof = self.make_profile(self.tmp / "prof", '[dialect]\nagent_turns_prose = "forbid"\n'
+                                 '\n[dialect.reasons]\nagent_turns_prose = "principle"\n')
+        code, _, err = self.with_profile(prof.as_posix()).run("check")
+        self.assertNotEqual(code, 2, err)
 
     def test_principles_document_and_local_override(self):
         prof = self.make_profile(self.tmp / "prof")
@@ -2325,6 +3301,155 @@ class TopicWords(Base):
         # 4 words added: two fence-marker lines and the masked Topic line's own two words —
         # inside a fence it is an example, not metadata, so it counts as body text.
         self.assertIn(f"'decision_words:alpha:A-100' grew to {before['decision_words:alpha:A-100'] + 4}", out)
+
+
+class DocsEntryUnderAnAlwaysExcludedDir(Base):
+    """An explicit `docs` entry under a directory the docs scan always leaves out matches
+    nothing the gate governs. Loading the config says so once, on every command, naming the
+    entry and the exclude that wins — a warning, never a new error."""
+
+    def _ws(self, projects_docs: str, workspace_docs: str | None = None) -> Workspace:
+        w = self.ws()
+        cfg = w.root / CFG
+        body = cfg.read_text(encoding="utf-8").replace(
+            'required_docs = ["DECISIONS.md"]',
+            f'required_docs = ["DECISIONS.md"]\ndocs = {projects_docs}')
+        if workspace_docs is not None:
+            body = body.replace('docs = ["AGENTS.md", "governance/*.md"]',
+                                f"docs = {workspace_docs}")
+        wtext(cfg, body)
+        w.write("projects/alpha/.claude/x.md", fm() + "# X\n")
+        return w
+
+    WARNING = ("warning: [projects] docs entry '.claude/x.md' is never governed: the "
+               "always-applied exclude '**/.claude/**' wins — move the doc, or drop the entry")
+
+    def test_an_explicit_entry_under_claude_warns_once(self):
+        w = self._ws('["**/*.md", ".claude/x.md"]')
+        code, out, err = w.run("check")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(err.count(self.WARNING), 1, err)
+        self.assertEqual(err.count("warning:"), 1, err)
+        self.assertNotIn(".claude", out)
+
+    def test_every_command_says_it_and_parsed_output_is_unchanged(self):
+        w = self._ws('["**/*.md", ".claude/x.md"]')
+        code, out, err = w.run("next-id", "--project", "alpha")
+        self.assertEqual((code, out), (0, "A-101\n"))
+        self.assertIn(self.WARNING, err)
+
+    def test_a_workspace_entry_names_its_own_section(self):
+        w = self._ws('["**/*.md"]', '["AGENTS.md", "governance/*.md", ".context-gate/*.md"]')
+        _, _, err = w.run("check")
+        self.assertIn("warning: [workspace] docs entry '.context-gate/*.md' is never governed: "
+                      "the always-applied exclude '**/.context-gate/**' wins", err)
+
+    def test_a_non_string_projects_entry_is_a_config_error_naming_it(self):
+        code, out, err = self._ws('["**/*.md", 1]').run("next-id", "--project", "alpha")
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("[projects] docs[1]: expected str, got int", err)
+
+    def test_a_non_string_workspace_entry_is_a_config_error_naming_it(self):
+        code, out, err = self._ws('["**/*.md"]', '[1]').run("check")
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("[workspace] docs[0]: expected str, got int", err)
+
+    def test_a_glob_that_reaches_excluded_dirs_is_not_an_entry_under_one(self):
+        _, _, err = self._ws('["**/*.md"]').run("check")
+        self.assertNotIn("warning:", err)
+
+
+class DefaultDocExcludesAtAnyDepth(Base):
+    """The always-excluded directories are left out at any depth, by the docs scan and by
+    `measure` alike — one rule, so what adopt measured is what the gate governs."""
+
+    NESTED = ("sub/node_modules/x.md", "sub/.claude/x.md", "sub/deep/build/x.md",
+              "sub/Build/x.md", "sub/Dist/x.md", "sub/deep/Vendor/x.md", "sub/Target/x.md")
+
+    def _ws(self) -> Workspace:
+        w = self.ws()
+        for rel in self.NESTED:                     # a doc_type the gate would reject
+            w.write(f"projects/alpha/{rel}", fm(doc_type="manual") + "# Not governed\n")
+        w.write("projects/alpha/sub/real.md", fm("reference") + "# Governed\n")
+        return w
+
+    def test_nested_excluded_dirs_are_not_governed(self):
+        w = self._ws()
+        code, out, _ = w.run("check")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("x.md", out)
+        from govern.context import Context
+        cfg = config.load(w.root, w.home)
+        ctx = Context(root=w.root, home=w.home, cfg=cfg, registry=registry.load(cfg),
+                      prog="govern")
+        alpha = ctx.registry.find("alpha")
+        self.assertIn("sub/real.md", [rel for rel, _ in ctx.governed_docs(alpha.gov)])
+        self.assertEqual([rel for rel, _ in ctx.governed_docs(alpha.gov) if "x.md" in rel], [])
+
+    def test_nested_excluded_dirs_are_not_measured(self):
+        from govern import measure
+        m = measure.measure(self._ws().root)
+        alpha = next(s for s in m.scopes if s.dir == "projects/alpha")
+        self.assertEqual(alpha.doc_dirs["sub"], (1, 1))
+
+    def test_a_nested_docs_entry_names_the_exclude_that_wins(self):
+        from govern.context import default_exclude
+        self.assertEqual(default_exclude("sub/.claude/x.md"), "**/.claude/**")
+        self.assertEqual(default_exclude("sub/deep/build/x.md"), "**/build/**")
+        self.assertIsNone(default_exclude("sub/building/x.md"))
+        self.assertIsNone(default_exclude("build.md"))
+        # In any case, on every OS: the engine before these rules matched `Build/` on Windows.
+        self.assertEqual(default_exclude("sub/Build/x.md"), "**/build/**")
+        self.assertEqual(default_exclude("Vendor/x.md"), "**/vendor/**")
+        self.assertIsNone(default_exclude("sub/Building/x.md"))
+
+
+class GeneratedBlocksWords(Base):
+    """A generated block's markers are HTML comments, so stripping comments first left
+    no block to strip and every generated row counted toward the word ratchets. Only the prose a
+    reader writes counts; a comment and a generated index add nothing."""
+
+    PROSE = "Current state: shipping the parser."          # 5 words
+
+    def _handoff(self) -> Workspace:
+        w = self.ws(extra="""
+[checks.handoff-words]
+max_words = 5
+
+[checks.doc-frontmatter]
+max_working_words = 5
+""")
+        cfg = w.root / CFG
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(
+            'project = [{ file = "DECISIONS.md", id = "decision-index" }]',
+            'project = [{ file = "DECISIONS.md", id = "decision-index" },\n'
+            '           { file = "working-files/HANDOFF.md", id = "doc-registry" }]'))
+        for n in range(4):
+            w.write(f"projects/alpha/reference-{n}.md",
+                    fm("reference") + f"# Reference {n}\n")
+        w.write("projects/alpha/working-files/HANDOFF.md",
+                fm("working", status="active") + self.PROSE + "\n\n"
+                "<!-- a note for the next session, never read as prose -->\n\n"
+                "<!-- t:generated:start id=doc-registry -->\n"
+                "<!-- t:generated:end id=doc-registry -->\n")
+        w.index()
+        return w
+
+    def test_word_count_counts_only_prose(self):
+        w = self._handoff()
+        body = text.parse_frontmatter(text.read(
+            w.root / "projects/alpha/working-files/HANDOFF.md"))[1]
+        self.assertIn("reference-3.md", body)              # the index really has rows
+        self.assertEqual(text.word_count(body, text.Markers("t")), 5)
+
+    def test_generated_index_adds_nothing_to_the_ratchets(self):
+        w = self._handoff()
+        code, out, _ = w.run("check", "--project", "alpha")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("words", out)
+        w.run("baseline", "--allow-raise")
+        baseline = json.loads((w.root / layout.BASELINE).read_text(encoding="utf-8"))
+        self.assertEqual([k for k in baseline if "words" in k], [], baseline)
 
 
 class RatchetOwnsScopeNameWithColon(unittest.TestCase):

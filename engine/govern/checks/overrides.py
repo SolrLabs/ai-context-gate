@@ -3,7 +3,7 @@ standard, a project's setting that differs from what its profile set, and a proj
 setting that widens past what it inherited — the standard, or its profile."""
 from __future__ import annotations
 
-from govern.config import DIALECT_DEFAULTS, LAYOUT_DIALECT
+from govern.config import DIALECT_DEFAULTS, LAYOUT_DIALECT, widening
 from govern.findings import Findings
 from govern.manifest import check
 
@@ -38,12 +38,9 @@ def standard_overrides(ctx, params) -> Findings:
     for cid, key in ctx.cfg.profile_overrides:
         f.warn(f"config: [checks.{cid}] {key} overrides the profile with no reason — follow the "
                f"profile, or add a reason")
-    for cid, key, added, removed in ctx.cfg.list_overrides:
-        # Only the loosening side: `looser="more"` never names what it also dropped, and
-        # `looser="fewer"` never names what it also added — adding and removing in one list
-        # must not read as a tightening being called loosening.
-        change = "adds " + ", ".join(repr(v) for v in added) if added \
-            else "drops " + ", ".join(repr(v) for v in removed)
-        f.warn(f"config: [checks.{cid}] {key} {change} — loosens past what the project "
-               f"inherits with no reason (say why in reasons.{key})")
+    # Only under `require_reasons = false`: otherwise loading refuses a widened list.
+    for layer, cid, key, added, removed in ctx.cfg.list_overrides:
+        where = "config" if layer == "project" else "profile"
+        f.warn(f"{where}: [checks.{cid}] {key} {widening(added, removed)} — loosens past what "
+               f"the {layer} inherits with no reason (say why in reasons.{key})")
     return f

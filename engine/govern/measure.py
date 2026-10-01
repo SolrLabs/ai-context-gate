@@ -6,7 +6,7 @@ logs, trap files, working files and docs are, read from the tree itself.
 Read-only, and needs no config: nothing is installed yet. `propose` turns a `Measurement` into a
 config and the questions measurement cannot settle. Every path is repo-relative `as_posix()`.
 
-Never descended into: `.git/`, `backup/`, the trees in `DEFAULT_DOC_EXCLUDES` (which include
+Never descended into, at any depth: `.git/`, `backup/`, the `ALWAYS_EXCLUDED_DIRS` (which include
 `.context-gate/` and `.claude/`, so an agent's worktree there is never a nested checkout), and
 anything git ignores, asked of the repo that contains it (a registry member's checkout is its own
 repo, so a scope dir is never skipped because the workspace root ignores it). Of a registry
@@ -28,8 +28,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from govern import layout
-from govern.config import REGISTRY_KEYS
-from govern.context import DEFAULT_DOC_EXCLUDES, git, repo_of
+from govern.config import REGISTRY_KEYS, RENAMED_FACTS
+from govern.context import ALWAYS_EXCLUDED_DIRS, git, repo_of
 from govern.decisions import mask_lines
 from govern.migrate import BULLET_RE, INDEX_HEADING_RE, INDEX_ITEM_RE
 from govern.registry import dig
@@ -80,6 +80,7 @@ class Measurement:
     max_ids: dict[str, int]           # prefix -> highest number seen in any heading anywhere
     notes: list[str]                  # e.g. traps kept as a section of another file
     subrepos: list[str] = field(default_factory=list)  # nested git checkouts under the root, not excluded, named by a registry or not
+    registry_rows: list[tuple[str, str]] = field(default_factory=list)  # (file, doc it links): each row of an existing doc-registry block whose link resolves inside the root
 
 
 class MeasureError(Exception):
@@ -96,9 +97,16 @@ TRAP_HEADING_RE = re.compile(r"^#{2,3}\s+[A-Za-z]+-(\d+)\b")
 TRAP_ROW_RE = re.compile(r"^\|\s*[A-Za-z]+-(\d+)\s*\|")
 MARKER_RE = re.compile(r"^\s*<!-- ([\w-]+):generated:(start|end) id=([\w-]+) -->\s*$")
 TRAPS_SECTION_RE = re.compile(r"^#{2,6}\s+Traps\s*$", re.I)
+# A markdown link's target: `[text](target)`, up to a title, an anchor or the closing paren.
+LINK_RE = re.compile(r"\]\(<?([^)\s#>]+)")
 
-NEVER = frozenset({layout.GOV_DIR, ".git", "backup"}
-                  | {p.split("/", 1)[0] for p in DEFAULT_DOC_EXCLUDES})
+# Compared casefolded (`_never`), as `context.default_exclude` matches the same directories.
+NEVER = frozenset(d.casefold()
+                  for d in {layout.GOV_DIR, ".git", "backup", *ALWAYS_EXCLUDED_DIRS})
+
+
+def _never(name: str) -> bool:
+    return name.casefold() in NEVER
 # A marker set that matches nothing: mask_lines is asked only about fences and comments here,
 # since the real generated-block markers are found (and blanked) before it runs.
 _NO_MARKERS = Markers("\x00")
@@ -171,6 +179,21 @@ def _load(path: Path, root: Path, notes: list[str]) -> _Doc | None:
     return _Doc(path, rel, lines, live, pairs, bool(fm.get("doc_type")))
 
 
+def _linked(doc: _Doc, pair: _Pair, root: Path) -> list[str]:
+    """The docs a generated block's rows link to, root-relative: a link is relative to the file
+    that holds it (`../AGENTS.md` from `docs/INDEX.md`). A URL, or a target outside the root,
+    is no doc of this project's."""
+    out = []
+    for line in doc.lines[pair.start + 1:pair.end]:
+        for target in LINK_RE.findall(line):
+            if ":" in target or target.startswith("/"):
+                continue
+            path = Path(os.path.normpath(doc.path.parent / target))
+            if _under(path, root):
+                out.append(path.relative_to(root).as_posix())
+    return out
+
+
 # ---------------------------------------------------------------------------- walking
 
 class _Ignores:
@@ -214,7 +237,7 @@ def _walk(base: Path, skip: set[Path], ignored: _Ignores) -> _Tree:
         keep = []
         for name in sorted(dirnames):
             sub = here / name
-            if name in NEVER or sub in skip or ignored(sub, True):
+            if _never(name) or sub in skip or ignored(sub, True):
                 continue
             keep.append(name)
             tree.dirs.append(sub)
@@ -270,14 +293,22 @@ def _find_registry(root: Path, notes: list[str]) -> _Registry | None:
 
 
 def _registry(name: str, key: str, entries: list[dict]) -> _Registry:
+    """Where each fact lives, when not at the top level under its own name: in one sub-table,
+    or under the name an earlier engine read (`RENAMED_FACTS`), mapped rather than renamed so a
+    registry file other tools read keeps its spelling."""
     keys: dict[str, str] = {}
     for k in REGISTRY_KEYS:
         if any(k in e for e in entries):
             continue
-        subs = sorted({sub for e in entries for sub, table in e.items()
-                       if isinstance(table, dict) and k in table})
-        if len(subs) == 1:
-            keys[k] = f"{subs[0]}.{k}"
+        for leaf in (k, *(old for old, new in RENAMED_FACTS.items() if new == k)):
+            if leaf != k and any(leaf in e for e in entries):
+                keys[k] = leaf
+                break
+            subs = sorted({sub for e in entries for sub, table in e.items()
+                           if isinstance(table, dict) and leaf in table})
+            if len(subs) == 1:
+                keys[k] = f"{subs[0]}.{leaf}"
+                break
     return _Registry(name, key, entries, keys)
 
 
@@ -464,7 +495,7 @@ def _subrepos(root: Path) -> list[str]:
         here = Path(current)
         keep = []
         for name in sorted(dirnames):
-            if name in NEVER:
+            if _never(name):
                 continue
             if (here / name / ".git").exists():
                 found.append((here / name).relative_to(root).as_posix())
@@ -536,11 +567,14 @@ def measure(root: Path, planned: tuple[str, dict] | None = None) -> Measurement:
 
     prefixes: Counter[str] = Counter()
     blocks: set[tuple[str, str]] = set()
+    rows: set[tuple[str, str]] = set()
     max_ids: dict[str, int] = {}
     for d in docs.values():
         for p in d.pairs:
             prefixes[p.prefix] += 1
             blocks.add((d.rel, p.bid))
+            if p.bid == "doc-registry":
+                rows.update((d.rel, doc) for doc in _linked(d, p, root))
         for _, line in d.live_lines():
             m = HEADING_ID_RE.match(line)
             if m:
@@ -557,7 +591,8 @@ def measure(root: Path, planned: tuple[str, dict] | None = None) -> Measurement:
         markers=prefixes.most_common(1)[0][0] if prefixes else None,
         blocks=sorted(blocks), max_ids=dict(sorted(max_ids.items())),
         notes=notes,
-        subrepos=_subrepos(root))
+        subrepos=_subrepos(root),
+        registry_rows=sorted(rows))
 
 
 # ---------------------------------------------------------------------------- CLI

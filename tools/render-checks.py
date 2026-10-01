@@ -28,7 +28,7 @@ GROUPS = [
     ("Registry and checkouts",
      "The projects a governance root covers, the facts recorded about each, and the "
      "repositories they live in.",
-     ("registry", "checkouts", "licences")),
+     ("registry", "checkouts", "licenses")),
     ("Decision logs and traps",
      "Numbered decision entries (`## P-12 — Title`) and trap entries (`## T-3 — Title`).",
      ("decisions",)),
@@ -135,6 +135,10 @@ def render_check(chk: manifest.Check) -> list[str]:
         f"| Scope | {scope_line(chk)} |",
         f"| Ratchet | {'Yes: size breaches are recorded in the baseline' if chk.ratchets else 'No'} |",
         f"| Since | {chk.since} |",
+    ]
+    if chk.needs:
+        rows.append(f"| Needs | {', '.join(f'`{n}`' for n in chk.needs)}, to do anything |")
+    rows += [
         "",
         f"**Question:** {text(chk.question)}",
         "",
@@ -179,8 +183,8 @@ def render() -> str:
         "and the ratchet turns a new or grown breach into an error. Set a level or a parameter "
         "under `[checks.<id>]` in `.context-gate/config.toml`. A lower level or a limit moved "
         "in its looser direction needs a `reason`; a list widened in its looser direction is "
-        "reported until it has one. See [configuration.md](configuration.md) for the syntax and "
-        "[how-it-works.md](how-it-works.md) for the model. "
+        "refused until it has its own entry in `reasons`. See [configuration.md](configuration.md) "
+        "for the syntax and [how-it-works.md](how-it-works.md) for the model. "
         "`govern explain <id>` prints a check's effective settings in your project.",
         "",
         "| Check | Default | Summary |",
