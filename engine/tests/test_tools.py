@@ -73,6 +73,24 @@ class ReleaseInstallers(unittest.TestCase):
         self.assertIn("v1.2.3: not a release tag of this tool", res.stderr)
         self.assertEqual(list(self.home.iterdir()), [])
 
+    def test_a_beta_tag_installs_under_its_own_version(self):
+        self.release("0.9.0-beta.1", "tag-tool", "tag-plugin")
+        res = self.run_tool("install-engine.py", "v0.9.0-beta.1")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        engine = self.home / ".local" / "share" / "tag-tool" / "engines" / "0.9.0-beta.1"
+        self.assertTrue((engine / "govern" / "layout.py").is_file())
+        out = self.dir / "out"
+        res = self.run_tool("install-plugin.py", "v0.9.0-beta.1", "--out", str(out))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("assembled plugin tag-plugin 0.9.0-beta.1", res.stdout)
+
+    def test_a_beta_tag_without_a_number_is_refused(self):
+        for bad in ("v0.9.0-beta", "v0.9.0-beta.0", "v0.9.0-beta.01"):
+            for tool in ("install-engine.py", "install-plugin.py"):
+                res = self.run_tool(tool, bad)
+                self.assertEqual(res.returncode, 2, (tool, bad, res.stderr))
+        self.assertEqual(list(self.home.iterdir()), [])
+
     def test_names_come_from_the_tag_not_the_working_tree(self):
         self.release("1.2.3", "tag-tool", "tag-plugin")
         # The working tree has since moved on to other names: they must not be used.
@@ -97,6 +115,21 @@ class ReleaseInstallers(unittest.TestCase):
         self.assertFalse((self.repo / "engine" / "govern" / "RELEASE").exists())
         self.assertFalse((self.home / ".claude" / "skills" / "tree-plugin").exists())
         self.assertIn("assembled plugin tag-plugin 1.2.3", res.stdout)
+
+    def test_installed_plugin_is_off_by_default(self):
+        """The installed copy loads only where a project's settings turn it on; the repository's
+        own plugin.json is never touched."""
+        self.release("1.2.3", "tag-tool", "tag-plugin")
+        out = self.dir / "out"
+        res = self.run_tool("install-plugin.py", "v1.2.3", "--out", str(out))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        manifest = json.loads((out / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        self.assertIs(manifest["defaultEnabled"], False)
+        self.assertEqual((manifest["name"], manifest["version"]), ("tag-plugin", "1.2.3"))
+        own = self.repo / "plugin" / ".claude-plugin" / "plugin.json"
+        self.assertNotIn("defaultEnabled", json.loads(own.read_text(encoding="utf-8")))
+        self.assertEqual(subprocess.run(["git", "-C", str(self.repo), "status", "--porcelain"],
+                                        capture_output=True, text=True).stdout, "")
 
 
 if __name__ == "__main__":

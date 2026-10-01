@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Install a released engine where governed projects look for it.
 
-    python3 tools/release/install-engine.py vX.Y.Z
+    python3 tools/release/install-engine.py vX.Y.Z   # or vX.Y.Z-beta.N
 
 Exports `engine/` at the given tag (never the working tree) into
 ~/.local/share/<tool>/engines/<version>/, where <tool> is the name the tag's own
@@ -28,7 +28,7 @@ TOOL_RE = re.compile(r'^TOOL = "(\w[\w.-]*)"$', re.M)
 
 
 def main() -> int:
-    if len(sys.argv) != 2 or not re.fullmatch(r"v\d+\.\d+\.\d+", sys.argv[1]):
+    if len(sys.argv) != 2 or not re.fullmatch(r"v\d+\.\d+\.\d+(-beta\.[1-9]\d*)?", sys.argv[1]):
         print(__doc__, file=sys.stderr)
         return 2
     tag = sys.argv[1]

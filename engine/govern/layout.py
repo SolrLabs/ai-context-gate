@@ -25,6 +25,8 @@ RELEASE_MARKER = "RELEASE"
 GOV_DIR = f".{TOOL}"
 CONFIG = f"{GOV_DIR}/config.toml"
 BASELINE = f"{GOV_DIR}/baseline.json"
+# This machine's beta engine (`govern beta`): never committed, read before the pin.
+LOCAL = f"{GOV_DIR}/local.toml"
 ENTRYPOINT = f"{GOV_DIR}/bin/govern"
 MANIFEST = f"{GOV_DIR}/installed.toml"
 BACKUP = f"{GOV_DIR}/backup"

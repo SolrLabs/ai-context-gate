@@ -4,6 +4,33 @@ Newest first. Each release says what changed and, under **Upgrading**, anything 
 do or decide. The upgrade report quotes every entry between the engine a project ran and the one
 it upgraded to.
 
+## 0.5.1 — 2026-09-30
+
+- **`govern beta`** runs a locally installed prerelease in one project, on one machine.
+  `govern beta on X.Y.Z-beta.N` switches the project to that beta engine and its plugin;
+  `govern beta off` switches back and works even when the beta is broken or gone; `govern beta`
+  shows the state. It is handled by the entrypoint before any engine loads.
+- **`.context-gate/local.toml`**, a new uncommitted config layer above the project's, holds the
+  beta to run, its `[checks.*]` settings, and the plugin settings `beta on` found. Only the engine
+  it names reads it. If that beta is not installed, the gate runs the committed pin with one line
+  saying why.
+- **`local-layer`** (error): fails the gate when git tracks `.context-gate/local.toml`, so a beta
+  pin cannot reach CI or other clones. `govern beta on` keeps the file and
+  `.claude/settings.local.json` out of git through `.git/info/exclude`.
+- **Beta versions** (`X.Y.Z-beta.N`) are understood everywhere a version is parsed or ordered, and
+  sort between the release before and their own release. A stable project is never offered one:
+  the upgrade notice and `bin/upgrade` still see releases only.
+- **A committed beta pin is refused.** `[governance] engine` in `config.toml` must be a release;
+  betas run only from `local.toml`.
+- **The local plugin install is off by default.** `tools/release/install-plugin.py` writes
+  `defaultEnabled: false` into the installed copy, so it loads only where a project's
+  `settings.local.json` turns it on. When both the local and the stable plugin are enabled, the
+  local plugin's session start says every hook runs twice.
+- **The release tools take beta tags.** `install-engine.py` and `install-plugin.py` install a
+  `vX.Y.Z-beta.N` tag.
+
+**Upgrading:** nothing to do. `local.toml` appears only after you run `govern beta on`.
+
 ## 0.5.0 — 2026-09-30
 
 - **`govern options`** shows every opt-in check (`writing-rules`, `hooks-wired`,

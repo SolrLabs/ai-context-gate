@@ -2,7 +2,8 @@
 resolving each check's settings.
 
 Resolution order, later winning: engine defaults from the manifest, then the
-shared profile's `principles.toml`, then the project file.
+shared profile's `principles.toml`, then the project file, then `local.toml` when this engine is
+the beta it names.
 
 Validation is strict on purpose. An unknown or misplaced key is an error, never a value that is
 silently not read: a limit read from the wrong place is a limit that never fires.
@@ -17,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from govern import __version__, layout, manifest
+from govern import __version__, layout, manifest, versions
 
 CONFIG_NAME = layout.CONFIG
 SCHEMA = 1
@@ -142,10 +143,11 @@ def series(version: str) -> tuple[int, int]:
     return int(parts[0]), int(parts[1])
 
 
-def check_pin(pin) -> str | None:
+def check_pin(pin, local: bool = False) -> str | None:
     """A project runs exactly the engine it pins: the same commit gets the same engine on every
     machine and in CI, and upgrading is a deliberate step. A series pin ("0.4") runs within its
-    series, with a note, until the project upgrades. Returns that note, or None."""
+    series, with a note, until the project upgrades. Returns that note, or None. `local`: the beta
+    that local.toml names runs whatever release is pinned, so only the version match is skipped."""
     if pin is None:
         raise ConfigError(f"{CONFIG_NAME}: [governance] engine is required — pin the exact "
                           f"engine version this policy was written for (this engine is "
@@ -153,6 +155,11 @@ def check_pin(pin) -> str | None:
     if not isinstance(pin, str):
         raise ConfigError(f"{CONFIG_NAME}: [governance] engine must be a string like "
                           f"\"{__version__}\"")
+    if versions.is_beta(pin):
+        raise ConfigError(f"{CONFIG_NAME} pins beta {pin}; a beta runs only from {layout.LOCAL} "
+                          f"on one machine (govern beta on {pin}) — pin a release")
+    if local:
+        return None
     parts = pin.split(".")
     if len(parts) == 3:
         if pin != __version__:
@@ -185,6 +192,41 @@ def _load_toml(path: Path) -> dict:
         raise ConfigError(f"{path.name}: not valid TOML ({exc})") from exc
     except OSError as exc:
         raise ConfigError(f"{path}: unreadable ({exc.strerror})") from exc
+
+
+def _local_layer(root: Path) -> dict | None:
+    """local.toml, when this engine is the beta it names: the top layer, this machine only.
+    Any other engine never reads it (a stable engine must not trip on a beta's checks). Read as
+    the entry point reads it, so the two agree on which engine the file names."""
+    if not versions.is_beta(__version__):
+        return None
+    try:
+        with (root / layout.LOCAL).open("rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, ValueError):
+        return None
+    gov = data.get("governance", {})
+    if not isinstance(gov, dict) or gov.get("engine") != __version__:
+        return None
+    extra = sorted(set(gov) - {"engine", "plugins_before"}) \
+        + sorted(set(data) - {"governance", "checks"})
+    if extra:
+        raise ConfigError(f"{layout.LOCAL}: sets {', '.join(extra)}; it holds [governance] "
+                          f"engine, plugins_before and [checks.*] only")
+    # What `govern beta on` found in settings.local.json, for `govern beta off` to put back:
+    # not a setting, so only its shape is checked.
+    before = gov.get("plugins_before", {})
+    if not isinstance(before, dict) or not all(isinstance(v, bool) for v in before.values()):
+        raise ConfigError(f"{layout.LOCAL}: [governance] plugins_before must be a table of "
+                          f"plugin id = true or false")
+    checks = data.get("checks", {})
+    if not isinstance(checks, dict):
+        raise ConfigError(f"{layout.LOCAL}: [checks] must be a table")
+    order = sorted(set(checks) & set(LAYOUT["checks"]))
+    if order:
+        raise ConfigError(f"{layout.LOCAL}: [checks] sets {', '.join(order)}; it holds "
+                          f"[governance] engine, plugins_before and [checks.*] only")
+    return data
 
 
 def renamed(where: str, old: str, new: str) -> str:
@@ -538,17 +580,18 @@ def _resolve_checks(layers: list[tuple[str, dict]], require_reasons: bool,
         s.source = {k: "engine" for k in ["level", *chk.params]}
         settings[cid] = s
     for layer, raw in layers:
+        label = layout.LOCAL if layer == "local" else layer
         for cid, table in raw.get("checks", {}).items():
             if cid in LAYOUT["checks"]:
                 continue
             if cid not in manifest.CHECKS:
-                raise ConfigError(f"{layer}: [checks.{cid}] is not a registered check")
+                raise ConfigError(f"{label}: [checks.{cid}] is not a registered check")
             if not isinstance(table, dict):
-                raise ConfigError(f"{layer}: [checks.{cid}] must be a table")
+                raise ConfigError(f"{label}: [checks.{cid}] must be a table")
             chk, s = manifest.CHECKS[cid], settings[cid]
             before = dict(s.params)
             for key, value in table.items():
-                where = f"{layer}: [checks.{cid}] {key}"
+                where = f"{label}: [checks.{cid}] {key}"
                 base = key.removeprefix("extend_")
                 if key.startswith("extend_") and base in chk.params \
                         and chk.params[base].type in ("list", "tables"):
@@ -563,7 +606,7 @@ def _resolve_checks(layers: list[tuple[str, dict]], require_reasons: bool,
                     if chk.core and value == "off":
                         raise ConfigError(f"{where}: '{cid}' is part of the fixed core and "
                                           f"cannot be turned off")
-                    if layer == "project" and s.source.get("level") == "profile" \
+                    if layer in ("project", "local") and s.source.get("level") == "profile" \
                             and manifest.LEVELS.index(value) < manifest.LEVELS.index(s.level) \
                             and not table.get("reason"):
                         overrides.append((cid, "level"))
@@ -588,7 +631,7 @@ def _resolve_checks(layers: list[tuple[str, dict]], require_reasons: bool,
                     s.ratchet = value
                 elif key in chk.params:
                     _check_param(where, chk.params[key], value)
-                    if layer == "project" and s.source.get(key) == "profile" \
+                    if layer in ("project", "local") and s.source.get(key) == "profile" \
                             and s.params[key] != value and not table.get("reason"):
                         overrides.append((cid, key))
                     s.params[key] = value
@@ -611,8 +654,9 @@ def _resolve_checks(layers: list[tuple[str, dict]], require_reasons: bool,
                         f"standard's list"
                         for key, added, removed in widened))
                 raise ConfigError("; ".join(
-                    f"{layer}: [checks.{cid}] {key} {widening(added, removed)} — loosens past "
-                    f"what the {layer} inherits without a reason: say why in "
+                    f"{label}: [checks.{cid}] {key} {widening(added, removed)} — loosens past "
+                    f"what the {'committed config' if layer == 'local' else layer} inherits "
+                    f"without a reason: say why in "
                     f"[checks.{cid}.reasons] {key}, or keep the inherited list"
                     for key, added, removed in widened))
             widened_keys = {key for key, _, _ in widened}
@@ -631,9 +675,13 @@ def _resolve_checks(layers: list[tuple[str, dict]], require_reasons: bool,
             if not s.ratchet:
                 loosened.append("ratchet")
             if loosened and not s.reason:
+                # Name the file when the local layer set what loosens.
+                src = layout.LOCAL if any(s.source.get(k) == "local" for k in loosened) \
+                    else None
                 raise ConfigError(
-                    f"[checks.{cid}] loosens {', '.join(loosened)} past the engine default "
-                    f"without a 'reason' — relaxing a rule is a choice made in the open")
+                    f"{src + ': ' if src else ''}[checks.{cid}] loosens {', '.join(loosened)} "
+                    f"past the engine default without a 'reason' — relaxing a rule is a choice "
+                    f"made in the open")
     return settings
 
 
@@ -688,7 +736,10 @@ def load(root: Path, home: Path) -> Config:
                 raise ConfigError(f"{CONFIG_NAME}: [checks] {key} names '{cid}', which is not a "
                                   f"registered check")
     gov = raw.get("governance", {})
-    pin_note = check_pin(gov.get("engine"))
+    # The beta local.toml names runs whatever the committed pin is; that pin is for every
+    # other machine and CI.
+    local = _local_layer(root)
+    pin_note = check_pin(gov.get("engine"), local=bool(local))
     if gov.get("schema", SCHEMA) != SCHEMA:
         raise ConfigError(f"{CONFIG_NAME}: schema {gov.get('schema')} is not supported "
                           f"(this engine reads schema {SCHEMA})")
@@ -721,6 +772,8 @@ def load(root: Path, home: Path) -> Config:
                                   f"{DIALECT_CHOICES[key]}")
         layers.append(("profile", prof.settings))
     layers.append(("project", raw))
+    if local:
+        layers.append(("local", _renamed_checks(local, layout.LOCAL, warnings)))
     dialect = {**DIALECT_DEFAULTS,
                **{k: v for k, v in (prof.settings.get("dialect", {}) if prof else {}).items()
                   if k != "reasons"},

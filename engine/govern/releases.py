@@ -4,12 +4,11 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from govern import versions
+
 CHANGELOG = Path(__file__).resolve().parent / "CHANGELOG.md"
-HEADING = re.compile(r"^## (\d+\.\d+\.\d+)\b.*$", re.M)
-
-
-def _key(version: str) -> tuple:
-    return tuple(int(p) for p in version.split("."))
+HEADING = re.compile(r"^## (\d+\.\d+\.\d+(?:-beta\.[1-9]\d*)?)\b.*$", re.M)
+_key = versions.key   # a beta orders below its release: 0.5.1 < 0.6.0-beta.1 < 0.6.0
 
 
 def entries(text: str | None = None) -> list[tuple[str, str]]:
@@ -26,7 +25,7 @@ def entries(text: str | None = None) -> list[tuple[str, str]]:
 def between(old: str | None, new: str, text: str | None = None) -> list[tuple[str, str]]:
     """Every entry after `old` up to and including `new`: what an upgrade from old to new
     brings. With no known old version, just `new`'s own entry."""
-    lo = _key(old) if old and re.fullmatch(r"\d+\.\d+\.\d+", old) else _key(new)
-    inclusive_lo = not (old and re.fullmatch(r"\d+\.\d+\.\d+", old))
+    lo = _key(old) if old and versions.parse(old) else _key(new)
+    inclusive_lo = not (old and versions.parse(old))
     return [(v, body) for v, body in entries(text)
             if (lo <= _key(v) if inclusive_lo else lo < _key(v)) and _key(v) <= _key(new)]

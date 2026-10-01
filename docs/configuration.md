@@ -478,6 +478,69 @@ The same check warns when a project changes a setting its profile set without a 
 `[governance] require_reasons = false` removes the requirement for a `reason` and for a
 `reasons` entry; the `standard-overrides` check warns instead, a widened list included.
 
+## Running a beta locally
+
+You can run a locally installed prerelease in one project, on one machine, without touching the
+committed pin, CI or anyone else's checkout. `.context-gate/local.toml` is the switch:
+
+```toml
+# fragment: local.toml, not config.toml
+[governance]
+engine = "0.6.0-beta.1"
+plugins_before = { "context-gate@context-gate" = true }
+
+[checks.writing-rules]
+level = "error"
+```
+
+- `[governance] engine` names the beta to run. It must be a beta version (`X.Y.Z-beta.N`).
+- `[governance] plugins_before` records the plugin settings `govern beta on` found, so
+  `govern beta off` can put them back. `govern beta on` writes it; do not write it by hand.
+- `[checks.*]` tables hold the beta's own settings. They merge above the project's config under the
+  same rules: a loosening needs its reason, and an unknown check or setting is an error. Layout
+  tables (`[projects]`, `[registry]`, and so on) are a load error here.
+
+The file is read only by the engine it names. Any other engine ignores it, so a stable engine never
+sees a beta's settings. A committed `[governance] engine` pin can never be a beta; the engine
+refuses one.
+
+It is never committed. The `local-layer` check fails the gate when git tracks the file, so a beta
+pin cannot reach CI or other clones. `govern beta on` adds `.context-gate/local.toml` and
+`.claude/settings.local.json` to `.git/info/exclude` (never a committed `.gitignore`) when git does
+not already ignore them.
+
+A beta comes from a `vX.Y.Z-beta.N` tag. Install its engine and plugin from a clone of the
+repository first, with `python3 tools/release/install-engine.py vX.Y.Z-beta.N` and
+`python3 tools/release/install-plugin.py vX.Y.Z-beta.N`. The beta plugin is the local install,
+`context-gate@skills-dir`; the stable plugin is the marketplace one, `context-gate@context-gate`.
+
+Three commands, run through the project's gate:
+
+```sh
+python3 .context-gate/bin/govern beta                      # show the state
+python3 .context-gate/bin/govern beta on X.Y.Z-beta.N      # switch this project to that beta
+python3 .context-gate/bin/govern beta off                  # switch back
+```
+
+`govern beta on` checks before it writes anything. It refuses, changing nothing, when the version
+is not a beta, when that engine or the local plugin is not installed at that version, when
+`local.toml` already names a different beta, or when the project has no `.claude/` directory. It
+then writes `local.toml`, sets `enabledPlugins` in `.claude/settings.local.json` to turn the beta
+plugin on and the stable plugin off, and keeps every other key in that file. `govern beta off`
+removes `local.toml`, puts the two plugin keys back as it found them, and works even when the beta
+engine is broken or gone. With no beta on, it says so and touches nothing.
+
+Plugins load when a session starts, so restart the Claude Code session after `beta on` or
+`beta off`. If both plugins are enabled anyway, every hook runs twice; the beta plugin's session
+start says so, and so does `govern beta`.
+
+While a beta runs, every command prints one line saying so. If the beta engine is not installed,
+or `local.toml` cannot be read or names no beta, the gate runs the committed pin instead, prints
+one line saying why, and does not fail. Run `govern beta off` to clear the file.
+
+Run `govern beta off` before `bin/uninstall`. Uninstall does not know about `local.toml`, and
+the beta plugin keys would stay in `.claude/settings.local.json`.
+
 ## Renamed names
 
 Engine 0.5.0 spells its own names in American English: the check `licences` is now `licenses`

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""SessionStart: tell the session, and the person, when this project's governance has an upgrade.
+"""SessionStart: tell the session, and the person, when this project's governance has an upgrade,
+and, from a beta, when the stable plugin is enabled here too.
 
 Silent in projects without .context-gate/, and silent on any failure: a notice must
 never get in the way of starting work. Uses the engine bundled with this plugin.
@@ -19,7 +20,9 @@ def main() -> None:
     if not (root / layout.CONFIG).is_file():
         return
     from govern import notice
-    msg = notice.for_project(root, layout.home())
+    home = layout.home()
+    msgs = [notice.for_project(root, home), notice.both_plugins_warning(root, home)]
+    msg = "\n".join(m for m in msgs if m)
     if msg:
         print(json.dumps({"systemMessage": msg,
                           "hookSpecificOutput": {"hookEventName": "SessionStart",

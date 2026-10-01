@@ -7,7 +7,7 @@ import tomllib
 from pathlib import Path
 
 from govern import layout
-from govern.context import git_env, repo_of
+from govern.context import git, git_env, repo_of
 from govern.findings import Findings
 from govern.manifest import check
 
@@ -145,4 +145,19 @@ def tool_files_check(ctx, params) -> Findings:
     f = Findings()
     for msg in ignored_findings(ctx.root):
         f.warn(msg)
+    return f
+
+
+@check("local-layer", scope="workspace", since="0.5.1", default="error",
+       summary="Git does not track .context-gate/local.toml, the machine-local beta layer.",
+       question="Is .context-gate/local.toml kept out of commits?",
+       rationale="A committed beta pin reaches CI and every clone, where the beta is not "
+                 "installed; govern beta keeps it out of git through info/exclude.")
+def local_layer_check(ctx, params) -> Findings:
+    f = Findings()
+    if not (ctx.root / layout.LOCAL).is_file():
+        return f
+    if git(ctx.root, "ls-files", "--error-unmatch", layout.LOCAL) is not None:
+        f.error(f"{layout.LOCAL} is tracked by git — a beta pin must not reach CI or other "
+                f"clones; git rm --cached {layout.LOCAL}")
     return f

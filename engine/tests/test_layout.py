@@ -48,6 +48,11 @@ class EntrypointTemplate(unittest.TestCase):
         self.assertEqual(set(re.findall(r"([\w.-]+)/bin/govern", self.text)), {layout.GOV_DIR})
         self.assertIn(f"~/.local/share/{layout.TOOL}/engines/", self.text)
 
+    def test_local_matches_layout(self):
+        line = re.search(r'^LOCAL = GOV_DIR / "([^"]+)"$', self.text, re.M)
+        self.assertIsNotNone(line)
+        self.assertEqual(f"{layout.GOV_DIR}/{line.group(1)}", layout.LOCAL)
+
     def test_messages_name_the_tool(self):
         named = (re.findall(r'"([\w-]+): installing engine', self.text)
                  + re.findall(r'"(?:no )?([\w-]+) engine \{pin\}', self.text)
