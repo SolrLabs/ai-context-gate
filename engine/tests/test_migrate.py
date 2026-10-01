@@ -54,6 +54,7 @@ project = [{{ file = "DECISIONS.md", id = "decision-index" }}{trap_block}]
 
 [checks.decision-log]
 statuses = ["locked", "provisional", "superseded"]
+reasons = {{ statuses = "older entries predate the standard" }}
 """
 
 TRAP_BLOCK = ', { glob = "working-files/*traps*.md", id = "trap-index" }'

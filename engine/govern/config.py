@@ -45,7 +45,22 @@ LAYOUT_DIALECT = ("markers",)
 
 # Every key the engine reads from a registry entry, and where it reads it by default.
 REGISTRY_KEYS = ("name", "dir", "tier", "role", "governance", "id_prefix", "id_range",
-                 "purpose", "handoff", "licence", "upstream", "runtime_gate")
+                 "purpose", "handoff", "license", "upstream", "runtime_gate")
+
+# Names an earlier engine spelled differently, old -> new. An old name still loads, read as the
+# new one, with a warning to rename it (an upgrade never turns a project red); both names in one
+# place is an error, since neither can be read over the other. Two lookups, so a word is only
+# ever renamed where it was a name of that kind:
+# - check ids, and the key a built-in check's table-typed settings read under the same word (a
+#   `licenses` conflict side lists licenses under `licenses`);
+RENAMED_CHECKS = {"licences": "licenses"}  # writing-rules: allow licence, licences
+# - registry facts, wherever the engine reads a fact's name (`Scope.get` maps them too).
+RENAMED_FACTS = {"licence": "license"}  # writing-rules: allow licence
+# Every old name, for writing-rules' vocabulary.
+RENAMED = {**RENAMED_CHECKS, **RENAMED_FACTS}
+
+# Settings whose values name registry facts: (check, list param).
+FACT_LISTS = {("registry", "required_keys")}
 
 # section -> {key: type}. Types: str, int, bool, list, table, tables (array of tables).
 LAYOUT = {
@@ -68,10 +83,13 @@ LAYOUT = {
                  "required_docs": "list", "required_when": "tables",
                  "decision_log": "str", "working_dir": "str", "trap_glob": "str",
                  "trap_prefix": "str"},
-    "blocks": {"workspace": "tables", "project": "tables", "placeholder": "str",
-               "registry_columns": "tables"},
+    "blocks": {"workspace": "tables", "project": "tables", "registry_columns": "tables"},
     "checks": {"workspace_order": "list", "project_order": "list"},
 }
+
+# Keys an earlier engine accepted and this one no longer reads: named with what to do, rather than
+# reported as unknown, so a config written for the earlier engine says why it stopped loading.
+RETIRED = {("blocks", "placeholder"): "no longer used (it was never read): remove it"}
 
 TYPES = {"str": str, "int": int, "bool": bool, "list": list, "table": dict, "tables": list}
 
@@ -100,9 +118,13 @@ class Config:
     profile: Any = None                          # govern.profile.Profile, when one is named
     # (check, setting) pairs where the project changed what its profile set, with no reason
     profile_overrides: list[tuple[str, str]] = field(default_factory=list)
-    # (check, setting, added, removed): the project widened a list past what it inherited (the
-    # engine standard, or its profile), with no reason
-    list_overrides: list[tuple[str, str, list, list]] = field(default_factory=list)
+    # (layer, check, setting, added, removed): a layer widened a list past what it inherited
+    # (the engine standard, or the profile), with no reason, under `require_reasons = false`
+    # (with it, the default, loading refuses the widening)
+    list_overrides: list[tuple[str, str, str, list, list]] = field(default_factory=list)
+    # What loading found that is legal but almost certainly not meant (`excluded_docs`), for
+    # every command to say once, before its own output
+    warnings: list[str] = field(default_factory=list)
 
     def section(self, name: str) -> dict:
         return self.raw.get(name, {})
@@ -165,6 +187,138 @@ def _load_toml(path: Path) -> dict:
         raise ConfigError(f"{path}: unreadable ({exc.strerror})") from exc
 
 
+def renamed(where: str, old: str, new: str) -> str:
+    """The warning for an old name (RENAMED_CHECKS, RENAMED_FACTS) that still loads."""
+    return f"{where}: '{old}' is now '{new}' (the old name still works; rename it)"
+
+
+def rename_clash(where: str, old: str, new: str) -> ConfigError:
+    return ConfigError(f"{where}: '{old}' and '{new}' are both set — '{old}' is the old name "
+                       f"of '{new}', so neither can be read over the other: keep '{new}'")
+
+
+def check_id(cid: str) -> str:
+    """A check id as this engine names it: an old name (RENAMED_CHECKS) read as the new one,
+    unless a check (an extension's) is registered under the old name itself."""
+    return cid if cid in manifest.CHECKS else RENAMED_CHECKS.get(cid, cid)
+
+
+def fact_name(key: str) -> str:
+    """A registry fact's name as this engine reads it: an old name (RENAMED_FACTS) read as the
+    new one."""
+    return RENAMED_FACTS.get(key, key)
+
+
+def _renamed_keys(table: dict, renames: dict[str, str], known, where: str,
+                  warnings: list[str]) -> dict:
+    """`table` with each old key in `renames` whose new name is in `known` (None: any) read as
+    the new one, in its place, and one warning per old key used."""
+    out = dict(table)
+    for old, new in renames.items():
+        if old not in table or (known is not None and (new not in known or old in known)):
+            continue
+        if new in table:
+            raise rename_clash(where, old, new)
+        msg = renamed(where, old, new)
+        if msg not in warnings:
+            warnings.append(msg)
+        out = {(new if k == old else k): v for k, v in out.items()}
+    return out
+
+
+def _renamed_checks(raw: dict, where: str, warnings: list[str]) -> dict:
+    """A config's or a profile's settings with every old check id read as the new one — a
+    `[checks.*]` table, a `workspace_order`/`project_order` entry — and every old key inside a
+    built-in check's table-typed fields (the sides of a `licenses` conflict). Run once the
+    project's extensions are registered: a check an extension registers under an old name is
+    that check, not the renamed one."""
+    checks = raw.get("checks")
+    if not isinstance(checks, dict):
+        return raw
+    checks = _renamed_keys(checks, RENAMED_CHECKS, manifest.CHECKS, f"{where} [checks]",
+                           warnings)
+    for key in LAYOUT["checks"]:
+        names = checks.get(key)
+        if not isinstance(names, list):
+            continue
+        out = []
+        for cid in names:
+            new = check_id(cid) if isinstance(cid, str) else cid
+            if new != cid:
+                if new in names:
+                    raise rename_clash(f"{where} [checks] {key}", cid, new)
+                warnings.append(renamed(f"{where} [checks] {key}", cid, new))
+            out.append(new)
+        checks[key] = out
+    for cid, table in checks.items():
+        chk = manifest.CHECKS.get(cid)
+        if chk is None or not isinstance(table, dict) \
+                or not chk.fn.__module__.startswith("govern.checks."):
+            continue
+        table = dict(table)
+        for key, value in table.items():
+            base = key.removeprefix("extend_")
+            if (cid, base) in FACT_LISTS and isinstance(value, list):
+                table[key] = _renamed_values(value, f"{where} [checks.{cid}] {key}", warnings)
+                continue
+            p = chk.params.get(base)
+            sides = [f for f, kind in (p.fields if p else {}).items() if kind == "table"]
+            if not sides or p.type not in ("table", "tables"):
+                continue
+            items = value if isinstance(value, list) else [value]
+            fixed = [{f: (_renamed_keys(v, RENAMED_CHECKS, None, f"{where} [checks.{cid}] {key}",
+                                        warnings)
+                          if f in sides and isinstance(v, dict) else v)
+                      for f, v in item.items()} if isinstance(item, dict) else item
+                     for item in items]
+            table[key] = fixed if isinstance(value, list) else fixed[0]
+        checks[cid] = table
+    return {**raw, "checks": checks}
+
+
+def _renamed_layout(raw: dict, where: str, warnings: list[str]) -> dict:
+    """The project's settings with every old registry fact read as the new one: a `[repo]`
+    key, a `[registry.keys]` key, a `[projects] required_when` key. Run before validation, which
+    would otherwise refuse the old name as unknown."""
+    raw = dict(raw)
+    if isinstance(raw.get("repo"), dict):
+        raw["repo"] = _renamed_keys(raw["repo"], RENAMED_FACTS, REGISTRY_KEYS, f"{where} [repo]",
+                                    warnings)
+    reg = raw.get("registry")
+    if isinstance(reg, dict) and isinstance(reg.get("keys"), dict):
+        raw["registry"] = {**reg, "keys": _renamed_keys(reg["keys"], RENAMED_FACTS, REGISTRY_KEYS,
+                                                        f"{where} [registry.keys]", warnings)}
+    for section, key in (("projects", "required_when"), ("blocks", "registry_columns")):
+        table = raw.get(section)
+        if isinstance(table, dict) and isinstance(table.get(key), list):
+            raw[section] = {**table, key: [
+                _renamed_fact_key(item, f"{where} [{section}] {key}[{i}] key", warnings)
+                for i, item in enumerate(table[key])]}
+    return raw
+
+
+def _renamed_fact_key(item, where: str, warnings: list[str]):
+    """A table whose `key` names a registry fact, with an old name read as the new one."""
+    old = item.get("key") if isinstance(item, dict) else None
+    if not isinstance(old, str) or fact_name(old) == old:
+        return item
+    warnings.append(renamed(where, old, fact_name(old)))
+    return {**item, "key": fact_name(old)}
+
+
+def _renamed_values(names: list, where: str, warnings: list[str]) -> list:
+    """A list of registry fact names, with each old name read as the new one."""
+    out = []
+    for name in names:
+        new = fact_name(name) if isinstance(name, str) else name
+        if new != name:
+            if new in names:
+                raise rename_clash(where, name, new)
+            warnings.append(renamed(where, name, new))
+        out.append(new)
+    return out
+
+
 def _check_type(where: str, value: Any, kind: str) -> None:
     want = TYPES[kind]
     ok = isinstance(value, want) and not (want is int and isinstance(value, bool))
@@ -183,9 +337,16 @@ def _validate_layout(raw: dict, name: str) -> None:
         if not isinstance(value, dict):
             raise ConfigError(f"{name}: [{section}] must be a table")
         for key, v in value.items():
+            if (section, key) in RETIRED:
+                raise ConfigError(f"{name}: [{section}] {key} is {RETIRED[section, key]}")
             if key not in LAYOUT[section]:
                 raise ConfigError(f"{name}: unknown key '{key}' in [{section}]")
             _check_type(f"{name}: [{section}] {key}", v, LAYOUT[section][key])
+            if key == "docs":
+                # Each a glob: read at load (`excluded_docs`), so a non-string one is named
+                # here rather than failing every command with a traceback.
+                for i, item in enumerate(v):
+                    _check_type(f"{name}: [{section}] docs[{i}]", item, "str")
     for key, choices in DIALECT_CHOICES.items():
         v = raw.get("dialect", {}).get(key)
         if v is not None and v not in choices:
@@ -217,6 +378,15 @@ def _is_absolute_pattern(pattern: str) -> bool:
     POSIX (`/...`) or Windows (`C:\\...`, `C:x`, `\\x`, `\\\\...`). `Path.glob` refuses one of
     these with a bare `NotImplementedError`, so it is caught here, at load, with a reason."""
     return pattern.startswith(("/", "\\")) or bool(re.match(r"^[A-Za-z]:", pattern))
+
+
+def normalize_glob(glob: str) -> str:
+    """A configured glob as `Path.glob` and `glob_matches` read it: `/` for every `\\`, one `/`
+    for a run of them, and no `.` segment (`./docs/*.md` and `docs/./*.md` are `docs/*.md`, `a/.`
+    is `a`), so a glob written for Windows or with a `.` in it means what it says. A leading or
+    trailing `/` stays. `''` when it names no path at all."""
+    glob = re.sub(r"/{2,}", "/", glob.replace("\\", "/"))
+    return "/".join(s for s in glob.split("/") if s != ".")
 
 
 def _validate_tables(raw: dict, name: str) -> None:
@@ -276,6 +446,15 @@ def _check_param(where: str, p: manifest.Param, value: Any) -> None:
     if p.type == "tables":
         for i, item in enumerate(value):
             _check_fields(f"{where}[{i}]", p, item)
+    if p.globs:
+        for item in value:
+            _check_type(where, item, "str")
+            if _is_absolute_pattern(item) or _is_absolute_pattern(normalize_glob(item)):
+                raise ConfigError(f"{where}: '{item}' must be relative to the governance root, "
+                                  f"not absolute")
+            if normalize_glob(item) == "":
+                raise ConfigError(f"{where}: '{item}' names no path — a glob names files "
+                                  f"relative to the governance root")
     if p.type == "table" and p.fields:
         _check_fields(where, p, value)
 
@@ -339,9 +518,18 @@ def _list_widening(chk: manifest.Check, before: dict[str, Any], s: CheckSettings
     return out
 
 
+def widening(added: list, removed: list) -> str:
+    """What a list widening did, naming only its loosening side (see `_list_widening`)."""
+    return ("adds " + ", ".join(repr(v) for v in added) if added
+            else "drops " + ", ".join(repr(v) for v in removed))
+
+
 def _resolve_checks(layers: list[tuple[str, dict]], require_reasons: bool,
                     overrides: list | None = None,
-                    list_overrides: list | None = None) -> dict[str, CheckSettings]:
+                    list_overrides: list | None = None,
+                    profile_name: str = "profile") -> dict[str, CheckSettings]:
+    """`profile_name`: how an error names the profile layer (its source), so a widening it
+    refuses points at the file to fix."""
     overrides = [] if overrides is None else overrides
     list_overrides = [] if list_overrides is None else list_overrides
     settings: dict[str, CheckSettings] = {}
@@ -358,7 +546,7 @@ def _resolve_checks(layers: list[tuple[str, dict]], require_reasons: bool,
             if not isinstance(table, dict):
                 raise ConfigError(f"{layer}: [checks.{cid}] must be a table")
             chk, s = manifest.CHECKS[cid], settings[cid]
-            before = dict(s.params) if layer == "project" else None
+            before = dict(s.params)
             for key, value in table.items():
                 where = f"{layer}: [checks.{cid}] {key}"
                 base = key.removeprefix("extend_")
@@ -375,6 +563,10 @@ def _resolve_checks(layers: list[tuple[str, dict]], require_reasons: bool,
                     if chk.core and value == "off":
                         raise ConfigError(f"{where}: '{cid}' is part of the fixed core and "
                                           f"cannot be turned off")
+                    if layer == "project" and s.source.get("level") == "profile" \
+                            and manifest.LEVELS.index(value) < manifest.LEVELS.index(s.level) \
+                            and not table.get("reason"):
+                        overrides.append((cid, "level"))
                     s.level = value
                 elif key == "reason":
                     _check_type(where, value, "str")
@@ -405,15 +597,31 @@ def _resolve_checks(layers: list[tuple[str, dict]], require_reasons: bool,
                              *(["ratchet"] if chk.ratchets else []), *chk.params]
                     raise ConfigError(f"{where}: unknown setting (known: {', '.join(known)})")
                 s.source[key] = layer
-            if before is not None:
-                widened = _list_widening(chk, before, s, table)
-                widened_keys = {key for key, _, _ in widened}
-                # A list's own loosening message covers the override completely (one warning
-                # per override): drop the generic "overrides the profile" entry for the same key.
-                overrides[:] = [ov for ov in overrides
-                                if not (ov[0] == cid and ov[1] in widened_keys)]
-                for key, added, removed in widened:
-                    list_overrides.append((cid, key, added, removed))
+            widened = _list_widening(chk, before, s, table)
+            if widened and require_reasons:
+                # Widening a list is loosening, refused like a loosened limit: a profile's
+                # widening as much as a project's.
+                if layer == "profile":
+                    from govern.profile import PRINCIPLES
+                    raise ConfigError("; ".join(
+                        f"{profile_name}: [checks.{cid}] {key} {widening(added, removed)} — "
+                        f"loosens past the engine standard without a reason: say why under "
+                        f"[checks.{cid}.reasons] {key} in the profile's {PRINCIPLES} (a pinned "
+                        f"profile: then tag it and move the project's pin), or keep the "
+                        f"standard's list"
+                        for key, added, removed in widened))
+                raise ConfigError("; ".join(
+                    f"{layer}: [checks.{cid}] {key} {widening(added, removed)} — loosens past "
+                    f"what the {layer} inherits without a reason: say why in "
+                    f"[checks.{cid}.reasons] {key}, or keep the inherited list"
+                    for key, added, removed in widened))
+            widened_keys = {key for key, _, _ in widened}
+            # A list's own loosening message covers the override completely (one warning
+            # per override): drop the generic "overrides the profile" entry for the same key.
+            overrides[:] = [ov for ov in overrides
+                            if not (ov[0] == cid and ov[1] in widened_keys)]
+            for key, added, removed in widened:
+                list_overrides.append((layer, cid, key, added, removed))
     if require_reasons:
         for cid, s in settings.items():
             chk = manifest.CHECKS[cid]
@@ -445,15 +653,35 @@ def load_extensions(root: Path, dirs: list[str]) -> None:
             spec.loader.exec_module(module)
 
 
+def excluded_docs(raw: dict) -> list[str]:
+    """A `docs` entry that names a path under a directory the docs scan always leaves out
+    (`context.DEFAULT_DOC_EXCLUDES`: `.claude/x.md`, say) matches nothing the gate governs, and
+    was dropped without a word. One warning per such entry, naming it and the exclude that wins.
+    Said at load, so every command says it, not only `explain`, which nobody runs to find out
+    why a doc they listed is not checked."""
+    from govern.context import default_exclude
+    out = []
+    for section in ("workspace", "projects"):
+        for entry in raw.get(section, {}).get("docs", []):
+            wins = default_exclude(entry)
+            if wins is not None:
+                out.append(f"[{section}] docs entry '{entry}' is never governed: the "
+                           f"always-applied exclude '{wins}' wins — move the doc, or drop the "
+                           f"entry")
+    return out
+
+
 def load(root: Path, home: Path) -> Config:
     path = root / CONFIG_NAME
-    raw = _load_toml(path)
+    warnings: list[str] = []
+    raw = _renamed_layout(_load_toml(path), CONFIG_NAME, warnings)
     _validate_layout(raw, CONFIG_NAME)
     if "registry" in raw and "repo" in raw:
         raise ConfigError(f"{CONFIG_NAME}: [registry] and [repo] are both set — a registry "
                           f"file names the projects; [repo] only describes this root itself, "
                           f"for when there is no registry at all. Keep one.")
     load_extensions(root, raw.get("governance", {}).get("extensions", []))
+    raw = _renamed_checks(raw, CONFIG_NAME, warnings)
     for key in ("workspace_order", "project_order"):
         for cid in raw.get("checks", {}).get(key, []):
             if cid not in manifest.CHECKS:
@@ -472,14 +700,25 @@ def load(root: Path, home: Path) -> Config:
             prof = profiles.load(gov["profile"], root, home)
         except profiles.ProfileError as exc:
             raise ConfigError(str(exc)) from exc
+        prof.settings = _renamed_checks(prof.settings,
+                                        f"profile {prof.source} ({profiles.PRINCIPLES})", warnings)
         extra = sorted(set(prof.settings) - {"checks", "dialect", "profile"})
         if extra:
             raise ConfigError(f"profile {profiles.PRINCIPLES}: sets {', '.join(extra)}; a profile "
                               f"holds [checks.*] and [dialect] only — layout belongs to projects")
         pd = prof.settings.get("dialect", {})
-        for key in pd:
+        name = f"profile {prof.source} ({profiles.PRINCIPLES})"
+        if not isinstance(pd, dict):
+            raise ConfigError(f"{name}: [dialect] must be a table")
+        for key, value in pd.items():
             if key != "reasons" and key not in DIALECT_DEFAULTS:
-                raise ConfigError(f"profile {profiles.PRINCIPLES}: unknown [dialect] key '{key}'")
+                raise ConfigError(f"{name}: unknown [dialect] key '{key}'")
+            # Checked as a project's are (`_validate_layout`): a value no dialect reads would
+            # otherwise reach every check that branches on it.
+            _check_type(f"{name}: [dialect] {key}", value, LAYOUT["dialect"][key])
+            if key in DIALECT_CHOICES and value not in DIALECT_CHOICES[key]:
+                raise ConfigError(f"{name}: [dialect] {key} = '{value}' is not one of "
+                                  f"{DIALECT_CHOICES[key]}")
         layers.append(("profile", prof.settings))
     layers.append(("project", raw))
     dialect = {**DIALECT_DEFAULTS,
@@ -488,7 +727,9 @@ def load(root: Path, home: Path) -> Config:
                **{k: v for k, v in raw.get("dialect", {}).items() if k != "reasons"}}
     overrides: list = []
     list_overrides: list = []
-    checks = _resolve_checks(layers, gov.get("require_reasons", True), overrides, list_overrides)
+    checks = _resolve_checks(layers, gov.get("require_reasons", True), overrides, list_overrides,
+                             f"profile {prof.source} ({profiles.PRINCIPLES})" if prof else "profile")
     return Config(root=root, path=path, raw=raw, dialect=dialect, checks=checks,
                   notes=[pin_note] if pin_note else [], profile=prof,
-                  profile_overrides=overrides, list_overrides=list_overrides)
+                  profile_overrides=overrides, list_overrides=list_overrides,
+                  warnings=warnings + excluded_docs(raw))

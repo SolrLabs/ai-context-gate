@@ -26,7 +26,9 @@ class Param:
     though it removes rather than adds. `unlimited`, on an int param, is the one value nothing
     is looser than (e.g. `max_turns`'s 0 meaning no ceiling) — declared per param, not guessed
     from a default of 0, so an unrelated param that happens to default to 0 is not silently
-    exempted from needing a reason when raised."""
+    exempted from needing a reason when raised. `globs=True`, on a `list` param, marks a list of
+    globs relative to the governance root: each is read through `config.normalize_glob`, and one
+    that names no path at all (`.`, `./`, empty) or is absolute is refused at load."""
     type: str                      # int | str | bool | list | enum | table | tables
     default: Any
     help: str
@@ -38,6 +40,7 @@ class Param:
     required: tuple = ()
     empty_means_any: bool = False
     unlimited: Any = None
+    globs: bool = False
 
 
 @dataclass(frozen=True)
@@ -59,6 +62,8 @@ class Check:
                                  # scope, under `check --project X` — `fn(ctx, params, scope)`
                                  # in that case, `fn(ctx, params)` otherwise
     ratchets: bool = False      # its size breaches feed the ratchet (a project may opt out)
+    needs: tuple = ()           # params that must be non-empty for the check to do anything
+    suggest: Callable | None = None   # opt-in checks: `suggest(ctx, settings) -> str | None`
 
 
 CHECKS: dict[str, Check] = {}
@@ -69,7 +74,7 @@ def check(id: str, *, scope: str, since: str, summary: str, question: str, ratio
           default: str = "error", applies: str = "all",
           params: dict[str, Param] | None = None, origin: str = "engine",
           core: bool = False, also_workspace: bool = False, also_project: bool = False,
-          ratchets: bool = False):
+          ratchets: bool = False, needs: tuple = (), suggest: Callable | None = None):
     """Register a check. Workspace checks are called `fn(ctx, params)`; project checks
     `fn(ctx, params, scope)` once per registry entry the check applies to. `also_project` marks
     a workspace check that also knows how to restrict itself to one project (its `fn` then takes
@@ -88,13 +93,18 @@ def check(id: str, *, scope: str, since: str, summary: str, question: str, ratio
     for name, text in (("summary", summary), ("question", question), ("rationale", rationale)):
         if not text.strip():
             raise ValueError(f"check {id}: a manifest entry needs a {name}")
+    unknown = [n for n in needs if n not in (params or {})]
+    if unknown:
+        raise ValueError(f"check {id}: needs names {unknown}, which are not its params")
+    if suggest is not None and default != "off":
+        raise ValueError(f"check {id}: only an opt-in check (default off) takes suggest")
 
     def deco(fn: Callable) -> Callable:
         if id in CHECKS:
             raise ValueError(f"check {id} is registered twice")
         CHECKS[id] = Check(id, scope, since, default, summary, question, rationale, applies,
                            dict(params or {}), fn, origin, core, also_workspace, also_project,
-                           ratchets)
+                           ratchets, needs=tuple(needs), suggest=suggest)
         _ORDER.append(id)
         return fn
     return deco

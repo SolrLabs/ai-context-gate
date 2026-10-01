@@ -16,7 +16,15 @@ def _hint(params) -> str:
     return f" — {params['setup_hint']}" if params["setup_hint"] else ""
 
 
-@check("checkout-hygiene", scope="project", since="0.4.0", default="off",
+def _suggest(ctx, s) -> str | None:
+    forks = [sc.name for sc in ctx.registry.scopes
+             if sc.get("upstream") and sc.get("role") not in s.params["roles"]]
+    if not forks:
+        return None
+    return f"registry entries with an upstream that no role check covers: {', '.join(forks)}"
+
+
+@check("checkout-hygiene", scope="project", since="0.4.0", default="off", suggest=_suggest,
        summary="Checkouts in the configured registry roles carry none of the governance root's "
                "own files, and their upstream remote matches the registry.",
        question="Do you govern checkouts of repositories you don't want your governance files "
@@ -33,7 +41,8 @@ def _hint(params) -> str:
            "upstream_remote": Param("str", "upstream", "Remote whose URL must equal the "
                                                        "registry's upstream"),
            "setup_hint": Param("str", "", "What to run when a checkout or remote is missing"),
-       })
+       },
+       needs=("roles",))
 def checkout_hygiene(ctx, params, scope) -> Findings:
     f = Findings()
     role = scope.get("role")

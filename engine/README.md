@@ -4,7 +4,7 @@ purpose: Layout of the governance engine, how a project runs it, and how it is t
 audience: both
 load_when: changing the engine, adding a check, or wiring the engine into a project
 related: [../docs/how-it-works.md, ../docs/configuration.md, ../docs/checks.md]
-last_reviewed: 2026-09-21
+last_reviewed: 2026-09-24
 ---
 
 # The engine (`govern`)
@@ -20,7 +20,7 @@ setting in [configuration](../docs/configuration.md), and every check in
 | `installer.py` | Install, upgrade and uninstall, recorded in `installed.toml` |
 | `report.py` | The install and upgrade reports: findings before against after |
 | `templates/entrypoint.py` | Installed as `bin/govern` and `bin/uninstall` |
-| `cli.py` | Subcommands (`check`, `index`, `baseline`, `next-id`, `show`, `find`, `trap-add`), the check runner, exit codes. `check --project X --path DIR [--history-from DIR]` checks `X` from `DIR` instead of the checkout the registry names — a git pre-commit hook's staged-tree snapshot, say — dating any git question a project-scope check asks about those files from `--history-from`'s checkout instead, since the snapshot itself carries no history |
+| `cli.py` | Subcommands (`check`, `index`, `baseline`, `next-id`, `show`, `find`, `trap-add`), the check runner, exit codes. `check --project X --path DIR [--history-from DIR]` checks `X` from `DIR` instead of the checkout the registry names — a git pre-commit hook's staged-tree snapshot, say — dating any git question a project-scope check asks about those files from `--history-from`'s checkout instead, since the snapshot itself carries no history. `check --workspace-only` checks the workspace alone, skipping every project scope, for an orchestrator's CI without its checkouts |
 | `manifest.py` | The `@check` decorator: every check declares its scope, level, parameters, question and rationale |
 | `config.py` | Loading and strictly validating `.context-gate/config.toml`; resolving each check's settings across layers; loading extensions |
 | `registry.py` | Scopes from the project's registry file, with each fact's location configured and checked — or, with no `[registry]` table, the one scope a single repo is |
@@ -46,11 +46,11 @@ file` names a `registry.toml` (or whatever `entries`/`workspace` are configured 
 A `config.toml` with **no `[registry]` table at all** governs one repo: itself. There is exactly
 one project scope, this governance root, described by an optional `[repo]` table carrying any
 fact a registry entry could (`name`, `dir`, `tier`, `role`, `governance`, `id_prefix`,
-`id_range`, `purpose`, `handoff`, `licence`, `upstream`, `runtime_gate` — see `REGISTRY_KEYS` in
+`id_range`, `purpose`, `handoff`, `license`, `upstream`, `runtime_gate` — see `REGISTRY_KEYS` in
 `config.py`), all of them optional. Three locational facts default rather than being left unset,
 since there is nowhere else they could sensibly mean or nothing else to compare them against:
 `name` to the root directory's own name, `dir` and `governance` to `.`, and `tier` to the first of
-`[projects] governed_tiers`. An id range and a licence are still the project's to set, exactly as
+`[projects] governed_tiers`. An id range and a license are still the project's to set, exactly as
 an entry that leaves them unset would be. Project-scope checks (decision log, doc frontmatter,
 and the rest) run against this one scope unconditionally; workspace-scope checks still run too,
 except that in single-repo mode the workspace scope has no decision log of its own unless
@@ -92,7 +92,9 @@ python3 <project>/.context-gate/bin/uninstall
 Install writes `install-report.md`: the findings of a previous gate (run from `--entrypoint`
 before it is replaced, if one is named) against the new gate's, each new finding under the check that raised it with that check's rationale,
 plus every setting that differs from the engine's defaults. Upgrade pins the project to the
-engine it is run with, refreshes `bin/`, and writes `upgrade-report.md` the same way. `explain`
+engine it is run with, refreshes `bin/`, regenerates the generated blocks (as `index` does, so
+a block the old engine rendered never reads as stale), and writes `upgrade-report.md` the same
+way. `explain`
 prints every effective setting and where it came from.
 
 After any command, the gate prints one line when a newer engine exists (installed here, or
@@ -171,5 +173,5 @@ tools/ci/run-tests.sh --host                          # the same, plus the plugi
 tools/ci/run-tests.sh                                 # and again on Python 3.11 in Docker
 ```
 
-Run from the repo root. `engine/tests/test_regressions.py` holds the engine's behavioural tests,
-each named after the behaviour it pins.
+Run from the repo root. `engine/tests/test_regressions.py` holds the engine's behavioral tests,
+each named after the behavior it pins.

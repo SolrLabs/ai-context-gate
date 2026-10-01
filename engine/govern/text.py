@@ -216,8 +216,10 @@ COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 
 
 def word_count(text: str, markers: Markers) -> int:
-    """Words a reader actually reads: HTML comments and generated blocks excluded."""
-    return len(markers.strip_blocks(COMMENT_RE.sub("", text)).split())
+    """Words a reader actually reads: generated blocks and HTML comments excluded. Blocks go
+    first: their markers are HTML comments, so stripping comments first leaves no block to find
+    and every generated row counts as prose."""
+    return len(COMMENT_RE.sub("", markers.strip_blocks(text)).split())
 
 
 def claude_project_slug(root: Path) -> str:

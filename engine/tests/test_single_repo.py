@@ -400,5 +400,61 @@ class MinimalSingleRepo(Base):
         self.assertIn("README.md", rels)
 
 
+class RenamedRepoFact(Base):
+    """`[repo] licence`, the registry fact's name before it became `license`, still loads as
+    `license`, with a warning to rename it; both together is an error."""
+
+    def test_an_old_repo_fact_reads_as_the_new_one(self):
+        r = self.repo(extra='licence = "MIT"\n\n[checks.licenses]\nlevel = "error"\n')
+        code, out, err = r.run("check")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f"warning: {CFG} [repo]: 'licence' is now 'license' (the old name still "
+                      f"works; rename it)", err)
+        self.assertEqual(r.context().registry.scopes[0].get("license"), "MIT")
+
+    def test_an_old_fact_in_required_keys_stays_green(self):
+        r = self.repo(extra='licence = "MIT"\n\n[checks.registry]\n'
+                            'required_keys = ["name", "dir", "tier", "licence"]\n')
+        code, out, err = r.run("check")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f"warning: {CFG} [checks.registry] required_keys: 'licence' is now "
+                      f"'license'", err)
+
+    def test_old_and_new_fact_in_required_keys_are_an_error(self):
+        r = self.repo(extra='license = "MIT"\n\n[checks.registry]\n'
+                            'required_keys = ["name", "licence", "license"]\n')
+        code, out, err = r.run("check")
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("[checks.registry] required_keys: 'licence' and 'license' are both set", err)
+
+    def test_an_old_fact_as_a_registry_column_still_renders(self):
+        from govern import blocks
+        r = self.repo(extra='licence = "MIT"\n')
+        cfg = r.root / CFG
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(
+            "[blocks]\n",
+            '[blocks]\nregistry_columns = [{ header = "License", key = "licence" }]\n', 1))
+        ctx = r.context()
+        self.assertIn("| MIT |", blocks.registry_table(ctx))
+        self.assertIn(f"{CFG} [blocks] registry_columns[0] key: 'licence' is now 'license' "
+                      f"(the old name still works; rename it)", ctx.cfg.warnings)
+
+    def test_both_repo_facts_are_an_error(self):
+        code, out, err = self.repo(extra='licence = "MIT"\nlicense = "MIT"\n').run("check")
+        self.assertEqual(code, 2, out + err)
+        self.assertIn(f"{CFG} [repo]: 'licence' and 'license' are both set", err)
+
+
+class WorkspaceOnlyRefused(Base):
+    """`check --workspace-only` skips every project scope; in a single repo the repo is its one
+    project, so there is nothing left to check and the flag is refused."""
+
+    def test_workspace_only_is_refused_on_a_single_repo(self):
+        code, out, err = SingleRepo(self.tmp).run("check", "--workspace-only")
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("--workspace-only needs a registry workspace", err)
+        self.assertEqual(out, "")
+
+
 if __name__ == "__main__":
     unittest.main()

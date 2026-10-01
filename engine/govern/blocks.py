@@ -187,7 +187,7 @@ def targets(ctx, scope=None):
                 continue
             build = workspace_builders[t.get("render", t["id"])]
             yield path, t["id"], (lambda b=build, p=path: b(p))
-        scopes = ctx.registry.scopes
+        scopes = ctx.project_scopes
     else:
         scopes = [scope]
     for scope in scopes:

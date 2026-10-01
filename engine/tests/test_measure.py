@@ -300,6 +300,18 @@ class ExampleWorkspaceShape(Base):
         self.assertEqual(m.registry_keys, {"handoff": "profile.handoff"})
         self.assertFalse(m.governance_key_missing)
 
+    def test_a_registry_fact_under_its_old_name_is_mapped_not_renamed(self):
+        # `licence` is `license` now: adopt maps the fact where the registry keeps it, so a
+        # registry file other tools read keeps its spelling and loads with no warning.
+        reg = self.root / "projects.toml"
+        text = reg.read_text(encoding="utf-8")
+        put(reg, text.replace("[project.profile]\n", '[project.profile]\nlicence = "MIT"\n'))
+        self.assertEqual(measure.measure(self.root).registry_keys,
+                         {"handoff": "profile.handoff", "license": "profile.licence"})
+        put(reg, text.replace('tier = "full"\n', 'tier = "full"\nlicence = "MIT"\n'))
+        self.assertEqual(measure.measure(self.root).registry_keys,
+                         {"handoff": "profile.handoff", "license": "licence"})
+
     def test_scopes_are_the_governance_dirs_never_the_shared_checkout(self):
         # `core` has governance = "" and a tier that isn't full: skipped.
         self.assertEqual([(s.name, s.dir) for s in self.m.scopes],

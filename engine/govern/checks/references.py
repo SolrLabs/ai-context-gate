@@ -37,7 +37,7 @@ def stale_references(ctx, params) -> Findings:
     if not renames:
         return f
     docs = ctx.workspace_docs()
-    for s in ctx.registry.scopes:
+    for s in ctx.project_scopes:
         if s.governed and s.gov is not None:
             docs += [p for _, p in ctx.governed_docs(s.gov) if p not in docs]
     docs += [p for p in sorted((ctx.root / ".claude").rglob("*.md"))

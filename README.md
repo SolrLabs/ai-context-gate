@@ -30,7 +30,7 @@ reading every file.
 | Docs | Frontmatter on governed docs, links that resolve, docs reachable from an index, word limits on handoffs, a cap on the governed doc count |
 | Working files | How many are open, and finished ones left behind |
 | Agents and skills | Required frontmatter on `.claude/agents/*.md` (model, effort, description …), well-formed skills, agent worktrees kept out of commits |
-| Hygiene (opt-in) | Checkout state, hooks wired, licences declared per repo, writing rules, stale references |
+| Hygiene | Stale references; opt-in: checkout state, hooks wired, licenses declared per repo, writing rules |
 
 `govern explain` in a governed project shows every effective setting and which layer it came from.
 
@@ -73,6 +73,9 @@ Run `govern check` from a pre-commit hook or CI, the way you run your tests.
 **Upgrading:** when a newer engine is available, the plugin tells the session. `/context-gate:upgrade`
 walks through each change and prices every policy choice in files and tokens.
 
+**Options:** some checks stay off until a project turns them on. `govern options` shows each one's
+state and a suggestion; `/context-gate:options` turns them on or off.
+
 **Removing it:** `python3 .context-gate/bin/uninstall` removes everything the tool added and restores
 what it replaced.
 
@@ -94,7 +97,7 @@ from its profile records why.
 | Path | What |
 |---|---|
 | `engine/govern/` | The engine: checks, config, installer, adopt and upgrade |
-| `plugin/` | The Claude Code plugin: adopt and upgrade skills, a session-start notice |
+| `plugin/` | The Claude Code plugin: adopt, upgrade and options skills, a session-start notice |
 | `tools/release/` | Install a tagged engine or plugin from a clone |
 | `CONTRIBUTING.md` | Running the tests, loading the plugin from a checkout, adding a check |
 | `docs/how-it-works.md` | How the gate, the ratchet, profiles and upgrades fit together |
@@ -107,13 +110,13 @@ context-gate changes files in your repository when you adopt, upgrade or uninsta
 commits or pushes, and adopt shows what it will change before `--apply`, but you are
 responsible for reviewing every change before you commit it. The software is provided "as is",
 without warranty of any kind, and without liability for any damage arising from its use, as set
-out in sections 7 and 8 of the [licence](LICENSE).
+out in sections 7 and 8 of the [license](LICENSE).
 
 ## Feedback
 
 This is an alpha. Open an issue for bugs, confusing output, or a check that fires on something
 that's fine; include the `govern check` output and your `.context-gate/config.toml`.
 
-## Licence
+## License
 
 Apache License 2.0. Copyright 2026 SolrLabs LLC. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

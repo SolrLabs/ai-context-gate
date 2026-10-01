@@ -3,7 +3,7 @@ doc_type: reference
 purpose: Every table and key .context-gate/config.toml accepts, with types, defaults and examples.
 audience: human
 load_when: writing or changing a project's config.toml or a profile's principles.toml
-last_reviewed: 2026-09-21
+last_reviewed: 2026-09-23
 ---
 
 # Configuration reference
@@ -86,8 +86,8 @@ Optional. Every key is a string, and every key is optional.
 | `id_prefix` | none | The decision-id prefix, like `"P"` for `P-12` |
 | `id_range` | none | The decision numbers this log may use, `"LO-HI"` |
 | `handoff` | none | The HANDOFF file, relative to the root |
-| `role` | none | Used by `checkout-hygiene` and `licences` to pick entries by role |
-| `licence` | none | The project's license, read by `licences` |
+| `role` | none | Used by `checkout-hygiene` and `licenses` to pick entries by role |
+| `license` | none | The project's license, read by `licenses` |
 | `upstream` | none | The upstream remote URL, read by `checkout-hygiene` |
 | `purpose`, `runtime_gate` | none | Descriptive facts, shown in a registry column if one is configured |
 
@@ -139,7 +139,7 @@ tier = "full"
 governance = "governance/web"
 id_prefix = "A"
 id_range = "100-199"
-licence = "MIT"
+license = "MIT"
 
 [[project]]
 name = "docs-site"
@@ -209,9 +209,12 @@ Where every project keeps its records. Paths are relative to each project's gove
 
 Governed docs never include files under `node_modules/`, `.venv/`, `venv/`, `vendor/`, `dist/`,
 `build/`, `target/`, `.git/`, `.context-gate/` (the tool's own files and reports) or `.claude/`
-(agents and skills have checks of their own), or files git ignores. These always apply, even to
+(agents and skills have checks of their own), at any depth (`sub/node_modules/x.md` too) and
+in any case (`Build/` too, on every OS), or files git ignores; adopt's measurement skips the same directories. These always apply, even to
 a `docs` glob such as `**/*.md` that would otherwise match them, and `exclude` adds to them. The
-workspace's own `[workspace] docs` globs leave out the same directories. When adopt finds no docs
+workspace's own `[workspace] docs` globs leave out the same directories. A `docs` entry under one
+of them (`.claude/x.md`, say) is never governed, and every command warns about it once, naming
+the entry and the exclude that wins. When adopt finds no docs
 directory, it proposes an `exclude` listing the repo's GitHub-facing files that have no
 frontmatter (`README.md`, `CHANGELOG.md` and the like), which you can edit.
 
@@ -247,7 +250,6 @@ the block's id and the [`[dialect] markers`](#dialect) prefix:
 | `workspace` | list of tables | Blocks in the workspace's own docs. Each needs `id` and `file` (relative to the root) and may set `render`. |
 | `project` | list of tables | Blocks in every governed project. Each needs `id` and exactly one of `file` or `glob` (relative to the governance directory), and may set `render` and `sources`. |
 | `registry_columns` | list of tables | The columns of the `registry` block |
-| `placeholder` | string | Accepted, but not read by this engine version |
 
 `render` names what the block shows and defaults to the block's `id`:
 
@@ -381,6 +383,59 @@ level = "error"
 extend_hooks = [{ script = ".claude/hooks/guard.py", event = "PreToolUse", matcher = "Bash" }]
 ```
 
+`writing-rules` never flags one of the engine's own names where it is used as a name, since a
+project cannot rename it: a check id, a parameter, a config table or key, a registry fact, or an
+old name that still loads (see [Renamed names](#renamed-names)). A match counts as used as a name
+when the run of letters, digits, `_` and `-` around it is one of those names, and it sits
+anywhere in the config, the profile's `principles.toml` or the registry file, or inside a Markdown
+inline code span or fenced block. Prose, and every other file, is checked in full: the project's
+own code is flagged, and so is a code span that is not one of the engine's names. The count in a
+finding is the matches left once those are skipped.
+
+A file under this tool's own directory (`.context-gate/`, whose reports quote the configured rules
+back), `.claude/` or an always-excluded directory (`build/`, `node_modules/` and the rest, at any
+depth and in any case) is never checked, whether a glob or an explicit path names it. Nor is a
+file git ignores (asked of the repository that holds it, a nested checkout's own included),
+unless `include_ignored` names it: list drafts kept out of git there to check them anyway. An
+entry that matched files but kept none of them is reported as a warning, with why. `exclude` lists
+more globs to leave out; adding to it loosens the check, so it needs its reason in `reasons`.
+Adding to `include_ignored` checks more, so it needs none. All three lists are globs relative to
+the governance root, matched as `Path.glob` matches (`*` within one directory, `**` across any
+number) and case-sensitive on every OS; `\` reads as `/`, a run of `/` as one, and a `.` segment
+(`./docs`, `docs/./*.md`) is dropped. A wildcard component matches a name in either Unicode form
+(composed or decomposed) everywhere; a literal component does so only on a file system that
+treats the two forms as one. An entry that names no path (`.`, `./`, empty) or is absolute
+(`/docs/*.md`, `C:/docs/*.md`) stops the config loading, and one that finds files only in another
+case (`Notes/*.md` for `notes/`) warns, naming one. For example:
+
+```toml
+[governance]
+engine = "0.5.0"
+
+[checks.writing-rules]
+level = "error"
+files = ["**/*.md", "**/*.py", "outbound/*.md"]
+exclude = ["tests/fixtures/**"]
+include_ignored = ["outbound/*.md"]
+reasons = { exclude = "Fixtures spell the old names on purpose." }
+```
+
+A spelling that must stay, such as a deprecated name kept for back-compat, is kept by a marker on
+the same line: `writing-rules: allow <text>`, or several texts separated by commas, usually in a
+comment. A rule whose `text` the marker names (in any case, with or without quotes or backticks
+around it) is not counted on that line, the marker's own mention included; the next line, and any
+other rule's text on the marked line, are checked as usual. The list runs to the end of the line
+or of the comment it sits in (`-->`, `*/`), so put no note after it on that line. A marker naming
+a text no rule has does nothing.
+
+```python
+RENAMED = {"licence": "license"}  # writing-rules: allow licence
+```
+
+```markdown
+The old `Licence` heading stays for inbound links. <!-- writing-rules: allow licence -->
+```
+
 ### Loosening needs a reason
 
 A setting looser than the engine standard needs a `reason` in the same check's table, or the
@@ -405,9 +460,10 @@ reason = "Nobody here uses Claude Code's memory."
 ```
 
 Widening a list (adding a value to an allow-list, removing one from a required list, or emptying
-an allow-list where empty means anything goes) loads, but the `standard-overrides` check warns
-until that list has its own entry in `reasons`. A `reason` written for one setting never excuses
-another.
+an allow-list where empty means anything goes) needs that list's own entry in the check's
+`reasons` table, or the config does not load. The error names the check, the list and the values
+added or removed. A `reason` written for one setting never excuses another. A profile that widens
+a list past the engine standard needs the same entry in its own table.
 
 ```toml
 [governance]
@@ -419,14 +475,64 @@ reasons = { doc_types = "Runbooks are a doc type of their own here." }
 ```
 
 The same check warns when a project changes a setting its profile set without a `reason`.
-`[governance] require_reasons = false` removes the requirement for a `reason`; the
-`standard-overrides` warnings still apply.
+`[governance] require_reasons = false` removes the requirement for a `reason` and for a
+`reasons` entry; the `standard-overrides` check warns instead, a widened list included.
+
+## Renamed names
+
+Engine 0.5.0 spells its own names in American English: the check `licences` is now `licenses`
+(and so is the key a `licenses` conflict side lists licenses under), and the registry fact
+`licence` is now `license`. An old name still loads, read as the new one, wherever the new one
+is accepted: a `[checks.*]` table in the config or the profile, a run order, `[repo]`,
+`[registry.keys]`, a `[projects] required_when` or `[blocks] registry_columns` key, the
+`registry` check's `required_keys`, a registry entry, `govern explain` and
+`govern options --record`. Every command then warns once per place (once per registry file,
+naming its entries), saying what to rename. Setting both names in one place is an error. A
+registry file other tools read too can keep `licence` with no warning by mapping it:
+`[registry.keys] license = "licence"` (adopt proposes that mapping for such a registry).
+
+## Options
+
+An **option** is a check that ships `default = "off"` — today, `writing-rules`, `hooks-wired`,
+`checkout-hygiene` and `licenses`. Run `python3 .context-gate/bin/govern options` to see every
+option's state, or `/context-gate:options` in Claude Code to change them.
+
+| State | Project (`config.toml`) | Profile (`principles.toml`) |
+|---|---|---|
+| On | `level = "error"` | `level = "error"` |
+| Off | `level = "off"` | the `level` key removed |
+| Inherit | the `level` key removed | (not a profile state) |
+
+Inherit only appears in a project that names a profile: it takes the profile's setting, shown
+alongside it in the `options` table. Turning a project's option off when its profile turns it on
+is a loosening, so it needs a `reason`, as any loosening does. An option that is on but missing a
+parameter it needs to do anything — `writing-rules` with no `files`, `hooks-wired` with no
+`hooks` — is reported as inert, not as on.
+
+The table shows each option's `since`, whether it is new to this project, and a suggestion
+computed from what adopt already measures (a fork with no `checkout-hygiene` role, say). `--json`
+gives the same data as the field set the skills parse. `--global` shows the profile's own layer
+only, for editing `principles.toml` in its checkout.
+
+`.context-gate/installed.toml` carries `options_answered`, the ids this project has answered (on,
+off or inherit). An id is added only once it is answered, by `govern options --record CHECK ...`;
+a person who quits the panel partway is offered the rest again. Adopt writes the same answers from
+`--answers` keys `option:<id>` (on, off or inherit), `option:<id>:<setting>` (a parameter the
+option needs), and `option:<id>:reason` (for a loosening).
+
+```
+govern options [--global] [--json] [--record CHECK ...]
+```
+
+See [how-it-works.md](how-it-works.md#options) for when options come up, and
+[checks.md](checks.md) for each option's parameters and `Needs` line.
 
 ## Profiles
 
 A profile directory's `principles.toml` uses the same `[checks.<id>]` and `[dialect]` tables as a
-project's config, and sits between the engine standard and the project. Its check settings are
-validated the same way as a project's. It may also carry a `[profile]` table, which the engine does not read. Any other table
+project's config, and sits between the engine standard and the project. Its check settings and
+`[dialect]` values are validated the same way as a project's; an error names the profile and the
+key. It may also carry a `[profile]` table, which the engine does not read. Any other table
 (layout) is an error: where a project keeps its files is the project's business.
 
 ```toml
