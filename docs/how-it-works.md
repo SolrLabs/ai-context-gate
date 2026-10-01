@@ -213,7 +213,8 @@ and nothing overwrites it: restore it from git.
 |---|---|
 | `.context-gate/config.toml` | The project's policy |
 | `.context-gate/baseline.json` | The ratchet baseline |
-| `.context-gate/bin/govern` | The gate: runs the pinned engine |
+| `.context-gate/local.toml` | Optional, this machine only, never committed: names a locally installed beta for the entrypoint to run instead of the pin (`govern beta`) |
+| `.context-gate/bin/govern` | The gate: runs the pinned engine, or the beta `local.toml` names |
 | `.context-gate/bin/upgrade` | Moves the project to a newer engine |
 | `.context-gate/bin/uninstall` | Removes the tool |
 | `.context-gate/installed.toml` | Everything the install touched outside `.context-gate/`, so uninstall can reverse it |

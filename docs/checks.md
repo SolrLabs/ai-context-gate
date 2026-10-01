@@ -37,6 +37,7 @@ Each check has a level: `off`, `warn` or `error`. At `error`, a check reports wh
 | [`standard-overrides`](#standard-overrides) | `warn` | Every format setting that differs from the standard, every setting that differs from the project's profile, and every list setting widened past what it inherited, says why. |
 | [`git-repo`](#git-repo) | `warn` | The governance root is inside a git repository. |
 | [`tool-files`](#tool-files) | `warn` | Git ignores none of the files the gate needs committed: its config, baseline, install record and entry points. |
+| [`local-layer`](#local-layer) | `error` | Git does not track .context-gate/local.toml, the machine-local beta layer. |
 
 ## Registry and checkouts
 
@@ -618,5 +619,22 @@ Git ignores none of the files the gate needs committed: its config, baseline, in
 **Question:** Does this project's .gitignore leave the gate's own files alone? A `bin/` rule for build output also matches `.context-gate/bin/`.
 
 **Why:** A commit that leaves out an ignored entry point ships a config with nothing to run it: every other clone, and CI, has no gate.
+
+No parameters: set its `level` only.
+
+### `local-layer`
+
+Git does not track .context-gate/local.toml, the machine-local beta layer.
+
+| | |
+|---|---|
+| Default level | `error` |
+| Scope | Runs once for the governance root |
+| Ratchet | No |
+| Since | 0.5.1 |
+
+**Question:** Is .context-gate/local.toml kept out of commits?
+
+**Why:** A committed beta pin reaches CI and every clone, where the beta is not installed; govern beta keeps it out of git through info/exclude.
 
 No parameters: set its `level` only.

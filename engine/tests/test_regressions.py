@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unicodedata
 import unittest
 from datetime import date, timedelta
@@ -175,6 +176,35 @@ class Base(unittest.TestCase):
 
     def ws(self, **kw) -> Workspace:
         return Workspace(self.tmp, **kw)
+
+    def _installed(self, w):
+        """Install for real (the installer writes the entry point), under a throwaway HOME."""
+        cfg = self.tmp / "config.toml"
+        shutil.move(str(w.root / CFG), str(cfg))
+        (w.root / layout.GOV_DIR).rmdir()
+        env = {k: v for k, v in os.environ.items() if k != "GOVERN_ENGINE"}
+        env["HOME"] = str(w.home)
+        res = subprocess.run([sys.executable, "-m", "govern.installer", "install", "--root",
+                              str(w.root), "--config", str(cfg)],
+                             env={**env, "PYTHONPATH": str(ENGINE)}, capture_output=True,
+                             text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return w.root / layout.ENTRYPOINT, env
+
+    def _engines(self, w, versions):
+        for version in versions:
+            shutil.copytree(ENGINE / "govern", layout.engines_dir(w.home) / version / "govern",
+                            ignore=shutil.ignore_patterns("__pycache__"))
+
+    def _which(self, entry, env) -> str:
+        probe = ("import sys, runpy\n"
+                 "try:\n"
+                 f"    runpy.run_path({str(entry)!r}, run_name='__main__')\n"
+                 "except SystemExit: pass\n"
+                 "print([p for p in sys.path if 'engines' in p][0])")
+        res = subprocess.run([sys.executable, "-c", probe], env=env, capture_output=True,
+                             text=True)
+        return res.stdout.strip()
 
 
 class Baseline(Base):
@@ -1357,6 +1387,7 @@ _MAJOR, _MINOR = (int(x) for x in __version__.split(".")[:2])
 SERIES = f"{_MAJOR}.{_MINOR}"
 PREV_SERIES = f"{_MAJOR}.{_MINOR - 1}" if _MINOR else f"{_MAJOR - 1}.99"
 NEXT_RELEASE = f"{_MAJOR}.{_MINOR + 1}.0"
+BETA = f"{SERIES}.99-beta.1"
 
 
 class EnginePin(Base):
@@ -1383,35 +1414,6 @@ class EnginePin(Base):
         self.assertEqual(code, 0)
         self.assertIn(f"this project pins the series {SERIES}", err)
         self.assertIn(f"Use python3 .context-gate/bin/upgrade to pin {__version__} exactly", err)
-
-    def _installed(self, w):
-        """Install for real (the installer writes the entry point), under a throwaway HOME."""
-        cfg = self.tmp / "config.toml"
-        shutil.move(str(w.root / CFG), str(cfg))
-        (w.root / layout.GOV_DIR).rmdir()
-        env = {k: v for k, v in os.environ.items() if k != "GOVERN_ENGINE"}
-        env["HOME"] = str(w.home)
-        res = subprocess.run([sys.executable, "-m", "govern.installer", "install", "--root",
-                              str(w.root), "--config", str(cfg)],
-                             env={**env, "PYTHONPATH": str(ENGINE)}, capture_output=True,
-                             text=True)
-        self.assertEqual(res.returncode, 0, res.stderr)
-        return w.root / layout.ENTRYPOINT, env
-
-    def _engines(self, w, versions):
-        for version in versions:
-            shutil.copytree(ENGINE / "govern", layout.engines_dir(w.home) / version / "govern",
-                            ignore=shutil.ignore_patterns("__pycache__"))
-
-    def _which(self, entry, env) -> str:
-        probe = ("import sys, runpy\n"
-                 "try:\n"
-                 f"    runpy.run_path({str(entry)!r}, run_name='__main__')\n"
-                 "except SystemExit: pass\n"
-                 "print([p for p in sys.path if 'engines' in p][0])")
-        res = subprocess.run([sys.executable, "-c", probe], env=env, capture_output=True,
-                             text=True)
-        return res.stdout.strip()
 
     def test_entrypoint_runs_exactly_the_pinned_engine(self):
         w = self.ws()
@@ -1465,6 +1467,510 @@ class EnginePin(Base):
                              text=True)
         self.assertEqual(res.returncode, 2)
         self.assertIn(f"engine {__version__} is not installed", res.stderr)
+
+    # A beta this machine opted into, in .context-gate/local.toml (never committed).
+    def _local(self, w, text):
+        wtext(w.root / layout.LOCAL, text)
+
+    def _check(self, entry, env):
+        return subprocess.run([sys.executable, str(entry), "check"], env=env,
+                              capture_output=True, text=True)
+
+    def test_no_local_file_changes_nothing(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        self._engines(w, (__version__, BETA))
+        res = self._check(entry, env)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotIn("beta", res.stderr)
+        self.assertTrue(self._which(entry, env).endswith(__version__))
+
+    def test_local_beta_runs(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        self._engines(w, (__version__, BETA))
+        self._local(w, f'[governance]\nengine = "{BETA}"\n')
+        self.assertTrue(self._which(entry, env).endswith(BETA))
+        res = self._check(entry, env)
+        self.assertIn(f"context-gate: running beta {BETA} on this machine (committed pin "
+                      f"{__version__}); govern beta off to leave it", res.stderr)
+
+    def test_missing_beta_falls_back(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        self._engines(w, (__version__,))
+        self._local(w, f'[governance]\nengine = "{BETA}"\n')
+        res = self._check(entry, env)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn(f"beta {BETA} is not installed, running the committed pin "
+                      f"{__version__}", res.stderr)
+        self.assertEqual(res.stderr.count("context-gate: beta"), 1, res.stderr)
+        self.assertTrue(self._which(entry, env).endswith(__version__))
+
+    def test_local_naming_a_stable_is_ignored(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        self._engines(w, (__version__, NEXT_RELEASE))
+        self._local(w, f'[governance]\nengine = "{NEXT_RELEASE}"\n')
+        self.assertTrue(self._which(entry, env).endswith(__version__))
+        self.assertIn(f"local.toml names no beta engine ('{NEXT_RELEASE}')",
+                      self._check(entry, env).stderr)
+
+    def test_unreadable_local_runs_the_pin(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        self._engines(w, (__version__, BETA))
+        for text in (f'[governance\nengine = "{BETA}"\n', "[governance]\n",
+                     'governance = "x"\n', b"\xff"):
+            (w.root / layout.LOCAL).write_bytes(text if isinstance(text, bytes) else text.encode())
+            res = self._check(entry, env)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertIn(f"running the committed pin {__version__}; govern beta off to clear it",
+                          res.stderr)
+            self.assertTrue(self._which(entry, env).endswith(__version__))
+
+class BetaCommand(Base):
+    """`govern beta`, handled by the entry point before any engine loads: on checks everything
+    before writing anything, off needs no engine, and the user's own settings survive both."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        w = self.ws()
+        self.entry, self.env = self._installed(w)
+        self._engines(w, (__version__, BETA))
+        self.root, self.home = w.root, w.home
+        self.env = {**self.env, "XDG_CONFIG_HOME": str(self.home)}
+        self.git("init", "-q", str(self.root))
+        (self.root / ".claude").mkdir()
+        self.settings = self.root / ".claude" / "settings.local.json"
+        self.plugin_release = self.home / ".claude/skills/context-gate/govern/RELEASE"
+        self.plugin_release.parent.mkdir(parents=True)
+        wtext(self.plugin_release, f"v{BETA}\n")
+
+    def git(self, *args: str, env=None) -> subprocess.CompletedProcess:
+        """git under the temp HOME: the developer's own git config never reaches a test."""
+        return subprocess.run(["git", *args], env=env or self.env, capture_output=True,
+                              text=True)
+
+    def run_beta(self, *args: str, env=None) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, str(self.entry), "beta", *args],
+                              env=env or self.env, capture_output=True, text=True)
+
+    def check_ignored(self) -> int:
+        return self.git("-C", str(self.root), "check-ignore", "-q", layout.LOCAL).returncode
+
+    def state(self) -> dict:
+        """Every file in the project, its bytes, git's exclude included."""
+        files = [p for p in self.root.rglob("*") if p.is_file() and ".git" not in p.parts]
+        files.append(self.root / ".git" / "info" / "exclude")
+        return {p: p.read_bytes() for p in files if p.is_file()}
+
+    def test_on_then_off_restores_settings(self):
+        own = {"permissions": {"allow": ["Bash(ls)"]}, "enabledPlugins": {"x@y": True},
+               "note": "caf\u00e9"}
+        wtext(self.settings, json.dumps(own, indent=2, ensure_ascii=False) + "\n")
+        before = self.settings.read_bytes()
+        res = self.run_beta("on", BETA)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        got = json.loads(self.settings.read_text(encoding="utf-8"))
+        self.assertEqual(got["enabledPlugins"], {"x@y": True, "context-gate@skills-dir": True,
+                                                 "context-gate@context-gate": False})
+        self.assertEqual(got["permissions"], own["permissions"])
+        self.assertIn(f'engine = "{BETA}"', (self.root / layout.LOCAL).read_text(encoding="utf-8"))
+        self.assertEqual(self.check_ignored(), 0)
+        self.assertIn("Restart the Claude Code session", res.stdout)
+        res = self.run_beta("off")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.settings.read_bytes(), before)
+        self.assertFalse((self.root / layout.LOCAL).exists())
+        self.assertIn("Back on the committed pin", res.stdout)
+
+    def test_on_and_off_with_no_settings_file(self):
+        self.assertEqual(self.run_beta("on", BETA).returncode, 0)
+        self.assertTrue(self.settings.is_file())
+        self.assertEqual(self.run_beta("off").returncode, 0)
+        self.assertFalse(self.settings.exists())
+
+    def test_settings_bom_and_crlf_survive(self):
+        raw = b'\xef\xbb\xbf{\r\n  "permissions": {}\r\n}\r\n'
+        self.settings.write_bytes(raw)
+        self.assertEqual(self.run_beta("on", BETA).returncode, 0)
+        on = self.settings.read_bytes()
+        self.assertTrue(on.startswith(b"\xef\xbb\xbf"))
+        self.assertNotIn(b"\n", on.replace(b"\r\n", b""))
+        self.assertEqual(self.run_beta("off").returncode, 0)
+        self.assertEqual(self.settings.read_bytes(), raw)
+
+    def test_on_twice_changes_nothing(self):
+        self.assertEqual(self.run_beta("on", BETA).returncode, 0)
+        once = self.state()
+        self.assertEqual(self.run_beta("on", f"v{BETA}").returncode, 0)
+        self.assertEqual(self.state(), once)
+        exclude = (self.root / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+        self.assertEqual(exclude.count(layout.LOCAL), 1)
+
+    def test_on_keeps_other_tables_for_the_same_beta(self):
+        text = f'[governance]\nengine = "{BETA}"\n\n[checks.usage]\nenabled = true\n'
+        wtext(self.root / layout.LOCAL, text)
+        self.assertEqual(self.run_beta("on", BETA).returncode, 0)
+        self.assertEqual((self.root / layout.LOCAL).read_text(encoding="utf-8"), text)
+
+    def test_off_twice_and_with_engine_gone(self):
+        self.assertEqual(self.run_beta("on", BETA).returncode, 0)
+        shutil.rmtree(layout.engines_dir(self.home))
+        res = self.run_beta("off")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertFalse((self.root / layout.LOCAL).exists())
+        self.assertFalse(self.settings.exists())
+        res = self.run_beta("off")
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("no beta is on", res.stdout)
+
+    def test_refusals_change_nothing(self):
+        other = f"{SERIES}.99-beta.2"
+        self._engines(SimpleNamespace(home=self.home), (other,))
+        cases = [
+            (("on", NEXT_RELEASE), "not a beta", None),
+            (("on", f"{SERIES}.98-beta.1"), "install-engine.py", None),
+            (("on", other), "install-plugin.py", None),
+            (("on",), "usage", None),
+            (("on", BETA), f"beta {other} is on here: govern beta off first",
+             lambda: wtext(self.root / layout.LOCAL, f'[governance]\nengine = "{other}"\n')),
+            (("on", BETA), "names no beta (None): govern beta off first",
+             lambda: wtext(self.root / layout.LOCAL, "[governance\n")),
+            (("on", BETA), "is unreadable", lambda: (self.root / layout.LOCAL).write_bytes(b"\xff")),
+            (("on", BETA), "not valid settings JSON",
+             lambda: wtext(self.settings, '{"enabledPlugins": {"context-gate@context-gate": "x"}}')),
+            (("on", BETA), "no .claude/ directory",
+             lambda: (self.root / ".claude").rmdir()),
+            (("on", BETA), "not valid settings JSON", lambda: wtext(self.settings, "[]")),
+            (("on", BETA), "not valid settings JSON",
+             lambda: wtext(self.settings, '{"enabledPlugins": []}')),
+            (("on", BETA), "not valid settings JSON",
+             lambda: self.settings.write_bytes(b'{"a": "\xff"}')),
+            (("off",), "not valid settings JSON", lambda: (
+                wtext(self.settings, "{not json"),
+                wtext(self.root / layout.LOCAL, f'[governance]\nengine = "{BETA}"\n'))),
+            (("on", BETA), "git cannot say", lambda: shutil.rmtree(self.root / ".git")),
+        ]
+        for args, words, arrange in cases:
+            with self.subTest(args=args, words=words):
+                for path in (self.root / layout.LOCAL, self.settings):
+                    if path.is_file():
+                        path.unlink()
+                (self.root / ".claude").mkdir(exist_ok=True)
+                if arrange:
+                    arrange()
+                before = self.state()
+                res = self.run_beta(*args)
+                self.assertEqual(res.returncode, 2, res.stdout + res.stderr)
+                self.assertIn(words, res.stderr)
+                self.assertNotIn("Traceback", res.stderr)
+                self.assertEqual(self.state(), before)
+
+    def test_plugin_must_match(self):
+        wtext(self.plugin_release, "v0.0.1-beta.1\n")
+        res = self.run_beta("on", BETA)
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("install-plugin.py", res.stderr)
+        self.plugin_release.unlink()
+        res = self.run_beta("on", BETA)
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("install-plugin.py", res.stderr)
+
+    def test_invalid_settings_is_never_rewritten(self):
+        wtext(self.settings, "{not json")
+        self.assertEqual(self.run_beta("on", BETA).returncode, 2)
+        self.assertEqual(self.settings.read_text(encoding="utf-8"), "{not json")
+        self.assertFalse((self.root / layout.LOCAL).exists())
+
+    def test_failed_write_leaves_the_originals(self):
+        # A settings path that cannot be written (here, a directory): local.toml, written
+        # first, is taken back.
+        self.settings.mkdir()
+        res = self.run_beta("on", BETA)
+        self.assertEqual(res.returncode, 2, res.stderr)
+        self.assertIn("nothing changed", res.stderr)
+        self.assertFalse((self.root / layout.LOCAL).exists())
+
+    def test_exclude_lands_in_the_enclosing_repo(self):
+        # Review Focus 5: the project root is a subdirectory of the git repository.
+        repo = self.root.parent
+        shutil.rmtree(self.root / ".git")
+        self.git("init", "-q", str(repo))
+        res = self.run_beta("on", BETA)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        rel = f"{self.root.name}/{layout.LOCAL}"
+        res = self.git("-C", str(repo), "check-ignore", "-q", rel)
+        self.assertEqual(res.returncode, 0)
+        self.assertNotIn(".gitignore", {p.name for p in repo.iterdir()})
+        self.assertNotIn(".gitignore", {p.name for p in self.root.iterdir()})
+
+    def test_status(self):
+        self.assertIn("no beta", self.run_beta().stdout)
+        self.run_beta("on", BETA)
+        out = self.run_beta().stdout
+        self.assertIn(f"beta {BETA}", out)
+        self.assertIn("engine: installed", out)
+        self.assertIn("plugin: installed", out)
+        self.assertIn("settings.local.json: beta on, stable off", out)
+        wtext(self.plugin_release, f"v{SERIES}.99-beta.2\n")
+        shutil.rmtree(layout.engines_dir(self.home) / BETA)
+        out = self.run_beta().stdout
+        self.assertIn("engine: missing", out)
+        self.assertIn(f"plugin: is {SERIES}.99-beta.2", out)
+
+    def test_status_says_when_both_plugins_load(self):
+        """enabledPlugins merged as Claude Code merges it: user, then project, then local."""
+        both = ("context-gate: both the beta and the stable plugin are enabled here, so every "
+                f"hook runs twice; govern beta on {BETA} re-applies the switch")
+        user, project = self.home / ".claude" / "settings.json", self.root / ".claude" / "settings.json"
+        user.parent.mkdir(parents=True, exist_ok=True)
+        wtext(user, '{"enabledPlugins": {"context-gate@context-gate": true}}\n')
+        self.assertEqual(self.run_beta("on", BETA).returncode, 0)
+        self.assertNotIn(both, self.run_beta().stdout)    # local's false wins over user's true
+        data = json.loads(self.settings.read_text(encoding="utf-8"))
+        del data["enabledPlugins"]["context-gate@context-gate"]
+        wtext(self.settings, json.dumps(data))
+        self.assertIn(both, self.run_beta().stdout)       # nothing above the user's true now
+        wtext(project, '{"enabledPlugins": {"context-gate@context-gate": false}}\n')
+        self.assertNotIn(both, self.run_beta().stdout)    # project's false over user's true
+        wtext(project, "{not json")
+        self.assertIn(both, self.run_beta().stdout)       # an unreadable file is skipped
+
+    def test_prior_plugin_values_survive(self):
+        own = {"enabledPlugins": {"context-gate@context-gate": True, "x@y": True}}
+        wtext(self.settings, json.dumps(own, indent=2) + "\n")
+        before = self.settings.read_bytes()
+        self.assertEqual(self.run_beta("on", BETA).returncode, 0)
+        self.assertIn('plugins_before = { "context-gate@context-gate" = true }',
+                      (self.root / layout.LOCAL).read_text(encoding="utf-8"))
+        self.assertEqual(self.run_beta("off").returncode, 0)
+        self.assertEqual(self.settings.read_bytes(), before)
+
+    def test_no_plugins_before_line_when_neither_key_existed(self):
+        self.assertEqual(self.run_beta("on", BETA).returncode, 0)
+        self.assertNotIn("plugins_before", (self.root / layout.LOCAL).read_text(encoding="utf-8"))
+
+    def test_off_without_local_toml_touches_nothing(self):
+        wtext(self.settings, '{"enabledPlugins": {"context-gate@context-gate": true}}\n')
+        before = self.state()
+        res = self.run_beta("off")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("no beta is on in this project", res.stdout)
+        self.assertEqual(self.state(), before)
+
+    def test_on_makes_git_ignore_the_settings_file(self):
+        self.assertEqual(self.run_beta("on", BETA).returncode, 0)
+        status = self.git("-C", str(self.root), "status", "--porcelain", "-uall").stdout
+        self.assertNotIn(".claude/", status)
+
+    def _fake_git(self, body: str) -> dict:
+        real = shutil.which("git")
+        bin_dir = self.tmp / "fakebin"
+        bin_dir.mkdir()
+        script = bin_dir / "git"
+        wtext(script, f"#!{sys.executable}\nimport os, sys\nREAL = {real!r}\n{body}\n")
+        script.chmod(0o755)
+        return {**self.env, "PATH": f"{bin_dir}{os.pathsep}{self.env['PATH']}"}
+
+    @unittest.skipIf(os.name == "nt", "the fake git is a shebang script, which Windows does not run from PATH")
+    def test_exclude_survives_a_git_that_echoes_unknown_flags(self):
+        # git < 2.31 prints an unknown rev-parse flag back and exits 0.
+        env = self._fake_git(
+            "args = sys.argv[1:]\n"
+            "if '--path-format=absolute' in args:\n"
+            "    print('--path-format=absolute')\n"
+            "    args.remove('--path-format=absolute')\n"
+            "os.execv(REAL, [REAL, *args])")
+        res = self.run_beta("on", BETA, env=env)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        exclude = (self.root / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+        self.assertIn(f"/{layout.LOCAL}", exclude)
+        self.assertEqual(self.check_ignored(), 0)
+
+    @unittest.skipIf(os.name == "nt", "the fake git is a shebang script, which Windows does not run from PATH")
+    def test_exclude_outside_the_git_dir_is_refused(self):
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        env = self._fake_git(
+            "args = sys.argv[1:]\n"
+            "if '--git-path' in args:\n"
+            f"    print({str(elsewhere / 'exclude')!r})\n"
+            "    sys.exit(0)\n"
+            "os.execv(REAL, [REAL, *args])")
+        before = self.state()
+        res = self.run_beta("on", BETA, env=env)
+        self.assertEqual(res.returncode, 2, res.stdout)
+        self.assertIn("which is not inside", res.stderr)
+        self.assertEqual(self.state(), before)
+        self.assertEqual(list(elsewhere.iterdir()), [])
+
+    def test_uninstall_does_not_take_beta(self):
+        # Only the gate dispatches `beta`: bin/uninstall hands its argv to the installer.
+        uninstall = self.root / layout.GOV_DIR / "bin" / "uninstall"
+        res = subprocess.run([sys.executable, str(uninstall), "beta"], env=self.env,
+                             capture_output=True, text=True)
+        self.assertNotIn("no beta", res.stdout + res.stderr)
+
+
+class LocalLayer(Base):
+    """`.context-gate/local.toml` is the top config layer for the beta engine it names, on this
+    machine only: that beta accepts the committed pin it does not match, and every other engine
+    never reads the file."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        from unittest import mock
+        self.mock = mock
+        self.w = self.ws(extra='\n[checks.writing-rules]\nlevel = "warn"\n')
+
+    def local(self, text: str | bytes = "") -> None:
+        if isinstance(text, str):
+            text = f'[governance]\nengine = "{BETA}"\n' + text
+        self.w.write(layout.LOCAL, text)
+
+    def load(self, engine: str | None = BETA) -> config.Config:
+        if engine is None:
+            return config.load(self.w.root, self.w.home)
+        with self.mock.patch.object(config, "__version__", engine):
+            return config.load(self.w.root, self.w.home)
+
+    def refused(self, engine: str | None = BETA) -> str:
+        with self.assertRaises(config.ConfigError) as ctx:
+            self.load(engine)
+        return str(ctx.exception)
+
+    def test_the_beta_it_names_runs_the_committed_pin_and_local_wins(self):
+        self.local('\n[checks.writing-rules]\nlevel = "error"\n')
+        s = self.load().checks["writing-rules"]
+        self.assertEqual((s.level, s.source["level"]), ("error", "local"))
+
+    def test_the_settings_beta_on_writes_load(self):
+        self.local('plugins_before = { "context-gate@context-gate" = true }\n')
+        self.assertEqual(self.load().checks["writing-rules"].source["level"], "project")
+
+    def test_overriding_a_principle_from_it_is_named(self):
+        prof = self.tmp / "prof"
+        prof.mkdir()
+        wtext(prof / "principles.toml", '[checks.agents]\nmax_turns = 100\n'
+              '\n[checks.working-file-count]\nlevel = "error"\n')
+        cfg = self.w.root / CFG
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(
+            "schema = 1", f'schema = 1\nprofile = "{prof.as_posix()}"', 1))
+        self.local('\n[checks.agents]\nmax_turns = 50\n'
+                   '\n[checks.working-file-count]\nlevel = "warn"\n')
+        self.assertEqual(sorted(self.load().profile_overrides),
+                         [("agents", "max_turns"), ("working-file-count", "level")])
+
+    def test_a_stable_engine_ignores_it(self):
+        self.local('\n[checks.no-such-check]\nlevel = "error"\n')
+        s = self.load(None).checks["writing-rules"]
+        self.assertEqual((s.level, s.source["level"]), ("warn", "project"))
+        code, _, err = self.w.run("check")
+        self.assertNotEqual(code, 2, err)
+        self.assertNotIn("no-such-check", err)
+
+    def test_a_stable_engine_ignores_it_even_when_it_names_that_engine(self):
+        self.w.write(layout.LOCAL, f'[governance]\nengine = "{__version__}"\n'
+                     '\n[checks.no-such-check]\nlevel = "error"\n')
+        self.assertEqual(self.load(None).checks["writing-rules"].level, "warn")
+
+    def test_another_beta_ignores_it_and_refuses_the_committed_pin(self):
+        self.local('\n[checks.no-such-check]\nlevel = "error"\n')
+        err = self.refused(f"{SERIES}.99-beta.2")
+        self.assertIn(f"pins engine {__version__}", err)
+        self.assertNotIn("no-such-check", err)
+
+    def test_no_local_file_and_a_beta_engine_is_refused(self):
+        # A beta never runs a project silently: only local.toml lets it past the pin.
+        self.assertIn(f"pins engine {__version__}, but this is engine {BETA}", self.refused())
+
+    def test_an_unreadable_file_is_ignored_not_a_traceback(self):
+        self.local(b'[governance]\nengine = "\xff"\n')
+        self.assertIn(f"pins engine {__version__}", self.refused())
+
+    def test_another_governance_key_is_refused(self):
+        self.local('profile = "x"\n')
+        err = self.refused()
+        self.assertIn("local.toml", err)
+        self.assertIn("profile", err)
+
+    def test_a_layout_table_is_refused(self):
+        self.local('\n[projects]\nrequired_docs = ["X.md"]\n')
+        self.assertIn(f"{layout.LOCAL}: sets projects", self.refused())
+
+    def test_a_check_order_is_refused(self):
+        self.local('\n[checks]\nworkspace_order = ["writing-rules"]\n')
+        self.assertIn(f"{layout.LOCAL}: [checks] sets workspace_order", self.refused())
+
+    def test_plugins_before_must_map_ids_to_booleans(self):
+        self.local('plugins_before = { "context-gate@context-gate" = "yes" }\n')
+        self.assertIn("plugins_before must be a table", self.refused())
+
+    def test_widening_a_list_needs_its_reason(self):
+        self.local('\n[checks.decision-log]\n'
+                   'statuses = ["locked", "provisional", "superseded", "dropped"]\n')
+        self.assertTrue(self.refused().startswith(f"{layout.LOCAL}: [checks."))
+
+    def test_a_beta_pin_in_the_committed_config_is_refused(self):
+        cfg = self.w.root / CFG
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(
+            f'engine = "{__version__}"', f'engine = "{BETA}"', 1))
+        self.assertIn(f"{CFG} pins beta {BETA}; a beta runs only from {layout.LOCAL} on one "
+                      f"machine (govern beta on {BETA}) — pin a release", self.refused(None))
+
+    def test_engine_alone_activates_it(self):
+        # What `govern beta on` writes: only the engine it names.
+        self.w.write(layout.LOCAL, f'[governance]\nengine = "{BETA}"\n')
+        self.assertEqual(self.load().checks["writing-rules"].level, "warn")
+
+    def pin(self, new: str) -> None:
+        cfg = self.w.root / CFG
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(f'engine = "{__version__}"', new, 1))
+
+    def test_the_layer_does_not_excuse_a_missing_committed_pin(self):
+        self.pin("")
+        self.local()
+        self.assertIn("[governance] engine is required", self.refused())
+
+    def test_the_layer_does_not_excuse_a_beta_committed_pin(self):
+        self.pin(f'engine = "{BETA}"')
+        self.local()
+        self.assertIn(f"pins beta {BETA}", self.refused())
+
+    def test_an_override_set_there_is_reported_under_its_file(self):
+        prof = self.tmp / "prof"
+        prof.mkdir()
+        wtext(prof / "principles.toml", '[checks.working-file-count]\nlevel = "error"\n')
+        cfg = self.w.root / CFG
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(
+            "schema = 1", f'schema = 1\nprofile = "{prof.as_posix()}"', 1))
+        self.local('\n[checks.working-file-count]\nlevel = "warn"\n')
+        warns = self.overrides_warnings()
+        self.assertTrue(any(w.startswith(f"{layout.LOCAL}: [checks.working-file-count]")
+                            for w in warns), warns)
+
+    def test_a_widening_set_there_is_reported_under_its_file(self):
+        wtext(self.w.root / CFG, (self.w.root / CFG).read_text(encoding="utf-8").replace(
+            "schema = 1", "schema = 1\nrequire_reasons = false", 1))
+        self.local('\n[checks.decision-log]\n'
+                   'statuses = ["locked", "provisional", "superseded", "dropped"]\n')
+        warns = self.overrides_warnings()
+        self.assertTrue(any(w.startswith(f"{layout.LOCAL}: [checks.decision-log] statuses")
+                            for w in warns), warns)
+
+    def overrides_warnings(self) -> list[str]:
+        from govern.checks.overrides import standard_overrides
+        cfg = self.load()
+        return [str(x) for x in standard_overrides(self.mock.Mock(cfg=cfg), {}).warnings]
+
+    def test_loosening_there_without_a_reason_names_the_file(self):
+        self.local('\n[checks.agent-worktrees]\nlevel = "off"\n')
+        err = self.refused()
+        self.assertIn(layout.LOCAL, err)
+        self.assertIn("agent-worktrees", err)
+
 
 class LineEndings(Base):
     """A CRLF checkout (git on Windows with autocrlf) behaves exactly like an LF one."""
@@ -1708,13 +2214,15 @@ def make_source(where: Path, tags: tuple) -> Path:
 
 class Notice(Base):
     def test_release_at_the_source_is_announced_once_checked(self):
+        from unittest import mock
         src = make_source(self.tmp, (__version__, "0.9.0"))
         w = self.ws()
         cfg = w.root / CFG
         wtext(cfg, cfg.read_text(encoding="utf-8").replace(
             "schema = 1", f'schema = 1\nsource = "{src.as_posix()}"', 1))
         os.environ.pop(notice.NO_UPDATE_CHECK, None)
-        code, _, err = w.run("check")
+        with mock.patch.object(notice, "__version__", "0.5.0"):   # a stable engine, whatever this is
+            code, _, err = w.run("check")
         self.assertIn("context-gate 0.9.0 available", err)
         self.assertTrue((w.home / ".cache" / layout.TOOL / "releases.json").is_file())
         os.environ["CONTEXT_GATE_NO_UPDATE_CHECK"] = "1"
@@ -1723,6 +2231,45 @@ class Notice(Base):
         code, _, err = w.run("check")
         self.assertNotIn("available", err)
         self.assertFalse((w.home / ".cache" / layout.TOOL / "releases.json").exists())
+
+    def _engines(self, home: Path, *versions: str) -> None:
+        for v in versions:
+            (layout.engines_dir(home) / v / "govern").mkdir(parents=True)
+
+    def test_newest_available_is_never_a_beta(self):
+        """Stable code paths never return a beta: an installed beta, even one numbered above
+        every release, is not what a project is told to upgrade to."""
+        home = self.tmp / "home"
+        self._engines(home, "99.0.0-beta.1", "0.5.0")
+        self.assertEqual(notice.newest_available(home, None), "0.5.0")
+        self.assertEqual(notice.installed_versions(home), ["0.5.0"])
+
+    def test_only_betas_installed_and_none_released_is_no_newest(self):
+        home = self.tmp / "home"
+        self._engines(home, "99.0.0-beta.1")
+        self.assertIsNone(notice.newest_available(home, None))
+        # Nor does a beta that reached the release cache count as a release.
+        cache = home / ".cache" / layout.TOOL / "releases.json"
+        cache.parent.mkdir(parents=True)
+        cache.write_text(json.dumps({"src": {"checked": time.time(), "ok": True,
+                                             "versions": ["99.0.0-beta.1"]}}), encoding="utf-8")
+        self.assertIsNone(notice.newest_available(home, "src"))
+
+    def test_a_beta_tag_at_the_source_is_not_a_release(self):
+        src = make_source(self.tmp, ("0.5.0", "99.0.0-beta.1", "0.9.0"))
+        self.assertEqual(sorted(notice.released_versions(src.as_posix(), self.tmp / "home", True)),
+                         ["0.5.0", "0.9.0"])
+
+    def test_a_beta_hears_only_of_its_own_release(self):
+        """A machine running a beta is told when a release above it is out, and how to leave
+        the beta for it; older releases say nothing."""
+        w = self.ws()
+        self._engines(w.home, "0.5.0", "0.5.1")
+        self.assertIsNone(notice.for_project(w.root, w.home, "0.6.0-beta.1"))
+        self._engines(w.home, "0.6.0")
+        msg = notice.for_project(w.root, w.home, "0.6.0-beta.1")
+        self.assertIn("0.6.0 is out (this machine runs beta 0.6.0-beta.1)", msg)
+        self.assertIn("govern beta off, then", msg)
 
 
 class InstallReportAndUpgrade(Base):
@@ -3450,6 +3997,70 @@ max_working_words = 5
         w.run("baseline", "--allow-raise")
         baseline = json.loads((w.root / layout.BASELINE).read_text(encoding="utf-8"))
         self.assertEqual([k for k in baseline if "words" in k], [], baseline)
+
+
+class LocalLayerTracked(Base):
+    """`local-layer`: a `local.toml` git tracks is an error, one it does not is silent."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.w = self.ws()
+        self.env = {**os.environ, "HOME": str(self.w.home), "XDG_CONFIG_HOME": str(self.w.home)}
+        self.git("init", "-q")
+
+    def git(self, *args: str) -> None:
+        """git under the temp HOME: a global ignore never makes `add -f` vacuous."""
+        subprocess.run(["git", "-C", str(self.w.root), *args], env=self.env, check=True,
+                       capture_output=True)
+
+    def check(self) -> tuple[int, str, str]:
+        return self.w.run("check")
+
+    def test_an_untracked_local_toml_is_silent(self):
+        self.w.write(layout.LOCAL, '[governance]\nengine = "0.5.2-beta.1"\n')
+        code, out, err = self.check()
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn("local.toml", out + err)
+
+    def test_a_tracked_local_toml_fails_the_gate(self):
+        self.w.write(layout.LOCAL, '[governance]\nengine = "0.5.2-beta.1"\n')
+        self.git("add", "-f", layout.LOCAL)
+        code, out, err = self.check()
+        self.assertNotEqual(code, 0, out + err)
+        self.assertIn("local.toml is tracked by git", out + err)
+
+    def test_no_local_toml_is_silent(self):
+        from unittest import mock
+        from govern.checks import repo
+        with mock.patch.object(repo, "git", side_effect=AssertionError("git was called")):
+            code, out, err = self.check()
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn("local-layer", out + err)
+
+    def test_a_governance_root_in_a_subdirectory_of_the_repo(self):
+        """The repo is the temp dir, the governance root its `ws/` subdirectory."""
+        shutil.rmtree(self.w.root / ".git")
+        self.git_at(self.tmp, "init", "-q")
+        self.w.write(layout.LOCAL, '[governance]\nengine = "0.5.2-beta.1"\n')
+        code, out, err = self.check()
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn("local.toml", out + err)
+        self.git_at(self.tmp, "add", "-f", f"ws/{layout.LOCAL}")
+        code, out, err = self.check()
+        self.assertNotEqual(code, 0, out + err)
+        self.assertIn("local.toml is tracked by git", out + err)
+
+    def test_no_git_repo_at_all_is_silent(self):
+        shutil.rmtree(self.w.root / ".git")
+        self.w.write(layout.LOCAL, '[governance]\nengine = "0.5.2-beta.1"\n')
+        code, out, err = self.check()
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn("local.toml", out + err)
+        self.assertNotIn("Traceback", out + err)
+
+    def git_at(self, where: Path, *args: str) -> None:
+        subprocess.run(["git", "-C", str(where), *args], env=self.env, check=True,
+                       capture_output=True)
 
 
 class RatchetOwnsScopeNameWithColon(unittest.TestCase):

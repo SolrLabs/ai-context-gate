@@ -150,7 +150,7 @@ point at an explicit engine directory, for engine development only.
 
 Releases are tagged `vX.Y.Z`, with `__version__` and the plugin's `plugin.json` version
 matching the tag; `tools/release/install-engine.py` and `tools/release/install-plugin.py`
-install a tag, never the working tree.
+install a tag (a `vX.Y.Z-beta.N` tag too), never the working tree.
 
 ## For contributors
 

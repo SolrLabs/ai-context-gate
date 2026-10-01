@@ -19,7 +19,7 @@ class Option:
     since: str
     state: str                # "on" | "off" | "inert" (on, but a param it needs is empty)
     level: str                # the effective level
-    layer: str                # where the level comes from: "engine" | "profile" | "project"
+    layer: str                # where the level comes from: "engine" | "profile" | "project" | "local"
     inherit: bool             # the project sets no level of its own
     new: bool                 # not yet answered in this project
     suggestion: str | None

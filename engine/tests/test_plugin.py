@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ENGINE = Path(__file__).resolve().parent.parent
 REPO = ENGINE.parent
@@ -18,6 +19,10 @@ PLUGIN = REPO / "plugin"
 sys.path.insert(0, str(ENGINE))
 
 from govern import __version__, layout, notice  # noqa: E402
+
+BETA = "9.9.0-beta.1"
+BOTH = ("context-gate: both the beta and the stable plugin are enabled here, so every hook "
+        f"runs twice; govern beta on {BETA} re-applies the switch")
 
 
 class Plugin(unittest.TestCase):
@@ -104,6 +109,86 @@ class Plugin(unittest.TestCase):
          / "plugin.json").write_text("{}")
         self.assertIn("Use /context-gate:upgrade to upgrade",
                       notice.for_project(self.project, self.home))
+
+    def settings(self, scope: str, plugins) -> None:
+        """Write enabledPlugins at one scope: user, project or local."""
+        path = {"user": self.home / ".claude" / "settings.json",
+                "project": self.project / ".claude" / "settings.json",
+                "local": self.project / ".claude" / "settings.local.json"}[scope]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(plugins if isinstance(plugins, str)
+                        else json.dumps({"enabledPlugins": plugins}), encoding="utf-8")
+
+    def test_enabled_plugins_merge_user_then_project_then_local(self):
+        self.settings("user", {"a": True})
+        self.settings("project", {"a": True, "b": True})
+        self.settings("local", {"a": False})
+        self.assertEqual(notice.enabled_plugins(self.project, self.home), {"a": False, "b": True})
+
+    def test_enabled_plugins_skips_an_unreadable_file(self):
+        self.settings("user", {"a": True})
+        self.settings("project", "{not json")
+        (self.project / ".claude" / "settings.local.json").write_bytes(b'{"enabledPlugins": \xff}')
+        self.assertEqual(notice.enabled_plugins(self.project, self.home), {"a": True})
+        self.settings("local", '\ufeff{"enabledPlugins": {"a": false, "c": "yes"}}')
+        self.assertEqual(notice.enabled_plugins(self.project, self.home), {"a": False})
+
+    def test_both_plugins_warning_only_from_a_beta_with_both_enabled(self):
+        self.settings("user", {layout.PLUGIN_ID: True})
+        self.settings("local", {layout.SKILLS_DIR_PLUGIN_ID: True})
+        with mock.patch.object(notice, "__version__", BETA):
+            self.assertEqual(notice.both_plugins_warning(self.project, self.home), BOTH)
+            # Local settings win: the stable plugin switched off here is off.
+            self.settings("local", {layout.SKILLS_DIR_PLUGIN_ID: True, layout.PLUGIN_ID: False})
+            self.assertIsNone(notice.both_plugins_warning(self.project, self.home))
+            self.settings("local", {layout.PLUGIN_ID: True})
+            self.assertIsNone(notice.both_plugins_warning(self.project, self.home))
+        self.settings("local", {layout.SKILLS_DIR_PLUGIN_ID: True})
+        with mock.patch.object(notice, "__version__", "9.9.0"):
+            self.assertIsNone(notice.both_plugins_warning(self.project, self.home))
+
+    def test_beta_hook_says_when_both_plugins_load(self):
+        """Review focus 3: the stable plugin re-enabled by hand beside the beta."""
+        (self.built / "govern" / "__init__.py").write_text(
+            (ENGINE / "govern" / "__init__.py").read_text(encoding="utf-8").replace(
+                f'__version__ = "{__version__}"', f'__version__ = "{BETA}"'), encoding="utf-8")
+        self.settings("local", {layout.SKILLS_DIR_PLUGIN_ID: True, layout.PLUGIN_ID: False})
+        self.assertEqual(self.hook(self.project), "")
+        self.settings("project", {layout.PLUGIN_ID: True})
+        self.settings("local", {layout.SKILLS_DIR_PLUGIN_ID: True})
+        out = json.loads(self.hook(self.project))
+        self.assertEqual(out["systemMessage"], BOTH)
+        self.assertEqual(out["hookSpecificOutput"]["additionalContext"], BOTH)
+
+    def test_a_local_install_off_by_default_is_not_available(self):
+        manifest = self.home / ".claude" / "skills" / "context-gate" / ".claude-plugin" / "plugin.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text('{"defaultEnabled": false}', encoding="utf-8")
+        self.assertFalse(notice.plugin_available(self.project, self.home))
+        self.settings("local", {layout.SKILLS_DIR_PLUGIN_ID: True})
+        self.assertTrue(notice.plugin_available(self.project, self.home))
+        manifest.write_text("{}", encoding="utf-8")
+        self.settings("local", {layout.SKILLS_DIR_PLUGIN_ID: False})
+        self.assertFalse(notice.plugin_available(self.project, self.home))
+
+    def test_a_plugin_switched_off_below_the_user_level_is_not_available(self):
+        """User-level on, project- or local-level off: the merge says off, so the notice names
+        `bin/upgrade`, not the plugin's skill."""
+        for scope in ("project", "local"):
+            self.settings("user", {layout.PLUGIN_ID: True})
+            self.settings("project", {})
+            self.settings("local", {})
+            self.assertEqual(notice.upgrade_command(self.project, self.home),
+                             f"/{notice.PLUGIN}:upgrade")
+            self.settings(scope, {layout.PLUGIN_ID: False})
+            self.assertEqual(notice.upgrade_command(self.project, self.home),
+                             f"python3 {layout.GOV_DIR}/bin/upgrade", scope)
+
+    def test_the_repository_plugin_is_on_by_default(self):
+        """Only the installed copy is off by default (install-plugin.py writes it): the
+        marketplace plugin, built from this file, loads where it is installed."""
+        manifest = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        self.assertNotIn("defaultEnabled", manifest)
 
     def test_series_pin_names_the_engine_it_actually_runs(self):
         self.pin("0.1")

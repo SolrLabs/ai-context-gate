@@ -23,6 +23,18 @@ SAMPLE = """# Notes
 - zero
 """
 
+BETAS = """# Notes
+
+## 0.6.0-beta.2 — second beta
+- b2
+
+## 0.6.0-beta.1 — first beta
+- b1
+
+## 0.5.1 — release
+- r
+"""
+
 
 class Releases(unittest.TestCase):
     def test_this_version_has_release_notes(self):
@@ -54,6 +66,15 @@ class Releases(unittest.TestCase):
     def test_entry_carries_its_upgrading_note(self):
         body = dict(releases.between("0.1.8", "0.1.9", SAMPLE))["0.1.9"]
         self.assertIn("**Upgrading:** do the thing.", body)
+
+    def test_beta_entries_are_listed_and_ordered(self):
+        """A beta's notes are entries too, and an upgrade to a beta quotes every beta since."""
+        self.assertEqual([v for v, _ in releases.entries(BETAS)],
+                         ["0.6.0-beta.2", "0.6.0-beta.1", "0.5.1"])
+        self.assertEqual([v for v, _ in releases.between("0.5.1", "0.6.0-beta.2", BETAS)],
+                         ["0.6.0-beta.2", "0.6.0-beta.1"])
+        self.assertEqual([v for v, _ in releases.between("0.6.0-beta.1", "0.6.0-beta.2", BETAS)],
+                         ["0.6.0-beta.2"])
 
 
 if __name__ == "__main__":

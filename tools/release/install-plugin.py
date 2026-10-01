@@ -4,11 +4,16 @@
     python3 tools/release/install-plugin.py vX.Y.Z              # into ~/.claude/skills/context-gate/
     python3 tools/release/install-plugin.py vX.Y.Z --out DIR    # assemble only (for --plugin-dir)
 
+A tag may be a beta, vX.Y.Z-beta.N.
+
 The plugin is `plugin/` plus the engine (`engine/govern`) at the same tag, so the skill, its
 hooks and the engine it bundles are always one version. A plugin under
 ~/.claude/skills/ loads in later sessions as `context-gate@skills-dir`, with no
-marketplace. Each project opts in with
-`claude plugin enable context-gate@skills-dir --scope project`.
+marketplace.
+
+The installed copy sets `defaultEnabled: false`: a plugin under ~/.claude/skills/ is otherwise
+on in every project. A project turns it on in `.claude/settings.local.json` (`govern beta on`)
+or with `claude plugin enable context-gate@skills-dir --scope local`.
 
 The bundled engine is stamped `govern/RELEASE` (`vX.Y.Z`), in the assembled copy only: adopt
 installs the engine it runs into the user's engines directory only when it carries that stamp.
@@ -42,7 +47,7 @@ def export(tag: str, paths: list[str], dest: Path) -> None:
 
 def main() -> int:
     args = sys.argv[1:]
-    if not args or not re.fullmatch(r"v\d+\.\d+\.\d+", args[0]):
+    if not args or not re.fullmatch(r"v\d+\.\d+\.\d+(-beta\.[1-9]\d*)?", args[0]):
         print(__doc__, file=sys.stderr)
         return 2
     tag, version = args[0], args[0][1:]
@@ -63,6 +68,10 @@ def main() -> int:
         if not isinstance(name, str) or not re.fullmatch(r"\w[\w.-]*", name):
             print(f"error: {tag}: plugin.json has no usable name ({name!r})", file=sys.stderr)
             return 1
+        # Off by default, in the installed copy only: on where a project's settings turn it on.
+        manifest["defaultEnabled"] = False
+        (stage / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         home = Path(os.environ.get("HOME") or Path.home())
         out = Path(args[args.index("--out") + 1]) if "--out" in args \
             else home / ".claude" / "skills" / name

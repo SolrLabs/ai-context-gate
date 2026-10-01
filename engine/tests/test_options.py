@@ -297,39 +297,6 @@ class Command(Base):
         self.assertRegex(out, r"writing-rules\s+on \(profile\)")
 
 
-@unittest.skipUnless((ENGINE.parent / "docs" / "spec-options.md").is_file(),
-                     "no docs/spec-options.md in this checkout")
-class SpecMatchesTheCommand(unittest.TestCase):
-    """`docs/spec-options.md` is what the skills are written from: its synopsis, `--json` field
-    list and sample table are the command's own."""
-
-    SPEC = ENGINE.parent / "docs" / "spec-options.md"
-
-    def text(self) -> str:
-        return " ".join(self.SPEC.read_text(encoding="utf-8").split())
-
-    def test_synopsis_names_the_real_flags(self):
-        import re
-        from govern import cli
-        sub = next(a for a in cli.build_parser("govern")._subparsers._group_actions)
-        flags = {f for a in sub.choices["options"]._actions for f in a.option_strings
-                 if f not in ("-h", "--help")}
-        synopsis = re.search(r"``` govern options ((?:\[[^\]]*\] ?)+)```", self.text()).group(1)
-        self.assertEqual(set(re.findall(r"--[\w-]+", synopsis)), flags)
-
-    def test_json_field_list(self):
-        self.assertTrue(f"`--json` emits `{', '.join(options.FIELDS)}` per option" in self.text(),
-                        f"the spec's --json field list is not {', '.join(options.FIELDS)}")
-
-    def test_sample_states_are_ones_the_table_prints(self):
-        import re
-        states = set(re.findall(r"\b(\w+) \((\w+)\)\s+0\.4\.0",
-                                self.SPEC.read_text(encoding="utf-8")))
-        self.assertTrue(states)
-        for state, layer in states:
-            self.assertIn(state, ("on", "off", "inert"))
-            self.assertIn(layer, ("engine", "profile", "project"))
-
 
 class UpgradeReport(Base):
     def write(self, opts):

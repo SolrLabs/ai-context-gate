@@ -17,7 +17,7 @@ import sys
 import time
 from pathlib import Path
 
-from govern import __version__, layout
+from govern import __version__, layout, versions
 
 ORANGE, RESET = "\033[38;5;208m", "\033[0m"
 TAG_RE = re.compile(r"refs/tags/v(\d+)\.(\d+)\.(\d+)$")
@@ -26,8 +26,9 @@ NO_UPDATE_CHECK = "CONTEXT_GATE_NO_UPDATE_CHECK"
 
 
 def _key(version: str) -> tuple:
-    parts = version.split(".")
-    return tuple(int(p) for p in parts) if all(p.isdigit() for p in parts) else ()
+    """A release's order; () for anything else, a beta included: what this module offers as
+    an upgrade is always a release."""
+    return versions.key(version) if versions.is_stable(version) else ()
 
 
 def installed_versions(home: Path) -> list[str]:
@@ -78,27 +79,56 @@ def resolve(pin: str, home: Path) -> str | None:
 
 
 def newest_available(home: Path, source: str | None, fresh: bool = False) -> str | None:
-    versions = installed_versions(home) + (released_versions(source, home, fresh) if source else [])
-    return max(versions, key=_key) if versions else None
+    found = installed_versions(home) + (released_versions(source, home, fresh) if source else [])
+    stable = [v for v in found if versions.is_stable(v)]
+    return max(stable, key=_key) if stable else None
 
 
 PLUGIN = layout.PLUGIN
 
 
-def plugin_available(root: Path, home: Path) -> bool:
-    """Whether the Claude Code plugin is present for this project: installed as a local plugin,
-    or enabled in the project's or the user's settings."""
-    if (home / ".claude" / "skills" / PLUGIN / ".claude-plugin" / "plugin.json").is_file():
-        return True
-    for settings in (root / ".claude" / "settings.json", root / ".claude" / "settings.local.json",
-                     home / ".claude" / "settings.json"):
+def enabled_plugins(root: Path, home: Path) -> dict[str, bool]:
+    """`enabledPlugins` as Claude Code merges it for this project: the user's settings, then the
+    project's, then its settings.local.json, key by key, the later file winning. A file that is
+    missing or unreadable, and a value that is not true or false, are skipped."""
+    merged: dict[str, bool] = {}
+    for settings in (home / ".claude" / "settings.json", root / ".claude" / "settings.json",
+                     root / ".claude" / "settings.local.json"):
         try:
-            enabled = json.loads(settings.read_text(encoding="utf-8")).get("enabledPlugins", {})
+            enabled = json.loads(settings.read_text(encoding="utf-8-sig")).get("enabledPlugins", {})
+            merged.update({k: v for k, v in enabled.items() if isinstance(v, bool)})
         except (OSError, ValueError, AttributeError):
             continue
-        if any(k.split("@")[0] == PLUGIN and v for k, v in enabled.items()):
-            return True
-    return False
+    return merged
+
+
+def both_plugins_warning(root: Path, home: Path) -> str | None:
+    """The line a beta's plugin adds when the stable plugin is enabled here too: Claude Code
+    runs the hooks of both, so every hook runs twice. None from a release, which leaves the
+    saying to the beta."""
+    if not versions.is_beta(__version__):
+        return None
+    enabled = enabled_plugins(root, home)
+    if enabled.get(layout.SKILLS_DIR_PLUGIN_ID) and enabled.get(layout.PLUGIN_ID):
+        return (f"{layout.DISPLAY_NAME}: both the beta and the stable plugin are enabled here, so every hook "
+                f"runs twice; govern beta on {__version__} re-applies the switch")
+    return None
+
+
+def plugin_available(root: Path, home: Path) -> bool:
+    """Whether the Claude Code plugin is present for this project: enabled in the settings
+    Claude Code merges for it, or installed as a local plugin that is on by default (an install
+    with `defaultEnabled: false` loads only where the settings turn it on)."""
+    enabled = enabled_plugins(root, home)
+    if any(k.split("@")[0] == PLUGIN and v for k, v in enabled.items()):
+        return True
+    local = home / ".claude" / "skills" / PLUGIN / ".claude-plugin" / "plugin.json"
+    if not local.is_file() or enabled.get(layout.SKILLS_DIR_PLUGIN_ID) is False:
+        return False
+    try:
+        return json.loads(local.read_text(encoding="utf-8-sig")).get("defaultEnabled") is not False
+    except (OSError, ValueError, AttributeError):
+        return True
 
 
 def upgrade_command(root: Path, home: Path) -> str:
@@ -119,6 +149,12 @@ def for_project(root: Path, home: Path, running: str | None = None) -> str | Non
         return None
     pin, source = gov.get("engine"), gov.get("source")
     if not isinstance(pin, str):
+        return None
+    if running and versions.is_beta(running):
+        newest = newest_available(home, source)
+        if newest and versions.key(newest) > versions.key(running):
+            return (f"{layout.DISPLAY_NAME} {newest} is out (this machine runs beta {running}): "
+                    f"govern beta off, then {upgrade_command(root, home)}.")
         return None
     exact = len(pin.split(".")) == 3
     if running:
