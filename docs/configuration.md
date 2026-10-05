@@ -308,7 +308,7 @@ Format settings. The defaults are the standard. A project may keep a different f
 
 | Key | Default | Other value | Meaning |
 |---|---|---|---|
-| `decision_heading` | `"any-dash"` | `"em-dash"` | Which dash separates an entry's id from its title. `any-dash` accepts an em dash, an en dash or a hyphen, with spacing optional; `em-dash` requires ` — `. A heading-shaped line that fails the grammar is an error either way. |
+| `decision_heading` | `"any-dash"` | `"em-dash"` | Which dash separates an entry's id from its title. `any-dash` accepts an em dash, an en dash or a hyphen, with spacing optional; `em-dash` requires ` — `. The examples in these docs use a hyphen (`## D-12 - Title`); an em or en dash is read too. A heading-shaped line that fails the grammar is an error either way. |
 | `next_id` | `"max-plus-one"` | `"first-free"` | Whether `next-id` prints the highest id plus one, or reuses the first gap. A reused gap can collide with a deleted id that is still cited. |
 | `id_overlap` | `"prefix-aware"` | `"prefix-blind"` | Whether id ranges are compared only within the same prefix, or across prefixes too |
 | `agent_turns_prose` | `"must-match"` | `"forbid"` | Whether an agent's prose may state a turn count that matches its `maxTurns`, or may state none at all |
@@ -512,8 +512,20 @@ not already ignore them.
 A beta comes from a `vX.Y.Z-beta.N` tag. Install its engine and plugin from a clone of the
 repository first, with `python3 tools/release/install-engine.py vX.Y.Z-beta.N` and
 `python3 tools/release/install-plugin.py vX.Y.Z-beta.N`. The beta plugin is the local install,
-`context-gate@skills-dir`; the stable plugin is the marketplace one, `context-gate@context-gate`. Beta tags are not published to the public repository, so
-`govern beta` is for a maintainer's or a fork's own pre-release tags.
+`context-gate@skills-dir`; the stable plugin is the marketplace one, `context-gate@context-gate`.
+
+Betas are published as prereleases of the repository, tagged `vX.Y.Z-beta.N`. No project is ever
+offered one: an upgrade, the marketplace plugin and the upgrade notice only ever name a release.
+To run a beta, fetch the tags in a clone of the repository, install the beta from its tag, then
+turn it on in the project. A beta may break. `govern beta off` returns the project to its pinned
+release.
+
+```sh
+git fetch --tags                                           # in a clone of the repository
+python3 tools/release/install-engine.py vX.Y.Z-beta.N
+python3 tools/release/install-plugin.py vX.Y.Z-beta.N
+python3 .context-gate/bin/govern beta on                   # in the project
+```
 
 Four commands, run through the project's gate:
 

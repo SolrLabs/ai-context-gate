@@ -84,6 +84,52 @@ class ReleaseInstallers(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("assembled plugin tag-plugin 0.9.0-beta.1", res.stdout)
 
+    def test_a_beta_installs_from_a_clone_that_only_fetched_its_tag(self):
+        """A published beta sits on its own branch. A clone that follows the release branch
+        alone, and has the beta only as a fetched tag, installs it with its own two tools."""
+        def git(repo: Path, *args: str) -> str:
+            return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                                  capture_output=True, text=True, encoding="utf-8").stdout
+
+        self.release("1.2.3", "tag-tool", "tag-plugin")
+        stable = git(self.repo, "symbolic-ref", "--short", "HEAD").strip()
+        self.git("checkout", "-q", "-b", "beta")
+        self.release("1.3.0-beta.1", "tag-tool", "tag-plugin")
+        self.git("checkout", "-q", stable)
+        clone = self.dir / "clone"
+        subprocess.run(["git", "clone", "-q", "--single-branch", "--branch", stable, "--no-tags",
+                        str(self.repo), str(clone)], check=True, capture_output=True)
+        self.assertEqual(git(clone, "tag", "--list"), "")
+        git(clone, "fetch", "-q", "--tags")
+        refs = git(clone, "for-each-ref", "--format=%(refname)").split()
+        self.assertIn("refs/tags/v1.3.0-beta.1", refs)
+        self.assertEqual([r for r in refs if r.endswith("/beta")], [])
+
+        def run(tool: str) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                [sys.executable, str(clone / "tools" / "release" / tool), "v1.3.0-beta.1"],
+                capture_output=True, text=True, encoding="utf-8",
+                env={**os.environ, "HOME": str(self.home)}, timeout=60)
+
+        res = run("install-engine.py")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        engine = self.home / ".local" / "share" / "tag-tool" / "engines" / "1.3.0-beta.1"
+        self.assertIn('__version__ = "1.3.0-beta.1"',
+                      (engine / "govern" / "__init__.py").read_text(encoding="utf-8"))
+        res = run("install-plugin.py")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        plugin = self.home / ".claude" / "skills" / "tag-plugin"
+        self.assertEqual((plugin / "govern" / "RELEASE").read_text(encoding="utf-8"),
+                         "v1.3.0-beta.1\n")
+        manifest = json.loads((plugin / ".claude-plugin" / "plugin.json")
+                              .read_text(encoding="utf-8"))
+        self.assertEqual((manifest["version"], manifest["defaultEnabled"]),
+                         ("1.3.0-beta.1", False))
+        # The clone itself is still the release it had checked out.
+        self.assertEqual(git(clone, "symbolic-ref", "--short", "HEAD").strip(), stable)
+        self.assertIn('"1.2.3"', (clone / "engine" / "govern" / "__init__.py")
+                      .read_text(encoding="utf-8"))
+
     def test_a_beta_tag_without_a_number_is_refused(self):
         for bad in ("v0.9.0-beta", "v0.9.0-beta.0", "v0.9.0-beta.01"):
             for tool in ("install-engine.py", "install-plugin.py"):

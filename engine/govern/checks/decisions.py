@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 
-from govern.decisions import id_key, mask_lines
+from govern.decisions import heading_dash, id_key, mask_lines
 from govern.findings import Findings
 from govern.manifest import Param, check
 
@@ -87,7 +87,8 @@ def decision_log(ctx, params, scope) -> Findings:
             continue
         if e.status == "superseded" and "superseded" not in statuses:
             f.error(f"{label}: {eid} is superseded — rewrite it in place if the rule changed, or "
-                    f"reduce it to `{'#' * ctx.grammar.level} {eid} — Replaced by <id>` if another "
+                    f"reduce it to `{'#' * ctx.grammar.level} {eid}{heading_dash(e.heading)}"
+                    f"Replaced by <id>` if another "
                     f"decision replaced it; superseded text misleads whoever reads it next")
             continue
         if e.status is None:

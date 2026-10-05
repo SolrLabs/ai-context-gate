@@ -14,6 +14,35 @@ class BaselineUnreadable(Exception):
     pass
 
 
+# What to do about a *new* breach, by key kind (the part of a key before its first `:`), where
+# the kind has a better first answer than recording it: a file just written over its limit is
+# fixed, not accepted. A kind with no entry gets the ratchet check's generic advice.
+NEW_BREACH_REMEDY = {
+    "working_file_words": "split it into smaller files, put permanent content behind an index, "
+                          "or delete what is finished",
+}
+
+# What a breach of a kind is measured in and which setting holds its limit, as the limit's own
+# warning words it: `at {val} words (doc-frontmatter max_working_words=6000)`. A kind with no
+# entry names neither.
+BREACH_SETTING = {
+    "working_file_words": lambda ctx: (
+        "words", f"doc-frontmatter max_working_words="
+                 f"{ctx.cfg.checks['doc-frontmatter'].params['max_working_words']}"),
+}
+
+
+def kind(key: str) -> str:
+    """A key's kind: `working_file_words` of `working_file_words:docs/plan.md`."""
+    return key.partition(":")[0]
+
+
+def working_words_key(ctx, path) -> str:
+    """The key of one working file's word-count breach: its real, repo-relative path
+    (`Context.rel`), the same whichever check names the breach."""
+    return f"working_file_words:{ctx.rel(path)}"
+
+
 def compute(ctx, scope=None) -> dict[str, int]:
     """Every current breach of the ratcheted size rules, keyed by a stable identifier. A rule
     whose check is off does not ratchet.
@@ -56,7 +85,7 @@ def compute(ctx, scope=None) -> dict[str, int]:
                     continue
                 wc = word_count(body, ctx.markers)
                 if wc > limit:
-                    breaches[f"working_file_words:{ctx.rel(path)}"] = wc
+                    breaches[working_words_key(ctx, path)] = wc
         path = handoff_path(ctx, s)
         if on("handoff-words") and path is not None and path.exists():
             wc = handoff_words(ctx, path)

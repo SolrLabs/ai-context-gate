@@ -111,7 +111,7 @@ session-start hook shows the same notice when a session opens (see `plugin/READM
 off the network (the tests set it).
 
 `migrate` moves a project's logs from other common shapes onto the standard mechanically —
-sections grouping entries onto a `**Topic:**` line, bullet traps onto `## T-N — Title` headings, a superseded
+sections grouping entries onto a `**Topic:**` line, bullet traps onto `## T-N - Title` headings, a superseded
 decision with a named successor onto a one-line pointer. Upgrade first: `migrate` runs
 under the engine `config.toml` pins, so a pin mismatch refuses (exit 2) the same way `check`
 does — pin the project to this engine (`bin/upgrade`, or edit the pin by hand) before migrating.
