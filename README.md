@@ -30,7 +30,7 @@ reading every file.
 | Docs | Frontmatter on governed docs, links that resolve, docs reachable from an index, word limits on handoffs, a cap on the governed doc count |
 | Working files | How many are open, and finished ones left behind |
 | Agents and skills | Required frontmatter on `.claude/agents/*.md` (model, effort, description …), well-formed skills, agent worktrees kept out of commits |
-| Hygiene | Stale references; opt-in: checkout state, hooks wired, licenses declared per repo, writing rules |
+| Hygiene | Stale references; opt-in: checkout state, hooks wired, licenses declared per repo, writing rules, usage alerts |
 
 `govern explain` in a governed project shows every effective setting and which layer it came from.
 
@@ -97,7 +97,7 @@ from its profile records why.
 | Path | What |
 |---|---|
 | `engine/govern/` | The engine: checks, config, installer, adopt and upgrade |
-| `plugin/` | The Claude Code plugin: adopt, upgrade and options skills, a session-start notice |
+| `plugin/` | The Claude Code plugin: adopt, upgrade and options skills, a session-start notice, usage hooks |
 | `tools/release/` | Install a tagged engine or plugin from a clone |
 | `CONTRIBUTING.md` | Running the tests, loading the plugin from a checkout, adding a check |
 | `docs/how-it-works.md` | How the gate, the ratchet, profiles and upgrades fit together |

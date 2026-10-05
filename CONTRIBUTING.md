@@ -9,7 +9,7 @@ issues. This page is for changing the code.
 |---|---|
 | `engine/govern/` | The engine: checks, config, installer, adopt and upgrade. Module map in [engine/README.md](engine/README.md) |
 | `engine/tests/` | The engine's tests |
-| `plugin/` | The Claude Code plugin: the adopt, upgrade and options skills and the session-start hook |
+| `plugin/` | The Claude Code plugin: the adopt, upgrade and options skills, the session-start hook and the usage hooks |
 | `tools/release/` | `install-engine.py` and `install-plugin.py`: install a tagged engine or plugin (a `vX.Y.Z-beta.N` tag too) from a clone |
 | `tools/render-checks.py` | Writes `docs/checks.md` from the engine's check manifest |
 | `tools/ci/run-tests.sh` | The local test run |

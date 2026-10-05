@@ -719,7 +719,12 @@ def excluded_docs(raw: dict) -> list[str]:
     return out
 
 
-def load(root: Path, home: Path) -> Config:
+def load(root: Path, home: Path, *, pin_check: bool = True) -> Config:
+    """`pin_check=False` skips `check_pin` entirely: for a caller that resolves a setting's
+    cascade (profile, then project) without running the project's own pinned engine — the
+    plugin's usage resolver, which runs the engine it is bundled with, not whatever a project
+    between upgrades happens to pin. Every other caller keeps the default: a project's own
+    commands must run exactly the engine it pins."""
     path = root / CONFIG_NAME
     warnings: list[str] = []
     raw = _renamed_layout(_load_toml(path), CONFIG_NAME, warnings)
@@ -739,7 +744,7 @@ def load(root: Path, home: Path) -> Config:
     # The beta local.toml names runs whatever the committed pin is; that pin is for every
     # other machine and CI.
     local = _local_layer(root)
-    pin_note = check_pin(gov.get("engine"), local=bool(local))
+    pin_note = check_pin(gov.get("engine"), local=bool(local)) if pin_check else None
     if gov.get("schema", SCHEMA) != SCHEMA:
         raise ConfigError(f"{CONFIG_NAME}: schema {gov.get('schema')} is not supported "
                           f"(this engine reads schema {SCHEMA})")

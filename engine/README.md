@@ -4,7 +4,7 @@ purpose: Layout of the governance engine, how a project runs it, and how it is t
 audience: both
 load_when: changing the engine, adding a check, or wiring the engine into a project
 related: [../docs/how-it-works.md, ../docs/configuration.md, ../docs/checks.md]
-last_reviewed: 2026-09-24
+last_reviewed: 2026-09-25
 ---
 
 # The engine (`govern`)
@@ -20,6 +20,7 @@ setting in [configuration](../docs/configuration.md), and every check in
 | `installer.py` | Install, upgrade and uninstall, recorded in `installed.toml` |
 | `report.py` | The install and upgrade reports: findings before against after |
 | `templates/entrypoint.py` | Installed as `bin/govern` and `bin/uninstall` |
+| `templates/capture.py` | Installed by `usage_setup.install` as the statusline capture writer: saves the snapshot, then chains to whatever `statusLine` ran before |
 | `cli.py` | Subcommands (`check`, `index`, `baseline`, `next-id`, `show`, `find`, `trap-add`), the check runner, exit codes. `check --project X --path DIR [--history-from DIR]` checks `X` from `DIR` instead of the checkout the registry names — a git pre-commit hook's staged-tree snapshot, say — dating any git question a project-scope check asks about those files from `--history-from`'s checkout instead, since the snapshot itself carries no history. `check --workspace-only` checks the workspace alone, skipping every project scope, for an orchestrator's CI without its checkouts |
 | `manifest.py` | The `@check` decorator: every check declares its scope, level, parameters, question and rationale |
 | `config.py` | Loading and strictly validating `.context-gate/config.toml`; resolving each check's settings across layers; loading extensions |
@@ -34,6 +35,8 @@ setting in [configuration](../docs/configuration.md), and every check in
 | `tomlw.py` | A small TOML writer for proposed configs (the stdlib only reads TOML) |
 | `blocks.py` | Generated-block targets and renderers |
 | `ratchet.py` | Breach computation and the baseline file |
+| `usage.py` | Usage alerts at run time: usage steps, the owner's break points, and the text the plugin's hooks inject; standard library and `layout` only, so the hook can import it on every tool call |
+| `usage_setup.py` | Usage alerts, set up: install the statusline capture, uninstall it, re-wrap it when another tool replaces `statusLine`, and resolve a project's option and alerts file |
 | `checks/` | The built-in checks, one module per concern |
 
 ## Registry, or a single repo

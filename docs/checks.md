@@ -33,6 +33,7 @@ Each check has a level: `off`, `warn` or `error`. At `error`, a check reports wh
 | [`skills`](#skills) | `error` | Every skill definition has frontmatter with a description. |
 | [`memory-index`](#memory-index) | `error` | Bounds the Claude Code memory index for this project. |
 | [`hooks-wired`](#hooks-wired) | `off` | Each configured hook script exists and is wired in .claude/settings.json on its event and matcher. |
+| [`usage`](#usage) | `off` | Tells the orchestrating agent its context, 5-hour and weekly usage as they rise, and injects the owner's prompts from usage-alerts.toml at break points. Needs `govern usage install` run once per machine to capture the data. |
 | [`ratchet`](#ratchet) | `error` | A size breach not recorded in the baseline, or one that grew past its record, is an error. |
 | [`standard-overrides`](#standard-overrides) | `warn` | Every format setting that differs from the standard, every setting that differs from the project's profile, and every list setting widened past what it inherited, says why. |
 | [`git-repo`](#git-repo) | `warn` | The governance root is inside a git repository. |
@@ -547,6 +548,23 @@ Each configured hook script exists and is wired in .claude/settings.json on its 
 |---|---|---|---|---|
 | `settings` | str | `".claude/settings.json"` | — | Settings file the hooks live in |
 | `hooks` | list of tables | `[]` | — | Hooks that must be wired. Keys: `script`, `event`, `matcher`, `rule` (optional), `missing` (optional), `unwired` (optional). |
+
+### `usage`
+
+Tells the orchestrating agent its context, 5-hour and weekly usage as they rise, and injects the owner's prompts from usage-alerts.toml at break points. Needs `govern usage install` run once per machine to capture the data.
+
+| | |
+|---|---|
+| Default level | `off` |
+| Scope | Runs once for the governance root |
+| Ratchet | No |
+| Since | 0.6.0 |
+
+**Question:** Should the orchestrating agent be told its context and plan usage, and get your own instructions at break points you set (say, start a powerdown at 93% weekly)?
+
+**Why:** A long run that hits a usage limit stops mid-step; an agent that sees the limit coming can stop cleanly, commit and hand off.
+
+No parameters: set its `level` only.
 
 ## The ratchet and overrides
 

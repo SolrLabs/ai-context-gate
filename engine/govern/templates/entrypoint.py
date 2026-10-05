@@ -12,6 +12,7 @@ The logic lives in the context-gate engine; the policy lives in ../config.toml.
     python3 .context-gate/bin/govern show --project P IDS | --list | --lines
     python3 .context-gate/bin/govern find --project P PATTERN
     python3 .context-gate/bin/govern trap-add --project P --title T --bites B
+    python3 .context-gate/bin/govern usage install | uninstall | resolve [--json]
 
 Which engine runs: exactly the version config.toml pins, from
 ~/.local/share/context-gate/engines/<version>/. If it is not installed and config.toml
@@ -22,11 +23,13 @@ series ("0.4") runs the newest installed release in that series.
 this machine only (`govern beta`); it is never committed.
 $GOVERN_ENGINE overrides all of this with an explicit engine directory, for engine development.
 
-    python3 .context-gate/bin/govern beta [on X.Y.Z-beta.N | off]
+    python3 .context-gate/bin/govern beta [on [X.Y.Z-beta.N] | off]
 
-switches this project, on this machine, to a beta engine and the local beta plugin, and back. It
-is handled here, before any engine loads, so it works when the beta is broken or gone.
+switches this project, on this machine, to a beta engine (the newest installed, when none is
+named) and the local beta plugin, and back. It is handled here, before any engine loads, so it
+works when the beta is broken or gone.
 """
+import errno
 import json
 import os
 import re
@@ -133,8 +136,10 @@ def engine_path() -> Path:
     except (OSError, tomllib.TOMLDecodeError) as exc:
         die(f"cannot read the engine pin from {GOV_DIR.name}/config.toml ({exc})")
     pin, source = gov.get("engine"), gov.get("source")
-    if not isinstance(pin, str) or not version_key(pin):
+    if not isinstance(pin, str) or not pin:
         die(f"{GOV_DIR.name}/config.toml has no [governance] engine pin")
+    if not version_key(pin):
+        die(f"{GOV_DIR.name}/config.toml engine pin {pin} is not a release")
     beta = local_beta(pin)
     if beta:
         return beta
@@ -297,6 +302,47 @@ def _restore(saved: dict) -> None:
             path.unlink()
 
 
+def _put_back(saved: dict, failed: str) -> None:
+    """After a switch that failed part-way: put each file back as saved, then die saying what
+    failed. A file that cannot be put back either is no traceback: the others are still tried,
+    and the message names any file that is not as it was. It does not say nothing changed: the
+    git exclude may hold new lines."""
+    differ, why = [], None
+    for path, raw in saved.items():
+        try:
+            _restore({path: raw})
+        except OSError as exc:
+            try:
+                same = (path.read_bytes() if path.is_file() else None) == raw
+            except OSError:
+                same = False
+            if not same:
+                differ.append(path.name)
+                why = exc
+    if differ:
+        die(f"{failed}; could not put {' and '.join(differ)} back as before ({why}), so check "
+            "by hand")
+    die(f"{failed}; local.toml and .claude/settings.local.json are as they were")
+
+
+def _replace(path: Path, raw: bytes) -> None:
+    """Write raw over path whole: to a temp file beside it, then moved over it, so a full disk
+    or a kill mid-write leaves the old file as it was. A read-only file is refused on every OS:
+    the move alone would replace one wherever the directory allows it, except on Windows."""
+    if path.is_file() and not os.access(path, os.W_OK):
+        raise PermissionError(errno.EACCES, "the file is read-only", str(path))
+    path = path.resolve()       # a symlinked file is replaced where it points, not by a regular file
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_bytes(raw)
+        if path.is_file():
+            os.chmod(tmp, path.stat().st_mode & 0o7777)     # the file keeps its mode
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def _both_plugins_warning(version: str) -> str | None:
     """The line saying both the beta and the stable plugin are enabled here, from enabledPlugins
     merged as Claude Code merges it (the engine's notice.enabled_plugins, inline: this file
@@ -316,8 +362,84 @@ def _both_plugins_warning(version: str) -> str | None:
     return None
 
 
+def _engine_swapped(raw: bytes, old: str, new: str) -> bytes | None:
+    """local.toml's bytes with the one `engine = "old"` line of its [governance] table naming
+    new, every other byte as it was; None when there is not exactly one such line. A text edit,
+    so only the plain one-line form is understood: anything else is the user's to edit."""
+    engine = re.compile(rb"([ \t]*engine[ \t]*=[ \t]*)([\"'])" + re.escape(old.encode())
+                        + rb"\2([ \t]*(?:#.*)?\r?)")
+    lines = raw.split(b"\n")
+    found, inside = [], False
+    for i, line in enumerate(lines):
+        if re.match(rb"[ \t]*\[", line):
+            inside = bool(re.fullmatch(rb"[ \t]*\[[ \t]*governance[ \t]*\][ \t]*(?:#.*)?\r?",
+                                       line))
+        elif inside and engine.fullmatch(line):
+            found.append(i)
+    if len(found) != 1:
+        return None
+    head, quote, tail = engine.fullmatch(lines[found[0]]).groups()
+    lines[found[0]] = head + quote + new.encode() + quote + tail
+    return b"\n".join(lines)
+
+
+def beta_key(name: str) -> tuple:
+    """A beta's order, as numbers (beta.10 is above beta.9); () for anything that is no beta."""
+    m = BETA_RE.fullmatch(name)
+    return tuple(int(x) for x in m.groups()) if m else ()
+
+
+def _installed_betas() -> list[str]:
+    """The beta engines installed on this machine, oldest first; [] when the engines directory
+    is missing or cannot be listed."""
+    try:
+        return sorted((p.name for p in ENGINES.iterdir()
+                       if beta_key(p.name) and (p / "govern" / "cli.py").is_file()), key=beta_key)
+    except OSError:
+        return []
+
+
+def _pinned_release() -> tuple:
+    """The release the committed pin runs on this machine, as numbers: the pin itself, or for a
+    series pin the newest installed release in the series (its .0 when none is). Dies when
+    config.toml gives no pin to compare with."""
+    try:
+        with (GOV_DIR / "config.toml").open("rb") as fh:
+            gov = tomllib.load(fh).get("governance")
+    except (OSError, ValueError) as exc:
+        die(f"cannot read the engine pin from {GOV_DIR.name}/config.toml ({exc})")
+    pin = gov.get("engine") if isinstance(gov, dict) else None
+    if not isinstance(pin, str) or not pin:
+        die(f"{GOV_DIR.name}/config.toml has no [governance] engine pin")
+    if not version_key(pin):
+        die(f"{GOV_DIR.name}/config.toml engine pin {pin} is not a release")
+    key = version_key(pin)
+    if len(key) == 3:
+        return key
+    found = [version_key(p.name) for p in ENGINES.glob(pin + ".*")
+             if len(version_key(p.name)) == 3 and (p / "govern" / "cli.py").is_file()]
+    return max(found, default=(key + (0, 0))[:3])
+
+
+def _newest_beta() -> str:
+    """The beta `beta on` takes when none is named: the newest installed. Dies when there is
+    none, or when it is a beta of a release the committed pin already runs (or of an older one):
+    that is a step back, which takes naming the version."""
+    betas = _installed_betas()
+    if not betas:
+        die("no beta engine is installed — from a clone that has the beta's tag, run: "
+            "python3 tools/release/install-engine.py vX.Y.Z-beta.N")
+    newest, runs = betas[-1], _pinned_release()
+    if beta_key(newest)[:3] <= runs:
+        die(f"the newest installed beta, {newest}, is not newer than the release this project "
+            f"runs ({'.'.join(str(n) for n in runs)}); to run it anyway: govern beta on {newest}")
+    return newest
+
+
 def _beta_on(version: str) -> int:
-    """Check everything, then switch: local.toml, the git exclude, two settings keys."""
+    """Check everything, then switch: local.toml, the git exclude, two settings keys. With
+    another beta on, only local.toml's engine value moves: the rest of the file is the user's,
+    and plugins_before still says what the first `beta on` found."""
     if not BETA_RE.fullmatch(version):
         die(f"{version} is not a beta (X.Y.Z-beta.N)")
     if not (ENGINES / version / "govern" / "cli.py").is_file():
@@ -330,16 +452,27 @@ def _beta_on(version: str) -> int:
     if plugin != f"v{version}":
         die(f"the local plugin is not {version} — from a clone of the repository, run: "
             f"python3 tools/release/install-plugin.py v{version}")
+    was, swapped = None, None
+    by_hand = (f"{GOV_DIR.name}/local.toml names another beta in a form this command does not "
+               f"edit: change it to engine = \"{version}\" under [governance] by hand, then run "
+               "this again")
     if LOCAL.is_file():
         try:
             other = _local_engine(strict=True)
         except UnicodeDecodeError as exc:
             die(f"{GOV_DIR.name}/local.toml is unreadable ({exc}): govern beta off first")
-        except (OSError, ValueError):
+        except OSError as exc:
+            die(f"{GOV_DIR.name}/local.toml could not be read ({exc}); nothing changed")
+        except ValueError:
             other = None
         if isinstance(other, str) and BETA_RE.fullmatch(other) and other != version:
-            die(f"beta {other} is on here: govern beta off first")
-        if other != version:
+            try:
+                was, swapped = other, _engine_swapped(LOCAL.read_bytes(), other, version)
+            except OSError as exc:
+                die(f"{GOV_DIR.name}/local.toml could not be read ({exc}); nothing changed")
+            if swapped is None:
+                die(f"{by_hand}; nothing changed")
+        elif other != version:
             die(f"{GOV_DIR.name}/local.toml names no beta ({other!r}): govern beta off first")
     if not (ROOT / ".claude").is_dir():
         die(f"{ROOT} has no .claude/ directory to enable the plugin in")
@@ -358,22 +491,76 @@ def _beta_on(version: str) -> int:
                 fh.write(f'[governance]\nengine = "{version}"\n')
                 if recorded:
                     fh.write(f"plugins_before = {{ {recorded} }}\n")
+        elif swapped is not None:
+            _replace(LOCAL, swapped)
+            if _local_engine() != version:    # the line found was not the one that is read
+                _put_back(saved, by_hand)
         plugins[BETA_PLUGIN] = True
         plugins[STABLE_PLUGIN] = False
         _write_settings(data)
     except OSError as exc:
-        _restore(saved)
-        die(f"could not switch to beta {version} ({exc}); nothing changed")
-    print(f"beta {version} on for this project, on this machine:\n"
+        _put_back(saved, f"could not switch to beta {version} ({exc})")
+    kept = f" (was {was}; the rest of local.toml is kept)" if was else ""
+    print(f"beta {version} on for this project, on this machine{kept}:\n"
           f"  {GOV_DIR.name}/local.toml          engine = \"{version}\"\n"
           f"  .claude/settings.local.json       {BETA_PLUGIN} on, {STABLE_PLUGIN} off\n"
           "Restart the Claude Code session to load the beta plugin.")
     return 0
 
 
+def _own_settings(raw: bytes) -> list[str] | None:
+    """What local.toml holds besides its [governance] table, as the lines to show: its text
+    without that table's lines (the header through the line before the next table header, less
+    a run of comment lines directly above that header), or all of it when it does not parse or
+    when those lines do not parse to what the file holds besides [governance]. [] when nothing but comments is left; None when it is not
+    UTF-8 text. Never raises: `beta off` must work whatever the file holds."""
+    try:
+        lines = [line.rstrip("\r") for line in raw.decode("utf-8-sig").split("\n")]
+    except UnicodeDecodeError:
+        return None
+    try:
+        parsed = tomllib.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError):
+        pass
+    else:
+        own = {k: v for k, v in parsed.items() if k != "governance"}
+        if not own:
+            return []
+        kept, inside, held = [], False, []
+        for line in lines:
+            if re.match(r"[ \t]*\[", line):
+                if inside:
+                    kept.extend(held)       # the comments directly above the next table are its own
+                held = []
+                inside = bool(re.fullmatch(r"[ \t]*\[[ \t]*governance[ \t]*\][ \t]*(?:#.*)?", line))
+            elif inside:
+                held = held + [line] if line.lstrip().startswith("#") else []
+            if not inside:
+                kept.append(line)
+        # The line filter is only trusted when what it keeps parses to what the file holds
+        # besides [governance] (less its sub-tables, which are shown): a header look-alike in a
+        # string or an array fools it.
+        try:
+            shown = tomllib.loads("\n".join(kept))
+        except (ValueError, RecursionError):
+            shown = None
+        sub = shown.pop("governance", {}) if shown is not None else {}   # [governance.x] tables
+        gov = parsed.get("governance")
+        same = shown == own and isinstance(gov, dict) and all(
+            k in gov and gov[k] == v for k, v in sub.items())
+        if same:
+            lines = kept
+    while lines and not lines[-1].strip():
+        lines.pop()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    return lines
+
+
 def _beta_off() -> int:
     """Remove local.toml and put the two plugin keys back as beta on found them (a key it did
-    not find is deleted); needs no engine, and is idempotent."""
+    not find is deleted); needs no engine, and is idempotent. Whatever else the user kept in
+    local.toml goes with it, so it is printed for them to copy."""
     if not LOCAL.is_file():
         print("no beta is on in this project")
         return 0
@@ -383,6 +570,7 @@ def _beta_off() -> int:
     before = before if isinstance(before, dict) else {}
     version = _local_engine()
     saved = _snapshot(LOCAL, SETTINGS_LOCAL)
+    own = _own_settings(saved[LOCAL] or b"")
     changed = []
     try:
         for k in (BETA_PLUGIN, STABLE_PLUGIN):
@@ -399,8 +587,7 @@ def _beta_off() -> int:
             _write_settings(data)
         LOCAL.unlink()
     except OSError as exc:
-        _restore(saved)
-        die(f"could not switch the beta off ({exc}); nothing changed")
+        _put_back(saved, f"could not switch the beta off ({exc})")
     label = f"beta {version}" if isinstance(version, str) else "the beta"
     print(f"{label} off for this project, on this machine:")
     print(f"  {GOV_DIR.name}/local.toml          removed")
@@ -409,6 +596,14 @@ def _beta_off() -> int:
     print("Back on the committed pin. Anything the beta installed outside this project (see its "
           "release\nnotes) is still installed. Restart the Claude Code session to load the stable "
           "plugin.")
+    if own is None:
+        print("local.toml was not UTF-8 text, so what it held cannot be shown.")
+    elif own:
+        shown = "\n".join(f"  {line}" if line else "" for line in own)
+        codec = sys.stdout.encoding or "utf-8"    # a console that cannot print it must not fail
+        print("local.toml held settings of your own, now removed. Copy what you want to keep into "
+              f"{GOV_DIR.name}/config.toml:\n"
+              + shown.encode(codec, "backslashreplace").decode(codec, "replace"))
     return 0
 
 
@@ -437,6 +632,10 @@ def _beta_status() -> int:
     both = _both_plugins_warning(version)
     if both:
         print(both)
+    newer = [b for b in _installed_betas() if beta_key(b) > beta_key(version)]
+    if newer:   # notice.for_project's line, inline: this file imports nothing from govern
+        print(f"context-gate: beta {newer[-1]} is installed (this project runs beta {version}): "
+              f"govern beta on {newer[-1]}")
     return 0
 
 
@@ -445,9 +644,11 @@ def beta(argv: list[str]) -> int:
         return _beta_status()
     if argv == ["off"]:
         return _beta_off()
+    if argv == ["on"]:
+        return _beta_on(_newest_beta())
     if len(argv) == 2 and argv[0] == "on":
         return _beta_on(argv[1].removeprefix("v"))
-    die("usage: govern beta [on X.Y.Z-beta.N | off]")
+    die("usage: govern beta [on [X.Y.Z-beta.N] | off]")
 
 
 if Path(__file__).name == "upgrade":
