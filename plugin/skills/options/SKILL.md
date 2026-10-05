@@ -1,6 +1,6 @@
 ---
 name: options
-description: Review and change this project's context-gate options, the checks that stay off until turned on (writing rules, hooks wired, checkout hygiene, licenses). Shows each option's state and a suggestion, then turns options on, off or back to inherit. With --global, changes them in the user's profile instead. Use when the user asks about options, opt-in checks, or turning one on.
+description: Review and change this project's context-gate options, the checks that stay off until turned on (writing rules, hooks wired, checkout hygiene, licenses, usage alerts). Shows each option's state and a suggestion, then turns options on, off or back to inherit. With --global, changes them in the user's profile instead. Use when the user asks about options, opt-in checks, or turning one on.
 argument-hint: "[--global]"
 allowed-tools: Bash(python3 .context-gate/bin/*), Read, Edit, AskUserQuestion
 ---
@@ -41,6 +41,11 @@ shown. At `--global`, record nothing: the answers belong to the profile, not to 
 For each option turned on whose `missing` is not empty, ask its `question`. Offer likely values as
 choices (for `files`: `**/*.md`, `docs/**/*.md`, `README.md`) and take Other as typed text. A
 table-shaped setting (`rules`, `hooks`) is agreed in chat, then written.
+
+When `usage` is turned on, run `python3 .context-gate/bin/govern usage install` once per home directory
+and tell the user their statusline is now wrapped and how to undo it
+(`python3 .context-gate/bin/govern usage uninstall`); then offer to create
+`.context-gate/usage-alerts.toml`, or say that the profile's copy applies when there is one.
 
 ## 4. Write
 

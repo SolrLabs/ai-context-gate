@@ -252,6 +252,21 @@ def cmd_options(ctx: Context, global_: bool, as_json: bool, rec: list[str] | Non
     return 0
 
 
+def cmd_usage(ctx: Context, as_json: bool) -> int:
+    from govern import usage_setup
+    r = usage_setup.resolve(ctx.cfg, ctx.root)
+    if as_json:
+        print(json.dumps(r, indent=2, ensure_ascii=False))
+        return 0
+    print(f"usage: {'on' if r['enabled'] else 'off'}")
+    print(f"alerts file: {r['alerts_file'] or 'none'}")
+    for a in r["alerts"]:
+        print(f"  {a['signal']} at {a['at']}%")
+    if r["error"]:
+        print(f"error: {r['error']} (data lines only)")
+    return 0
+
+
 def cmd_principles(ctx: Context) -> int:
     """The doctrine this project works by: its own PRINCIPLES.md if it keeps one, else its
     profile's."""
@@ -576,6 +591,13 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     fd.add_argument("--ids-only", action="store_true", dest="ids_only")
     fd.add_argument("--context", type=int, default=2,
                     help="matching lines to show per entry (default 2, 0 for none)")
+    up = sub.add_parser("usage", help="usage alerts: install the statusline capture, or resolve "
+                                      "this project's option and alerts file")
+    usub = up.add_subparsers(dest="usage_cmd", required=True)
+    usub.add_parser("install", help="install the statusline capture on this machine")
+    usub.add_parser("uninstall", help="remove it and put your statusLine back")
+    ur = usub.add_parser("resolve", help="the effective option and alerts for this project")
+    ur.add_argument("--json", action="store_true", dest="as_json")
     return ap
 
 
@@ -589,6 +611,14 @@ def main(argv: list[str] | None = None, root: Path | None = None,
     if argv and argv[0].startswith("-") and argv[0] not in ("-h", "--help"):
         argv.insert(0, "check")   # `govern --project X` is a check of X
     args = build_parser(prog).parse_args(argv)
+    if args.cmd == "usage" and args.usage_cmd in ("install", "uninstall"):
+        from govern import usage_setup
+        fn = usage_setup.install if args.usage_cmd == "install" else usage_setup.uninstall
+        try:
+            print(fn(layout.home()))
+        except (ValueError, OSError) as exc:
+            return fail(f"~/.claude/settings.json: {exc} — settings.json was not changed")
+        return 0
     try:
         ctx = load_context(root, prog)
     except config.ConfigError as exc:
@@ -624,5 +654,7 @@ def dispatch(ctx: Context, args) -> int:
         return cmd_explain(ctx, args.check)
     if args.cmd == "principles":
         return cmd_principles(ctx)
+    if args.cmd == "usage":
+        return cmd_usage(ctx, args.as_json)
     return cmd_check(ctx, getattr(args, "project", None), getattr(args, "path", None),
                      getattr(args, "history_from", None), getattr(args, "workspace_only", False))

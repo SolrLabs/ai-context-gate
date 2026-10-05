@@ -151,7 +151,7 @@ class SingleRepo(Base):
         self.assertEqual(code, 0)
         data = json.loads(out)
         self.assertEqual(sorted(o["id"] for o in data["options"]),
-                         ["checkout-hygiene", "hooks-wired", "licenses", "writing-rules"])
+                         ["checkout-hygiene", "hooks-wired", "licenses", "usage", "writing-rules"])
         self.assertTrue(all(o["new"] for o in data["options"]))
 
     def test_an_option_answered_on_is_written_and_recorded(self):

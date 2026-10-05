@@ -3,7 +3,7 @@ doc_type: reference
 purpose: How context-gate works for a user adopting it — what it governs, its pieces, how settings resolve, the ratchet, what it installs, and how engines are pinned and upgraded.
 audience: human
 load_when: adopting context-gate, or deciding how to configure or upgrade a governed project
-last_reviewed: 2026-09-23
+last_reviewed: 2026-09-25
 ---
 
 # How context-gate works
@@ -42,7 +42,7 @@ retired names, ship turned off or do nothing until they are configured. Each che
 |---|---|---|
 | **The engine** | The `govern` Python package: the checks, the command line, the installer. Python 3.11 or later, standard library only. | `~/.local/share/context-gate/engines/<version>/`, one read-only directory per release |
 | **The project's install** | The policy (`config.toml`), the ratchet baseline, and the scripts that run the pinned engine | `.context-gate/` at the project's governance root |
-| **The plugin** (optional) | A Claude Code plugin with two skills, `/context-gate:adopt` and `/context-gate:upgrade`, and a session-start hook that shows the upgrade notice. It bundles the engine at its own version. | Installed by Claude Code from the `context-gate` marketplace |
+| **The plugin** (optional) | A Claude Code plugin with three skills, `/context-gate:adopt`, `/context-gate:upgrade` and `/context-gate:options`, a session-start hook that shows the upgrade notice, and hooks after each tool call, each prompt and the session end for usage alerts. It bundles the engine at its own version. | Installed by Claude Code from the `context-gate` marketplace |
 
 The project's own records (its decision logs, traps, handoffs, and the generated
 blocks inside them) are never inside `.context-gate/`. They belong to the project, and
@@ -373,11 +373,12 @@ nothing installed: it fetches its engine from the source.
 ## Options
 
 Checks that only some projects need — `writing-rules`, `hooks-wired`, `checkout-hygiene`,
-`licenses` — ship off. Adopt shows an options panel once the layout questions are settled, and an
-unanswered option stays off (or at what the profile sets) and never blocks the apply. Upgrade's
-report carries a **New options** section for any option this project has not answered yet, plus
-any turned on without what it needs; `/context-gate:options` walks through those, and can also be
-run any time to review or change every option. See [configuration.md](configuration.md#options)
+`licenses`, `usage` — ship off. Adopt shows an options panel once the layout questions are
+settled, and an unanswered option stays off (or at what the profile sets) and never blocks the
+apply. Upgrade's report carries a **New options** section for any option this project has not
+answered yet, plus any turned on without what it needs; `/context-gate:options` walks through
+those, and can also be run any time to review or change every option. See
+[configuration.md](configuration.md#options)
 for the states and the command.
 
 ## Profiles

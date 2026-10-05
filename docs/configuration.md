@@ -3,7 +3,7 @@ doc_type: reference
 purpose: Every table and key .context-gate/config.toml accepts, with types, defaults and examples.
 audience: human
 load_when: writing or changing a project's config.toml or a profile's principles.toml
-last_reviewed: 2026-09-23
+last_reviewed: 2026-09-25
 ---
 
 # Configuration reference
@@ -512,23 +512,48 @@ not already ignore them.
 A beta comes from a `vX.Y.Z-beta.N` tag. Install its engine and plugin from a clone of the
 repository first, with `python3 tools/release/install-engine.py vX.Y.Z-beta.N` and
 `python3 tools/release/install-plugin.py vX.Y.Z-beta.N`. The beta plugin is the local install,
-`context-gate@skills-dir`; the stable plugin is the marketplace one, `context-gate@context-gate`.
+`context-gate@skills-dir`; the stable plugin is the marketplace one, `context-gate@context-gate`. Beta tags are not published to the public repository, so
+`govern beta` is for a maintainer's or a fork's own pre-release tags.
 
-Three commands, run through the project's gate:
+Four commands, run through the project's gate:
 
 ```sh
 python3 .context-gate/bin/govern beta                      # show the state
+python3 .context-gate/bin/govern beta on                   # switch to the newest installed beta
 python3 .context-gate/bin/govern beta on X.Y.Z-beta.N      # switch this project to that beta
 python3 .context-gate/bin/govern beta off                  # switch back
 ```
 
 `govern beta on` checks before it writes anything. It refuses, changing nothing, when the version
-is not a beta, when that engine or the local plugin is not installed at that version, when
-`local.toml` already names a different beta, or when the project has no `.claude/` directory. It
-then writes `local.toml`, sets `enabledPlugins` in `.claude/settings.local.json` to turn the beta
-plugin on and the stable plugin off, and keeps every other key in that file. `govern beta off`
-removes `local.toml`, puts the two plugin keys back as it found them, and works even when the beta
-engine is broken or gone. With no beta on, it says so and touches nothing.
+is not a beta, when that engine or the local plugin is not installed at that version, or when the
+project has no `.claude/` directory. It then writes `local.toml`, sets `enabledPlugins` in
+`.claude/settings.local.json` to turn the beta plugin on and the stable plugin off, and keeps every
+other key in that file. `govern beta off` removes `local.toml`, puts the two plugin keys back as it
+found them, and works even when the beta engine is broken or gone. With no beta on, it says so and
+touches nothing.
+
+`govern beta on` without a version takes the newest beta engine installed, ordered by number, so
+`beta.10` is above `beta.9`. It then runs the same checks as with the version named. It refuses
+when no beta engine is installed, and when the newest one is a beta of a release the project
+already runs (`0.6.0-beta.4` with a pin of `0.6.0` or `0.6`). Name the version to switch to that
+beta anyway.
+
+`govern beta off` removes `local.toml` whole. When the file holds anything besides its
+`[governance]` table, `beta off` prints those lines after its usual output, so you can copy what
+you want to keep into `.context-gate/config.toml`. A file it cannot parse is printed whole.
+
+With another beta already on, `govern beta on` switches to the new one. It changes only the
+`engine` value in `local.toml` and keeps the rest of the file: your `[checks.*]` tables, your
+comments and `plugins_before`, so a later `govern beta off` still puts back the plugin settings from
+before the first beta. If it cannot find one plain `engine = "…"` line under `[governance]` to
+change, it changes nothing and asks you to edit that line by hand. It also changes nothing when
+`local.toml` is read-only or cannot be read, and says which.
+
+Only one beta plugin is installed on a machine at a time. Once a newer beta is installed, a project
+whose `local.toml` still names the older one runs the older engine with the newer plugin. The
+session start and `govern beta` then add one line:
+`context-gate: beta B is installed (this project runs beta A): govern beta on B`. A newer release
+is announced first. A project with no beta on is never told about a beta.
 
 Plugins load when a session starts, so restart the Claude Code session after `beta on` or
 `beta off`. If both plugins are enabled anyway, every hook runs twice; the beta plugin's session
@@ -557,8 +582,8 @@ registry file other tools read too can keep `licence` with no warning by mapping
 ## Options
 
 An **option** is a check that ships `default = "off"` — today, `writing-rules`, `hooks-wired`,
-`checkout-hygiene` and `licenses`. Run `python3 .context-gate/bin/govern options` to see every
-option's state, or `/context-gate:options` in Claude Code to change them.
+`checkout-hygiene`, `licenses` and `usage`. Run `python3 .context-gate/bin/govern options` to see
+every option's state, or `/context-gate:options` in Claude Code to change them.
 
 | State | Project (`config.toml`) | Profile (`principles.toml`) |
 |---|---|---|
@@ -589,6 +614,116 @@ govern options [--global] [--json] [--record CHECK ...]
 
 See [how-it-works.md](how-it-works.md#options) for when options come up, and
 [checks.md](checks.md) for each option's parameters and `Needs` line.
+
+## Usage alerts (`usage-alerts.toml`)
+
+With the `usage` option on, the orchestrating agent is told its context, 5-hour and weekly usage
+as they rise, and can be handed the owner's own instructions at break points set in
+`usage-alerts.toml`. The file sits beside `principles.toml` in the profile, and at
+`.context-gate/usage-alerts.toml` in a project. The closest file wins outright: when the project
+has one, the profile's is not read. There is no merging and no `reason`, because these are the
+owner's preferences, not loosened checks. With neither file, the orchestrator gets data lines and
+no alerts.
+
+### Usage alerts: setup
+
+Turning the option on tells the plugin what to inject; getting any data at all also needs the
+statusline wrapped, once per home directory (per user account):
+
+```
+python3 .context-gate/bin/govern usage install
+```
+
+This copies the writer to `~/.local/share/context-gate/capture.py`, then rewrites
+`~/.claude/settings.json`: only `statusLine.command` changes, to run the writer, chained to
+whatever `statusLine` ran before (saved so it can be restored). Before that write, and before any
+other write this feature makes to `settings.json`, the file's current bytes are copied to
+`~/.local/share/context-gate/settings.json.bak`, so a bad write is recoverable by hand. `govern usage install` can be run again safely: it refreshes the writer and the interpreter path
+in place rather than wrapping twice.
+
+With `usage` on, each session start re-wraps the statusline in `~/.claude/settings.json` if
+another tool replaced it. Turning the option off stops the data lines and alerts, but leaves the
+statusline wrapped until you run `govern usage uninstall`. Problems, not usage values, are logged
+to `~/.local/state/context-gate/usage/usage.log`: a failed option lookup, an alerts file that
+is missing or has an error, and a stale snapshot.
+
+On Windows the writer runs your own statusline through Git Bash when it is installed, else
+through PowerShell, following the order Claude Code documents, so a command written for either
+keeps working once it is wrapped.
+
+```
+python3 .context-gate/bin/govern usage uninstall
+```
+
+puts `statusLine` back exactly as it was (or removes the key if there was none), and removes the
+chain file.
+
+Headless sessions (`claude -p`) never see the statusline, so they get no usage data and no alerts,
+with no error — there is nothing to read.
+
+```toml
+# fragment: .context-gate/usage-alerts.toml
+[[alert]]
+signal = "seven_day"          # context | five_hour | seven_day
+at = 93                        # whole percent, 1-100
+say = """
+Weekly usage at {pct}% (resets {resets}). Start a powerdown. Don't kill open agents, but start no
+new ones. Let everything end cleanly, then run closeouts and housekeeping.
+"""
+
+[[alert]]
+signal = "seven_day"
+at = 96
+say = "Weekly usage at {pct}%, past the 95% ceiling. Stop now: commit what is safe, write HANDOFF.md, end the session."
+```
+
+| Key | Rule |
+|---|---|
+| `signal` | One of `context`, `five_hour`, `seven_day` |
+| `at` | Integer, 1–100 |
+| `say` | Non-empty string. Placeholders: `{pct}`, the signal's current whole percent; `{resets}`, the local reset time as `Sun 06:00`, empty for `context`. No others. |
+| `context_step` | Optional, top level (above the first `[[alert]]`). Integer, 1–10; default 5: how many points context rises below 90% between data lines. |
+
+The orchestrator also sees a data line:
+
+```
+usage: context 37% (+5% in 1h20m) · account 5h 12% (resets 07:00) · 7d 56% (resets Sun 04:00)
+```
+
+Context is the session's own, with its rise since the session's first reading (restarted by a
+compaction). The 5-hour and weekly windows are account-wide, shared by every session on the
+account, so they carry their reset times and never a rise. A value not seen yet reads `pending`;
+a session resumed before its own reading arrives takes the 5-hour and weekly values from another
+session's fresh snapshot.
+
+A line comes when a value rises a step (every 5 points below 90%, or every `context_step` points
+for context; every point from 90% up), when a 5-hour or weekly window resets, and on the session's
+first call, whose line says so. If the statusline capture stops, a session that has had data is
+told once, after 10 minutes of activity without fresh data (`usage: no fresh usage data for 10+
+minutes of activity (last at 14:05) — ...`; idle waits don't count), and gets a data line again
+when it resumes.
+
+One alert fires once per window — the current 5-hour or weekly period, or until context drops and
+climbs again; list more alerts at higher `at` values to repeat the reminder as usage keeps climbing.
+An invalid file (a bad alert or `context_step`) gives data lines only, with the default step;
+`python3 .context-gate/bin/govern usage resolve` shows why.
+
+When alerts fire, each comes first, marked so it never reads like the routine line, and the data
+line comes last:
+
+```
+⚠ usage alert (owner's prompt, .context-gate/usage-alerts.toml):
+Weekly usage at 93% (resets Sun 06:00). Start a powerdown. ...
+
+usage: context 37% (+5% in 1h20m) · account 5h 12% (resets 07:00) · 7d 93% (resets Sun 06:00)
+```
+
+Edits to `usage-alerts.toml` apply mid-session, at the next tool call: added alerts fire when
+reached, removed ones stop, a changed `at` counts as a new alert, and a new `context_step` takes
+effect. An edit that makes the file invalid keeps the alerts already loaded, and the agent is told
+once (`usage: .context-gate/usage-alerts.toml has an error (...); keeping the previous alerts`);
+deleting the file keeps them too. Which file wins (project or profile) is settled at session start,
+and turning the `usage` option on or off needs a new session.
 
 ## Profiles
 

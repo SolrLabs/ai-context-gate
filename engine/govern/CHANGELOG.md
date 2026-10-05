@@ -4,6 +4,57 @@ Newest first. Each release says what changed and, under **Upgrading**, anything 
 do or decide. The upgrade report quotes every entry between the engine a project ran and the one
 it upgraded to.
 
+## 0.6.0 — 2026-10-05
+
+- **New option `usage`:** the orchestrating agent (never a subagent) is told its context, 5-hour
+  and weekly usage, and your own prompts from `usage-alerts.toml` at break points you set.
+  `govern usage install` wraps your statusline to capture the data; `govern usage uninstall` puts
+  it back. `SessionStart` now runs a bounded (7 second) resolve step in projects that mention
+  `usage` or name a profile, and the plugin adds a `PostToolUse` hook that exits early on every
+  tool call, in every project, when the option is off.
+- **The data line:** `usage: context 37% (+5% in 1h20m) · account 5h 12% (resets 07:00) · 7d 56%
+  (resets Sun 04:00)`. Context shows its rise since the session's first reading (a compaction
+  restarts the count). The 5-hour and weekly figures are account-wide, so they are labeled
+  `account`, show their own reset time and never show a rise. A value nobody has yet reads
+  `pending`. A line comes when a value rises a step or a window resets; the session's first line
+  says so.
+- **`context_step` in `usage-alerts.toml`:** an optional whole number from 1 to 10 (default 5)
+  for how many points context rises below 90% between lines. The 5-hour and weekly windows keep
+  5; from 90% up every point counts.
+- **Alerts stand apart, and edits apply mid-session:** each alert comes first, under
+  `⚠ usage alert (owner's prompt, <file>):`, with the data line last. A change to
+  `usage-alerts.toml` loads at the next tool call, without a restart; an invalid edit keeps the
+  alerts already loaded and tells the agent once. Turning `usage` on or off still needs a new
+  session.
+- **A stopped capture is told:** after 10 minutes of activity without fresh data, a session that
+  has had data is told once, with how to re-wrap the capture. Time spent idle (waiting on
+  background agents, say) does not count.
+- **Windows:** the capture runs the statusline you had through Git Bash when it is installed,
+  else through PowerShell, following Claude Code's documented order, so a command written for Git
+  Bash (`~/.claude/statusline.sh`, `$HOME`) keeps working once wrapped.
+- **Moving between betas keeps `local.toml`:** `govern beta on` with another beta already on
+  switches to the new one instead of asking for `beta off` first. Only the `engine` value in
+  `.context-gate/local.toml` changes. Its first line of output reads `beta B on for this project,
+  on this machine (was A; the rest of local.toml is kept):`. An `engine` line it cannot place, or
+  a file that is read-only or cannot be read, is refused in one line.
+- **`govern beta on` without a version** takes the newest beta engine installed, then runs the
+  same checks as with the version named. It refuses when the newest one is a beta of a release
+  the project already runs; naming that version still switches to it.
+- **`govern beta off` shows what it removes:** when `local.toml` holds anything besides its
+  `[governance]` table, `beta off` prints those lines for you to copy into
+  `.context-gate/config.toml`.
+- **A project on an older beta is told of a newer one:** with a newer beta engine installed, the
+  session start and `govern beta` add `context-gate: beta B is installed (this project runs beta
+  A): govern beta on B`. For a project on a beta, the session-start line about a newer release now
+  reads `context-gate X is out (this machine runs beta B): …`. A project with no beta on is never
+  told about any beta.
+
+**Upgrading:** nothing to do — `usage` ships off. Turn it on with `/context-gate:options` (it runs
+`govern usage install` for you), or by hand: set `level = "error"` under `[checks.usage]` in
+`.context-gate/config.toml` (or a profile's `principles.toml`), then run
+`govern usage install` once per machine. The `govern beta` changes are in the project's own
+`.context-gate/bin/govern`, which the upgrade replaces.
+
 ## 0.5.1 — 2026-09-30
 
 - **`govern beta`** runs a locally installed prerelease in one project, on one machine.

@@ -115,6 +115,10 @@ Read `.context-gate/adopt-report.md` and tell the user, briefly:
   a commit leaves the gate out
 - what migrate left for a person (entries it could not convert)
 - how many breaches were baselined, and that each is a known debt, not a pass
+- if the answer for `usage` was On, run `python3 .context-gate/bin/govern usage install` once
+  per machine (now that `.context-gate/` exists) and tell the user their statusline is wrapped
+  and how to undo it (`python3 .context-gate/bin/govern usage uninstall`), matching the options
+  skill's step
 - the files to review and commit (`git status --short`)
 - once the settings are committed, each teammate installs the plugin once, in Claude Code:
   `/plugin marketplace add SolrLabs/ai-context-gate` (or the `--marketplace` fork), then

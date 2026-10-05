@@ -37,6 +37,26 @@ def installed_versions(home: Path) -> list[str]:
         if d.is_dir() else []
 
 
+def installed_betas(home: Path) -> list[str]:
+    d = layout.engines_dir(home)
+    return [p.name for p in d.iterdir()
+            if versions.is_beta(p.name) and (p / "govern" / "cli.py").is_file()] \
+        if d.is_dir() else []
+
+
+def local_beta(root: Path, home: Path) -> str | None:
+    """The beta this project runs on this machine: the one its local.toml names, when that
+    engine is installed (bin/govern runs the committed pin otherwise). None for a project with
+    no local.toml, which is every stable project."""
+    import tomllib
+    try:
+        with (root / layout.LOCAL).open("rb") as fh:
+            beta = tomllib.load(fh)["governance"]["engine"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return beta if isinstance(beta, str) and beta in installed_betas(home) else None
+
+
 def released_versions(source: str, home: Path, fresh: bool = False) -> list[str]:
     """Release tags at the source, from a cache refreshed at most daily (hourly after a
     failure, so an offline machine does not retry on every run)."""
@@ -140,7 +160,11 @@ def upgrade_command(root: Path, home: Path) -> str:
 
 def for_project(root: Path, home: Path, running: str | None = None) -> str | None:
     """The notice for a governed project, from its config alone: the gate calls it after a
-    command, and the plugin's session-start hook calls it before any command runs."""
+    command, and the plugin's session-start hook calls it before any command runs.
+
+    `running` is the engine the project runs. The gate passes its own version. The hook passes
+    nothing, because the engine it runs is the plugin's, not the project's: what the project
+    runs is then read from its files, the beta local.toml names or else the committed pin."""
     import tomllib
     try:
         with (root / layout.CONFIG).open("rb") as fh:
@@ -150,11 +174,20 @@ def for_project(root: Path, home: Path, running: str | None = None) -> str | Non
     pin, source = gov.get("engine"), gov.get("source")
     if not isinstance(pin, str):
         return None
+    if running is None:
+        running = local_beta(root, home)
     if running and versions.is_beta(running):
         newest = newest_available(home, source)
         if newest and versions.key(newest) > versions.key(running):
             return (f"{layout.DISPLAY_NAME} {newest} is out (this machine runs beta {running}): "
                     f"govern beta off, then {upgrade_command(root, home)}.")
+        # One local beta plugin per machine: once a newer beta is installed, a project still on
+        # this one runs the old engine under the new plugin's hooks.
+        newer = [v for v in installed_betas(home) if versions.key(v) > versions.key(running)]
+        if newer:
+            newest = max(newer, key=versions.key)
+            return (f"{layout.DISPLAY_NAME}: beta {newest} is installed (this project runs beta "
+                    f"{running}): govern beta on {newest}")
         return None
     exact = len(pin.split(".")) == 3
     if running:

@@ -40,7 +40,7 @@ GROUPS = [
      ("working",)),
     ("Agents, skills and Claude Code",
      "Agent and skill definitions, hooks, and the Claude Code memory index.",
-     ("agents", "hooks", "memory")),
+     ("agents", "hooks", "memory", "usage")),
     ("The ratchet and overrides",
      "The rules about the rules: recorded breaches, and settings that differ from the standard.",
      ("ratchet", "overrides")),
