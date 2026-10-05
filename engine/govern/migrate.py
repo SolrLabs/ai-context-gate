@@ -1,13 +1,18 @@
 """Move a project's decision logs and trap files onto the standard mechanically, for a project
 whose logs use another common shape:
 
-- Sections grouping entries (`## Topic (D-500-D-599)` over `### D-500 — Title`) flatten to
-  `## D-500 — Title` at the log's own entry level, with a `**Topic:**` line carrying the
+- Sections grouping entries (`## Topic (D-500-D-599)` over `### D-500 - Title`) flatten to
+  `## D-500 - Title` at the log's own entry level, with a `**Topic:**` line carrying the
   section's title.
-- Hand-written bullet traps (`- **1. Title.** Body...`) become `## T-1 — Title` headings, and
+- Hand-written bullet traps (`- **1. Title.** Body...`) become `## T-1 - Title` headings, and
   the hand-written `## Index` list becomes the engine's generated `trap-index` block.
 - A superseded decision that names its successor becomes a one-line pointer; one that
   names none is left for a person to decide.
+
+A flattened entry keeps its heading as written, one `#` shorter. A heading written new (a
+bullet trap's) takes the separator the project's entries already use
+(`decisions.heading_sep`): a hyphen, an en dash or an em dash, and a hyphen where there are none.
+A pointer keeps the dash of the heading it replaces.
 
 Wired as `python3 -m govern.installer migrate --root DIR [--apply]`. Default is a dry run:
 nothing changes, and `.context-gate/migration-report.md` describes every edit an apply
@@ -32,7 +37,8 @@ from pathlib import Path
 import govern.checks  # noqa: F401  (registers the built-in checks the before/after run needs)
 from govern import __version__, cli, config, layout, registry
 from govern.context import Context, git, repo_of
-from govern.decisions import GRAMMARS, id_key, mask_lines, POINTER_RE, STATUS_RE, TOPIC_RE
+from govern.decisions import (GRAMMARS, heading_dash, heading_sep, id_key, mask_lines, POINTER_RE,
+                              STATUS_RE, TOPIC_RE)
 from govern.findings import Findings
 from govern.text import Unreadable, eol, has_bom, overlay, read
 
@@ -284,19 +290,28 @@ def _successor(body: str) -> tuple[str | None, list[str]]:
     return (found[0], found) if len(found) == 1 else (None, found)
 
 
-def _migrate_pointers(ctx: Context, text: str) -> tuple[str | None, list[str], list[tuple[int, str]]]:
+def _others(p: "Plan", paths: list[Path]):
+    """The texts of a scope's other log and trap files, for `heading_sep`: each as this run
+    will leave it (a log whose entries sit one level too deep has none until it is flattened),
+    read only when asked for."""
+    return (p.edits[path] if path in p.edits else read(path) for path in paths if path.exists())
+
+
+def _migrate_pointers(ctx: Context, text: str
+                      ) -> tuple[str | None, list[str], list[tuple[int, str]]]:
     """A `**Status:** superseded` entry that names its successor (`Superseded by D-NNN` or
     `Replaced by X-N`, in the status line or body) becomes a one-line pointer, only when
     the successor exists in this same log. One with no successor, or with several possible
     successors named and none of them on the `**Status:**` line, is left alone — it needs a
-    person: rewrite in place, retire it, or say which successor is the real one."""
+    person: rewrite in place, retire it, or say which successor is the real one.
+
+    The pointer's heading keeps the dash of the heading it replaces (`heading_dash`)."""
     parsed = ctx.grammar.parse(text)
     known = {(e.prefix.upper(), e.num) for e in parsed.entries}
     lines = text.split("\n")
     replacements: list[tuple[int, int, list[str]]] = []
     changes: list[str] = []
     problems: list[tuple[int, str]] = []
-
     for e in parsed.entries:
         if e.replaced_by or e.status != "superseded":
             continue
@@ -314,7 +329,7 @@ def _migrate_pointers(ctx: Context, text: str) -> tuple[str | None, list[str], l
             problems.append((e.line, f"{e.ident} names successor {succ}, which is not in this "
                                      f"log — it cannot become a pointer until {succ} exists here"))
             continue
-        heading = f"{'#' * ctx.grammar.level} {e.ident} — Replaced by {succ}"
+        heading = f"{'#' * ctx.grammar.level} {e.ident}{heading_dash(e.heading)}Replaced by {succ}"
         replacements.append((e.line - 1, e.last_line, [heading, ""]))
         changes.append(f"{e.ident} -> pointer to {succ}")
 
@@ -478,6 +493,7 @@ def _plan_traps(ctx: Context, scope, p: Plan) -> None:
     for path in files:
         lines = file_lines[path]
         replacements: list[tuple[int, int, list[str]]] = []
+        sep: str | None = None      # this file's heading separator, worked out on first need
 
         if index_loc and index_loc[0] == path:
             _, hidx, body_end, items = index_loc
@@ -517,7 +533,12 @@ def _plan_traps(ctx: Context, scope, p: Plan) -> None:
                 continue    # already a heading elsewhere: reported above, left as a bullet
             raw_title, rest = m.group(2).strip(), m.group(3)
             title = raw_title[:-1] if raw_title.endswith(".") else raw_title
-            heading = f"{'#' * level} {prefix}-{num} — {title}"
+            if sep is None:
+                # This file's own entries first, then the scope's log and its other trap
+                # files, each as this run will leave it.
+                sep = heading_sep(ctx.grammar, "\n".join(lines), _others(
+                    p, [f for f in (ctx.scope_log(scope), *files) if f != path]))
+            heading = f"{'#' * level} {prefix}-{num}{sep}{title}"
             sentence_done = raw_title.endswith((".", "!", "?"))
             if rest and not sentence_done and CONTINUES_RE.match(rest.lstrip()):
                 # The text right after `**` continues the sentence: the heading is still just

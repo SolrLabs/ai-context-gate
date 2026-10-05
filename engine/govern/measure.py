@@ -91,7 +91,7 @@ class MeasureError(Exception):
 ENTRY_RE = re.compile(r"^(#{2,3}) ([A-Z]+)-(\d+)\s*[—–-] ")
 # Any heading that opens with an id, hyphenated or not (`### D7` counts toward `D`).
 HEADING_ID_RE = re.compile(r"^#{1,6}\s+([A-Z]+)-?(\d+)\b")
-# A trap body under a heading (`## T-4 — Title`); bullet bodies are migrate's BULLET_RE.
+# A trap body under a heading (`## T-4 - Title`); bullet bodies are migrate's BULLET_RE.
 TRAP_HEADING_RE = re.compile(r"^#{2,3}\s+[A-Za-z]+-(\d+)\b")
 # A row of a generated trap-index table: `| T-4 | ...`.
 TRAP_ROW_RE = re.compile(r"^\|\s*[A-Za-z]+-(\d+)\s*\|")

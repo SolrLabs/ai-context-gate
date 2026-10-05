@@ -1190,11 +1190,39 @@ class FindingNamesItsSetting(Base):
                / "MEMORY.md")
         mem.parent.mkdir(parents=True)
         wtext(mem, "- line\n" * 50)
+        # Recorded first: a new size breach is the ratchet's finding alone, and the
+        # limit's own warning, the one that names the setting, is what a recorded one shows.
+        w.run("baseline", "--allow-raise")
         _, out, _ = w.run("check")
         self.assertIn("last_reviewed 30d ago exceeds doc-frontmatter stale_days=10", out)
         self.assertIn("words exceeds doc-frontmatter max_working_words=3", out)
         self.assertIn("governed docs exceeds governed-doc-count max_docs=1", out)
         self.assertIn("50 non-blank lines exceeds memory-index max_lines=40", out)
+
+
+class FindingNamesItsSettingWhenTheRatchetReports(Base):
+    """The one finding of a new or grown working file still says the limit and its setting."""
+
+    def test_a_new_breach_finding_names_the_setting(self):
+        w = self.ws(extra="\n[checks.doc-frontmatter]\nmax_working_words = 3\n")
+        w.write("projects/alpha/working-files/notes.md",
+                fm("working", status="active") + "word " * 10)
+        _, out, _ = w.run("check")
+        found = [ln for ln in out.splitlines() if "notes.md" in ln and ln.startswith("  ")]
+        self.assertEqual(len(found), 1, out)
+        self.assertIn("at 10 words (doc-frontmatter max_working_words=3)", found[0])
+
+    def test_a_grown_breach_finding_names_the_setting(self):
+        w = self.ws(extra="\n[checks.doc-frontmatter]\nmax_working_words = 3\n")
+        w.write("projects/alpha/working-files/notes.md",
+                fm("working", status="active") + "word " * 10)
+        w.run("baseline", "--allow-raise")
+        w.write("projects/alpha/working-files/notes.md",
+                fm("working", status="active") + "word " * 12)
+        _, out, _ = w.run("check")
+        found = [ln for ln in out.splitlines() if "notes.md" in ln and ln.startswith("  ")]
+        self.assertEqual(len(found), 1, out)
+        self.assertIn("to 12 words (doc-frontmatter max_working_words=3, baseline 10)", found[0])
 
 
 class RangesFromConfig(Base):
@@ -2655,7 +2683,8 @@ class InstallBaselinesTodaysBreaches(Base):
         self.assertEqual(baseline["working_file_words:projects/alpha/working-files/notes.md"], 5)
         code, out, _ = installer_check(root)
         self.assertEqual(code, 1, out)
-        self.assertIn("grew to 10 (baseline 5)", out)
+        self.assertIn("grew to 10 words (doc-frontmatter max_working_words=3, baseline 5)",
+                      out)
 
 
 class ExplainTrapsAndHints(Base):
@@ -2978,6 +3007,116 @@ class InstallReportAndUpgrade(Base):
                              cwd=Path(installer.__file__).resolve().parent.parent)
         self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
         self.assertIn(f"upgraded context-gate {__version__} -> {newer}", res.stdout)
+
+
+class PublicBetaTagsAtTheSource(Base):
+    """Betas are published as prereleases, so a release source's tags hold `vX.Y.Z-beta.N` beside
+    its releases. Nothing a stable project runs takes one for a release: not the notice, not
+    `bin/upgrade`, not a bootstrap, not a series pin."""
+
+    OWN = f"{__version__}-beta.1"         # a beta of the release this engine is
+    AHEAD = f"{NEXT_RELEASE}-beta.3"      # a beta numbered above every release there is
+    NEWER = f"{SERIES}.99"                # a release newer than this engine
+
+    def _project(self, tags: tuple, pin: str = __version__):
+        """An installed project whose source carries `tags`, pinned to `pin`; nothing is in the
+        engines directory yet."""
+        src = make_source(self.tmp, tags)
+        w = self.ws()
+        entry, env = self._installed(w)
+        cfg = w.root / CFG
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(
+            "schema = 1", f'schema = 1\nsource = "{src.as_posix()}"', 1).replace(
+            f'engine = "{__version__}"', f'engine = "{pin}"'))
+        return w, entry, env, src
+
+    def _upgrade(self, w, env, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, str(w.root / layout.GOV_DIR / "bin" / "upgrade"),
+                               *args], env=env, capture_output=True, text=True)
+
+    def _engines_installed(self, w) -> list[str]:
+        d = layout.engines_dir(w.home)
+        return sorted(p.name for p in d.iterdir()) if d.is_dir() else []
+
+    def test_the_notice_offers_only_a_release(self):
+        from unittest import mock
+        w, _, _, src = self._project((self.OWN, __version__, self.AHEAD))
+        with mock.patch.dict(os.environ):
+            os.environ.pop(notice.NO_UPDATE_CHECK, None)
+            self.assertEqual(notice.released_versions(src.as_posix(), w.home, True),
+                             [__version__])
+            self.assertEqual(notice.newest_available(w.home, src.as_posix(), fresh=True),
+                             __version__)
+            # Nothing newer than what the project runs, so nothing is said: no beta is offered.
+            self.assertIsNone(notice.for_project(w.root, w.home))
+            self.assertIsNone(notice.for_project(w.root, w.home, __version__))
+            code, _, err = w.run("check")
+            self.assertEqual(code, 0, err)
+            self.assertNotIn("beta", err)
+            self.assertNotIn("available", err)
+
+    def test_the_notice_names_the_newest_release_past_newer_betas(self):
+        from unittest import mock
+        w, _, _, src = self._project((__version__, self.NEWER, f"{self.NEWER}-beta.2",
+                                      self.AHEAD))
+        with mock.patch.dict(os.environ):
+            os.environ.pop(notice.NO_UPDATE_CHECK, None)
+            self.assertEqual(notice.newest_available(w.home, src.as_posix(), fresh=True),
+                             self.NEWER)
+            said = notice.for_project(w.root, w.home, __version__)
+        self.assertIn(f"{self.NEWER} available (this project runs {__version__})", said)
+        self.assertNotIn("beta", said)
+
+    def test_bin_upgrade_takes_the_newest_release_past_newer_betas(self):
+        w, _, env, _ = self._project((self.OWN, __version__, self.NEWER, self.AHEAD))
+        res = self._upgrade(w, env)
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertIn(f"upgraded context-gate {__version__} -> {self.NEWER}", res.stdout)
+        self.assertIn(f'engine = "{self.NEWER}"', (w.root / CFG).read_text(encoding="utf-8"))
+        self.assertEqual([v for v in self._engines_installed(w) if "beta" in v], [])
+
+    def test_bin_upgrade_with_only_betas_above_the_pin_stays_where_it_is(self):
+        w, _, env, _ = self._project((self.OWN, __version__, self.AHEAD))
+        before = (w.root / CFG).read_bytes()
+        res = self._upgrade(w, env)
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertEqual(res.stdout.strip(), f"already on context-gate {__version__}")
+        self.assertEqual((w.root / CFG).read_bytes(), before)
+        self.assertEqual(self._engines_installed(w), [])
+
+    def test_bin_upgrade_to_a_named_beta_never_pins_it(self):
+        """Even asked for by name, a beta does not become the committed pin: the project stays
+        on its release."""
+        w, _, env, _ = self._project((__version__, self.AHEAD))
+        before = (w.root / CFG).read_bytes()
+        res = self._upgrade(w, env, "--to", self.AHEAD)
+        self.assertEqual(res.returncode, 2, res.stderr + res.stdout)
+        self.assertNotIn("Traceback", res.stderr)
+        self.assertEqual(res.stderr.strip().splitlines(),
+                         [f"error: an upgrade takes a release, and {self.AHEAD} is a beta; "
+                          f"run a beta with govern beta on {self.AHEAD}"])
+        self.assertEqual((w.root / CFG).read_bytes(), before)
+        self.assertEqual(self._engines_installed(w), [])      # nothing was downloaded
+
+    def test_a_missing_engine_bootstraps_the_pinned_release_beside_beta_tags(self):
+        w, entry, env, _ = self._project((self.OWN, __version__, self.AHEAD))
+        res = subprocess.run([sys.executable, str(entry), "check"], env=env,
+                             capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertIn(f"installing engine {__version__} from", res.stderr)
+        self.assertNotIn("beta", res.stderr)
+        self.assertEqual(self._engines_installed(w), [__version__])
+
+    def test_a_series_pin_runs_and_upgrades_to_a_release_only(self):
+        w, entry, env, _ = self._project((self.OWN, __version__, self.AHEAD), pin=SERIES)
+        # Betas of the series, and one above it, installed beside its releases.
+        self._engines(w, (f"{SERIES}.0", __version__, BETA, self.OWN, self.AHEAD))
+        self.assertTrue(self._which(entry, env).endswith(__version__))
+        self.assertEqual(notice.resolve(SERIES, w.home), __version__)
+        res = self._upgrade(w, env)
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertIn(f'engine = "{__version__}"', (w.root / CFG).read_text(encoding="utf-8"))
+        self.assertNotIn("beta", res.stdout)
 
 
 class UpgradeRefreshesBlocks(Base):
@@ -3354,6 +3493,27 @@ class Standard(Base):
         wtext(log, log.read_text(encoding="utf-8") + entry("A", 101, status="superseded"))
         code, out, _ = w.run("check", "--project", "alpha")
         self.assertIn("A-101 is superseded — rewrite it in place", out)
+
+    def superseded_advice(self, sep: str, em_dash: bool) -> str:
+        root = self.tmp / ("em" if em_dash else "hyphen")
+        root.mkdir()
+        w = Workspace(root, extra="")
+        cfg = w.root / CFG
+        text_ = cfg.read_text(encoding="utf-8").replace(
+            'statuses = ["locked", "provisional", "superseded"]', "")
+        if not em_dash:
+            text_ = text_.replace('decision_heading = "em-dash"\n', "")
+        wtext(cfg, text_)
+        log = self.log(w)
+        wtext(log, log.read_text(encoding="utf-8")
+              + entry("A", 101, status="superseded", sep=sep))
+        return w.run("check", "--project", "alpha")[1]
+
+    def test_superseded_advice_shows_a_hyphen_in_a_hyphen_form_log(self):
+        self.assertIn("`## A-101 - Replaced by <id>`", self.superseded_advice(" - ", False))
+
+    def test_superseded_advice_shows_an_em_dash_in_an_em_dash_form_log(self):
+        self.assertIn("`## A-101 — Replaced by <id>`", self.superseded_advice(" — ", True))
 
     def test_index_groups_by_topic(self):
         w = self.ws()
@@ -4708,6 +4868,247 @@ class RatchetOwnsScopeNameWithColon(unittest.TestCase):
         scope = self._scope("alpha:west")
         self.assertTrue(ratchet.owns(None, scope, "governed_docs:alpha:west"))
         self.assertTrue(ratchet.owns(None, scope, "handoff_words:alpha:west"))
+
+
+class MissingStatusListsAllowedValues(Base):
+    """A working file with no `status` is told which values the project allows, in the
+    first error, not only after a wrong guess."""
+
+    def test_missing_status_names_the_allowed_values(self):
+        w = self.ws()
+        w.write("projects/alpha/working-files/plan.md", fm("working") + "Plan.\n")
+        code, out, _ = w.run("check")
+        self.assertEqual(code, 1, out)
+        self.assertIn("alpha/working-files/plan.md: working file needs 'status', starting with "
+                      "one of ('active', 'held', 'planned', 'complete', 'superseded') — it is "
+                      "what says which plan is active", out)
+
+    def test_a_project_s_own_list_is_the_one_named(self):
+        w = self.ws(extra='\n[checks.doc-frontmatter]\nworking_statuses = ["open", "shut"]\n'
+                          'reasons = { working_statuses = "this project has its own words" }\n')
+        w.write("projects/alpha/working-files/plan.md", fm("working") + "Plan.\n")
+        _, out, _ = w.run("check")
+        self.assertIn("working file needs 'status', starting with one of ('open', 'shut') — ",
+                      out)
+
+    def test_free_text_statuses_keep_the_message_without_a_list(self):
+        w = self.ws(extra='\n[checks.doc-frontmatter]\nworking_statuses = []\n'
+                          'reasons = { working_statuses = "status is free text here" }\n')
+        w.write("projects/alpha/working-files/plan.md", fm("working") + "Plan.\n")
+        code, out, _ = w.run("check")
+        self.assertEqual(code, 1, out)
+        self.assertIn("alpha/working-files/plan.md: working file needs 'status' — it is what "
+                      "says which plan is active", out)
+        self.assertNotIn("starting with one of", out)
+
+
+class OneFindingPerBreach(Base):
+    """One over-long working file is one finding. New or grown, it is the ratchet's
+    error (a new one leading with the fix, `baseline --allow-raise` last); recorded and
+    unchanged, it is doc-frontmatter's warning. Wherever the ratchet does not report the file,
+    the warning stays: a breach never ends with no finding at all."""
+
+    NOTES = "projects/alpha/working-files/notes.md"
+    KEY = "working_file_words:" + NOTES
+    LIMIT = "\n[checks.doc-frontmatter]\nmax_working_words = 3\n"
+    REMEDY = ("split it into smaller files, put permanent content behind an index, or delete "
+              "what is finished")
+
+    def over(self, w: Workspace, words: int = 10, rel: str | None = None) -> None:
+        w.write(rel or self.NOTES, fm("working", status="active") + "word " * words)
+
+    def about(self, out: str, name: str = "notes.md") -> list[str]:
+        """Every finding line that names the file."""
+        return [line for line in out.splitlines()
+                if line.startswith(("  ERROR", "  warn")) and name in line]
+
+    def assert_ratchet_new(self, out: str) -> None:
+        found = self.about(out)
+        self.assertEqual(len(found), 1, out)
+        self.assertTrue(found[0].startswith(
+            f"  ERROR  ratchet: '{self.KEY}' is a new breach at 10 words "
+            f"(doc-frontmatter max_working_words=3), not in "
+            f"{Path(layout.BASELINE).name} — {self.REMEDY}; to accept a file that predates the "
+            f"gate, run `"), found[0])
+        self.assertTrue(found[0].endswith(" baseline --allow-raise`"), found[0])
+
+    def assert_warning_only(self, out: str, label: str = "alpha/working-files/notes.md") -> None:
+        found = self.about(out)
+        self.assertEqual(found, [f"  warn   {label}: 10 words exceeds doc-frontmatter "
+                                 f"max_working_words=3 — {self.REMEDY}"], out)
+
+    def test_a_new_breach_is_one_finding_the_ratchet_error_leading_with_splitting(self):
+        w = self.ws(extra=self.LIMIT)
+        self.over(w)
+        code, out, _ = w.run("check")
+        self.assertEqual(code, 1, out)
+        self.assert_ratchet_new(out)
+
+    def test_a_recorded_unchanged_breach_is_one_finding_the_warning(self):
+        w = self.ws(extra=self.LIMIT)
+        self.over(w)
+        code, out, _ = w.run("baseline", "--allow-raise")
+        self.assertEqual(code, 0, out)
+        code, out, _ = w.run("check")
+        self.assertEqual(code, 0, out)
+        self.assert_warning_only(out)
+
+    def test_a_grown_breach_is_one_finding_the_ratchet_error_as_before(self):
+        w = self.ws(extra=self.LIMIT)
+        self.over(w)
+        w.run("baseline", "--allow-raise")
+        self.over(w, words=12)
+        code, out, _ = w.run("check")
+        self.assertEqual(code, 1, out)
+        found = self.about(out)
+        self.assertEqual(len(found), 1, out)
+        self.assertTrue(found[0].startswith(
+            f"  ERROR  ratchet: '{self.KEY}' grew to 12 words (doc-frontmatter "
+            f"max_working_words=3, baseline 10) — fix it, or `"), found[0])
+        self.assertTrue(found[0].endswith(" baseline --allow-raise` to accept the new size"),
+                        found[0])
+
+    def test_a_kind_with_no_remedy_keeps_the_generic_new_breach_text(self):
+        w = self.ws(extra="\n[checks.governed-doc-count]\nmax_docs = 0\n")
+        code, out, _ = w.run("check")
+        self.assertEqual(code, 1, out)
+        line = next(ln for ln in out.splitlines() if "governed_docs:alpha" in ln)
+        self.assertTrue(line.startswith(
+            f"  ERROR  ratchet: 'governed_docs:alpha' is a new breach at 1, not in "
+            f"{Path(layout.BASELINE).name} — fix it, or if it is accepted for now run `"), line)
+        self.assertTrue(line.endswith(" baseline --allow-raise`"), line)
+        self.assertIn("governed docs exceeds governed-doc-count max_docs=0", out)
+
+    # ---- every way `check` runs: one finding where the ratchet reports, never none
+
+    def test_project_run_new_breach_is_one_finding(self):
+        w = self.ws(extra=self.LIMIT)
+        self.over(w)
+        code, out, _ = w.run("check", "--project", "alpha")
+        self.assertEqual(code, 1, out)
+        self.assert_ratchet_new(out)
+
+    def test_project_run_recorded_breach_keeps_the_warning(self):
+        w = self.ws(extra=self.LIMIT)
+        self.over(w)
+        w.run("baseline", "--allow-raise")
+        code, out, _ = w.run("check", "--project", "alpha")
+        self.assertEqual(code, 0, out)
+        self.assert_warning_only(out)
+
+    def test_path_snapshot_new_breach_is_one_finding(self):
+        w = self.ws(extra=self.LIMIT)
+        snap = self.tmp / "snapshot"
+        shutil.copytree(w.root / "projects/alpha", snap)
+        (snap / "working-files").mkdir(exist_ok=True)
+        wtext(snap / "working-files/notes.md", fm("working", status="active") + "word " * 10)
+        code, out, _ = w.run("check", "--project", "alpha", "--path", str(snap))
+        self.assertEqual(code, 1, out)
+        self.assert_ratchet_new(out)
+
+    def test_path_snapshot_recorded_breach_keeps_the_warning(self):
+        w = self.ws(extra=self.LIMIT)
+        self.over(w)
+        w.run("baseline", "--allow-raise")
+        snap = self.tmp / "snapshot"
+        shutil.copytree(w.root / "projects/alpha", snap)
+        code, out, _ = w.run("check", "--project", "alpha", "--path", str(snap))
+        self.assertEqual(code, 0, out)
+        self.assert_warning_only(out)
+
+    def test_a_workspace_doc_the_ratchet_never_measures_keeps_its_warning(self):
+        # The ratchet measures project scopes' docs only: a workspace doc's breach has the
+        # warning as its one finding, on a full run and under --workspace-only alike.
+        w = self.ws(extra=self.LIMIT)
+        self.over(w, rel="governance/notes.md")
+        for argv in (["check"], ["check", "--workspace-only"]):
+            code, out, _ = w.run(*argv)
+            self.assertEqual(code, 0, out)
+            self.assert_warning_only(out, label="governance/notes.md")
+
+    def test_ratchet_off_for_the_rule_keeps_the_warning(self):
+        w = self.ws(extra=self.LIMIT + 'ratchet = false\nreason = "warn-only by policy"\n')
+        self.over(w)
+        code, out, _ = w.run("check")
+        self.assertEqual(code, 0, out)
+        self.assert_warning_only(out)
+
+    def test_an_unreadable_baseline_keeps_the_warning(self):
+        w = self.ws(extra=self.LIMIT)
+        self.over(w)
+        w.write(layout.BASELINE, "{ not json")
+        code, out, _ = w.run("check")
+        self.assertEqual(code, 1, out)
+        self.assertIn("is not a valid baseline", out)
+        self.assert_warning_only(out)
+
+    def test_a_ratchet_that_could_not_measure_keeps_the_warning(self):
+        # One unreadable doc stops the ratchet measuring the scope at all: it reports that, and
+        # nothing about notes.md, so the warning is still the breach's finding.
+        w = self.ws(extra=self.LIMIT)
+        self.over(w)
+        w.write("projects/alpha/broken.md", b"---\ndoc_type: reference\n---\n\xff\xfe\n")
+        code, out, _ = w.run("check")
+        self.assertEqual(code, 1, out)
+        self.assertIn("ratchet could not check it", out)
+        self.assert_warning_only(out)
+
+    def test_ratchet_at_warn_is_still_one_finding(self):
+        w = self.ws(extra=self.LIMIT + '\n[checks.ratchet]\nlevel = "warn"\n'
+                                       'reason = "advisory while adopting"\n')
+        self.over(w)
+        code, out, _ = w.run("check")
+        self.assertEqual(code, 0, out)
+        found = self.about(out)
+        self.assertEqual(len(found), 1, out)
+        self.assertTrue(found[0].startswith(f"  warn   ratchet: '{self.KEY}' is a new breach"),
+                        found[0])
+
+    def test_one_file_s_ratchet_error_does_not_hide_another_file_s_warning(self):
+        w = self.ws(extra=self.LIMIT)
+        self.over(w, rel="projects/alpha/working-files/older.md")
+        w.run("baseline", "--allow-raise")
+        self.over(w)
+        code, out, _ = w.run("check")
+        self.assertEqual(code, 1, out)
+        self.assert_ratchet_new(out)
+        self.assertEqual(self.about(out, "older.md"),
+                         ["  warn   alpha/working-files/older.md: 10 words exceeds "
+                          f"doc-frontmatter max_working_words=3 — {self.REMEDY}"], out)
+
+    def test_every_other_finding_on_the_file_is_kept(self):
+        # Only the size warning steps aside: an error on the same file is still reported.
+        w = self.ws(extra=self.LIMIT)
+        w.write(self.NOTES, fm("working", status="nonsense") + "word " * 10)
+        code, out, _ = w.run("check")
+        self.assertEqual(code, 1, out)
+        self.assertIn("alpha/working-files/notes.md: status 'nonsense' does not start with", out)
+        self.assertNotIn("words exceeds doc-frontmatter", out)
+        self.assertIn(f"'{self.KEY}' is a new breach", out)
+
+
+class HeadingSeparator(Base):
+    """Under the `em-dash` grammar (this fixture's), the engine writes ` — `, the one
+    separator that grammar reads, whatever a file holds."""
+
+    TRAPS = "projects/alpha/working-files/traps.md"
+
+    def test_trap_add_under_the_em_dash_grammar_writes_an_em_dash(self):
+        w = self.ws()
+        w.write(self.TRAPS, fm("working", status="active") + "# Traps\n")
+        code, out, _ = w.run("trap-add", "--project", "alpha", "--title", "First",
+                             "--bites", "always")
+        self.assertEqual(code, 0, out)
+        self.assertIn("\n## T-1 — First\n\n**Bites when:** always\n",
+                      (w.root / self.TRAPS).read_text(encoding="utf-8"))
+        code, out, _ = w.run("check")
+        self.assertEqual(code, 0, out)
+
+    def test_show_prints_the_heading_as_written(self):
+        w = self.ws()
+        code, out, _ = w.run("show", "--project", "alpha", "A-100")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.splitlines()[0], "## A-100 — Title 100")
 
 
 if __name__ == "__main__":

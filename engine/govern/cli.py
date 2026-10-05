@@ -17,7 +17,8 @@ from pathlib import Path
 import govern.checks  # noqa: F401  (registers the built-in checks)
 from govern import __version__, blocks, config, layout, manifest, notice, ratchet, registry
 from govern.context import Context
-from govern.findings import REPORTERS, Findings, report_per_scope
+from govern.decisions import heading_sep
+from govern.findings import REPORTERS, Findings, one_per_breach, report_per_scope
 from govern.text import Unreadable, eol, read, write
 
 
@@ -86,7 +87,10 @@ def collect_scoped(ctx: Context, targets: list, workspace: bool
     `workspace` (a `check --project X` run), a workspace check marked `also_project` still
     runs, restricted to each of `targets` — the workspace checks that are really about one
     project's files (doc-links, generated-blocks, ratchet), so a pre-commit hook checking one
-    project alone still sees them. Every other workspace check sits out."""
+    project alone still sees them. Every other workspace check sits out.
+
+    A size breach the ratchet reported in this run is one finding, the ratchet's
+    (`findings.one_per_breach`)."""
     out = []
     if workspace:
         label = ctx.workspace_label
@@ -107,6 +111,7 @@ def collect_scoped(ctx: Context, targets: list, workspace: bool
             chk = manifest.CHECKS[cid]
             if chk.scope == "project" and _applies(chk, scope):
                 out.append((scope.name, cid, _run(ctx, cid, scope)))
+    one_per_breach(out)
     return out
 
 
@@ -470,7 +475,7 @@ def cmd_show(ctx: Context, name: str, ids: list[str], as_list: bool, as_lines: b
         if as_lines:
             print(f"{ctx.rel(doc)}:{hit.line}-{hit.last_line}  {wanted}  {hit.title}")
             continue
-        print(f"{'#' * ctx.grammar.level} {hit.ident} — {hit.title}")
+        print(hit.heading)       # as written: the project's own dash, never one of ours
         print(hit.body.rstrip())
         print()
     return 2 if missing else 0
@@ -515,7 +520,9 @@ def cmd_find(ctx: Context, name: str, pattern: str, ids_only: bool, context: int
 def cmd_trap_add(ctx: Context, name: str, title: str, bites: str, body: str,
                  filename: str) -> int:
     """Append a new trap; `index` writes its summary row. Numbers are monotonic across every
-    trap file of the project and never recycled: other docs still cite retired numbers."""
+    trap file of the project and never recycled: other docs still cite retired numbers. The
+    heading takes the separator the project's entries already use (`decisions.heading_sep`):
+    this file's, else its log's and its other trap files', else a hyphen."""
     scope = ctx.registry.find(name)
     if scope is None or scope.gov is None:
         return fail(f"unknown project {name!r}")
@@ -530,7 +537,10 @@ def cmd_trap_add(ctx: Context, name: str, title: str, bites: str, body: str,
     ident = f"{prefix}-{(max(used) + 1) if used else 1}"
     original = read(doc)
     text = original.rstrip("\r\n")
-    added = f"\n\n{'#' * ctx.grammar.level} {ident} — {title}\n\n**Bites when:** {bites}\n"
+    others = [p for p in (ctx.scope_log(scope), *ctx.trap_files(scope))
+              if p != doc and p.exists()]
+    sep = heading_sep(ctx.grammar, original, (read(p) for p in others))
+    added = f"\n\n{'#' * ctx.grammar.level} {ident}{sep}{title}\n\n**Bites when:** {bites}\n"
     if body.strip():
         added += "\n" + body.strip() + "\n"
     write(doc, text + (added + "\n").replace("\n", eol(original)))

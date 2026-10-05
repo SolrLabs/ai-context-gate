@@ -25,7 +25,7 @@ reading every file.
 
 | Area | Checks |
 |---|---|
-| Decisions | A decision log with stable ids (`## D-12 — Title`), a generated index, replaced decisions reduced to a pointer, id ranges that don't collide across projects |
+| Decisions | A decision log with stable ids (`## D-12 - Title`), a generated index, replaced decisions reduced to a pointer, id ranges that don't collide across projects |
 | Traps | Known pitfalls as `## T-N` entries, each with a **Bites when:** line |
 | Docs | Frontmatter on governed docs, links that resolve, docs reachable from an index, word limits on handoffs, a cap on the governed doc count |
 | Working files | How many are open, and finished ones left behind |

@@ -182,6 +182,9 @@ def upgrade(argv: list[str]) -> int:
         if not candidates:
             die("no engine release found: none installed, and no [governance] source to ask")
         target = max(candidates, key=version_key)
+    if BETA_RE.fullmatch(target):
+        die(f"an upgrade takes a release, and {target} is a beta; "
+            f"run a beta with govern beta on {target}")
     if target == gov.get("engine"):
         print(f"already on context-gate {target}")
         return 0
