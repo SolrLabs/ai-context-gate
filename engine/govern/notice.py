@@ -20,7 +20,9 @@ from pathlib import Path
 from govern import __version__, layout, versions
 
 ORANGE, RESET = "\033[38;5;208m", "\033[0m"
-TAG_RE = re.compile(r"refs/tags/v(\d+)\.(\d+)\.(\d+)$")
+# One whole line of `git ls-remote --tags`: the ref is read from its start, so a tag named
+# `x/refs/tags/v1.2.3` is not release 1.2.3.
+TAG_RE = re.compile(r"\S+\trefs/tags/v(\d+)\.(\d+)\.(\d+)")
 DAY, RETRY = 24 * 3600, 3600
 NO_UPDATE_CHECK = "CONTEXT_GATE_NO_UPDATE_CHECK"
 
@@ -59,8 +61,9 @@ def local_beta(root: Path, home: Path) -> str | None:
 
 def released_versions(source: str, home: Path, fresh: bool = False) -> list[str]:
     """Release tags at the source, from a cache refreshed at most daily (hourly after a
-    failure, so an offline machine does not retry on every run)."""
-    if os.environ.get(NO_UPDATE_CHECK):
+    failure, so an offline machine does not retry on every run). A source starting with "-"
+    is never asked: git would read it as an option, and some options name a command to run."""
+    if os.environ.get(NO_UPDATE_CHECK) or (isinstance(source, str) and source.startswith("-")):
         return []
     cache = home / ".cache" / layout.TOOL / "releases.json"
     try:
@@ -72,12 +75,12 @@ def released_versions(source: str, home: Path, fresh: bool = False) -> list[str]
     if not fresh and age < (DAY if entry.get("ok") else RETRY):
         return entry.get("versions", [])
     try:
-        res = subprocess.run(["git", "ls-remote", "--tags", "--refs", source],
+        res = subprocess.run(["git", "ls-remote", "--tags", "--refs", "--", source],
                              capture_output=True, text=True, timeout=5,
                              env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
         ok = res.returncode == 0
         versions = [".".join(m.groups()) for line in res.stdout.splitlines()
-                    if (m := TAG_RE.search(line))] if ok else []
+                    if (m := TAG_RE.fullmatch(line))] if ok else []
     except (OSError, subprocess.SubprocessError):
         ok, versions = False, []
     data[source] = {"checked": time.time(), "ok": ok, "versions": versions or entry.get("versions", [])}

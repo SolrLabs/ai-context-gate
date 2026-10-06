@@ -34,13 +34,26 @@ def check_ratchet(ctx, params, scope=None) -> Findings:
     name = ctx.baseline_path.name
     for key, val in current.items():
         base = baseline.get(key)
+        # A new or grown breach is tagged with its key, so the limit's own warning about the
+        # same breach is not shown beside this error (`findings.one_per_breach`).
+        setting = ratchet.BREACH_SETTING.get(ratchet.kind(key))
+        unit, held_by = setting(ctx) if setting else ("", "")
         if base is None:
-            f.error(f"ratchet: '{key}' is a new breach at {val}, not in {name} — "
-                    f"fix it, or if it is accepted for now run "
-                    f"`{ctx.prog} baseline --allow-raise`")
+            remedy = ratchet.NEW_BREACH_REMEDY.get(ratchet.kind(key))
+            if remedy:
+                f.error(f"ratchet: '{key}' is a new breach at {val} {unit} ({held_by}), "
+                        f"not in {name} — {remedy}; "
+                        f"to accept a file that predates the gate, run "
+                        f"`{ctx.prog} baseline --allow-raise`", breach=key)
+            else:
+                f.error(f"ratchet: '{key}' is a new breach at {val}, not in {name} — "
+                        f"fix it, or if it is accepted for now run "
+                        f"`{ctx.prog} baseline --allow-raise`", breach=key)
         elif val > base:
-            f.error(f"ratchet: '{key}' grew to {val} (baseline {base}) — fix it, or "
-                    f"`{ctx.prog} baseline --allow-raise` to accept the new size")
+            grew = f"{val} {unit} ({held_by}, baseline {base})" if setting \
+                else f"{val} (baseline {base})"
+            f.error(f"ratchet: '{key}' grew to {grew} — fix it, or "
+                    f"`{ctx.prog} baseline --allow-raise` to accept the new size", breach=key)
         elif val < base:
             f.warn(f"ratchet: '{key}' shrank to {val} (baseline {base}) — "
                    f"run `{ctx.prog} baseline` to lower it")

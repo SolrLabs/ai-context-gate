@@ -291,12 +291,21 @@ class RepoRelativeLabels(Base):
     so `doc-frontmatter` (project) and `ratchet` (workspace) name the very same file alike."""
 
     def test_the_project_finding_matches_the_ratchet_key_on_the_same_file(self):
+        # A new breach is the ratchet's finding alone; once recorded, it is
+        # doc-frontmatter's warning. Both name the file by the same repo-relative path.
         r = self.repo(extra="\n[checks.doc-frontmatter]\nmax_working_words = 2\n")
         r.write("docs/HANDOFF.md", fm("working", status="active") + "# Handoff\n\n" + "word " * 10)
         code, out, _ = r.run("check")
         self.assertEqual(code, 1, out)
-        self.assertIn("docs/HANDOFF.md: ", out)
-        self.assertIn("working_file_words:docs/HANDOFF.md", out)
+        self.assertIn("'working_file_words:docs/HANDOFF.md' is a new breach", out)
+        self.assertNotIn("words exceeds doc-frontmatter", out)
+        self.assertNotIn("myproject/docs/HANDOFF.md", out)
+        code, out, _ = r.run("baseline", "--allow-raise")
+        self.assertEqual(code, 0, out)
+        code, out, _ = r.run("check")
+        self.assertEqual(code, 0, out)
+        self.assertIn("  warn   docs/HANDOFF.md: 12 words exceeds doc-frontmatter", out)
+        self.assertNotIn("working_file_words", out)
         self.assertNotIn("myproject/docs/HANDOFF.md", out)
 
 
@@ -454,6 +463,106 @@ class WorkspaceOnlyRefused(Base):
         self.assertEqual(code, 2, out + err)
         self.assertIn("--workspace-only needs a registry workspace", err)
         self.assertEqual(out, "")
+
+
+HYPHEN_ENTRY = "\n## D-1 - Title 1\n\n**Status:** locked\n\n**Rule:** r.\n\n**Why:** w.\n"
+NO_EM_DASH = ('\n[checks.writing-rules]\nlevel = "error"\nfiles = ["docs/**/*.md"]\n'
+              'rules = [{ text = "—", use = "-", why = "house style" }]\n')
+TRAPS = "docs/working-files/traps.md"
+
+
+class HeadingSeparator(Base):
+    """The engine writes the separator the project's own entries use, and a hyphen
+    where there are none, so a heading it writes never fails the project's writing rules. The
+    default `any-dash` grammar reads all three."""
+
+    def traps_repo(self, traps: str = "# Traps\n", **kw) -> SingleRepo:
+        """Trap files under `docs/`, so they are governed docs like any other."""
+        r = self.repo(**kw)
+        cfg = r.root / CFG
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(
+            '[projects]\n', '[projects]\nworking_dir = "docs/working-files"\n', 1))
+        r.write(TRAPS, fm("working", status="active") + traps)
+        return r
+
+    def add(self, r: SingleRepo, title: str = "First", file: str | None = None) -> str:
+        argv = ["trap-add", "--project", "myproject", "--title", title, "--bites", "always"]
+        code, out, err = r.run(*argv, *(["--file", file] if file else []))
+        self.assertEqual(code, 0, out + err)
+        return (r.root / (TRAPS if file is None else f"docs/working-files/{file}")
+                ).read_text(encoding="utf-8")
+
+    def test_em_dash_banned_and_empty_trap_file_trap_add_then_check_is_green(self):
+        r = self.traps_repo(extra=NO_EM_DASH, decisions="")
+        code, out, _ = r.run("check")
+        self.assertEqual(code, 0, out)
+        text = self.add(r)
+        self.assertIn("\n## T-1 - First\n\n**Bites when:** always\n", text)
+        self.assertNotIn("—", text)
+        code, out, _ = r.run("check")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("'—'", out)
+
+    def test_a_file_whose_entries_use_an_em_dash_gets_an_em_dash(self):
+        # The file's own last entry decides, ahead of the log's hyphens.
+        r = self.traps_repo("# Traps\n\n## T-1 - One\n\n**Bites when:** a.\n\n"
+                            "## T-2 — Two\n\n**Bites when:** b.\n", decisions=HYPHEN_ENTRY)
+        self.assertIn("\n## T-3 — First\n", self.add(r))
+
+    def test_an_en_dash_is_kept(self):
+        r = self.traps_repo("# Traps\n\n## T-1 – One\n\n**Bites when:** a.\n")
+        self.assertIn("\n## T-2 – First\n", self.add(r))
+
+    def test_an_empty_trap_file_takes_the_separator_of_the_scope_s_log(self):
+        r = self.traps_repo(decisions=HYPHEN_ENTRY.replace(" - ", " – "))
+        self.assertIn("\n## T-1 – First\n", self.add(r))
+
+    def test_an_empty_trap_file_takes_the_separator_of_another_trap_file(self):
+        r = self.traps_repo("# Traps\n\n## T-1 — One\n\n**Bites when:** a.\n", decisions="")
+        r.write("docs/working-files/traps-more.md", fm("working", status="active") + "# More\n")
+        self.assertIn("\n## T-2 — First\n", self.add(r, file="traps-more.md"))
+
+    def test_a_heading_in_a_code_fence_or_comment_is_not_an_entry(self):
+        r = self.traps_repo("# Traps\n\n```\n## T-8 — An example\n```\n\n"
+                            "<!--\n## T-9 — Another\n-->\n", decisions="")
+        self.assertIn("\n## T-1 - First\n", self.add(r))
+
+    def test_crlf_is_kept_and_the_separator_is_read_through_crlf_and_a_bom(self):
+        r = self.traps_repo(decisions="")
+        path = r.root / TRAPS
+        body = (fm("working", status="active") + "# Traps\n\n## T-1 — One\n\n"
+                "**Bites when:** a.\n").replace("\n", "\r\n")
+        path.write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+        self.add(r)
+        raw = path.read_bytes()
+        self.assertIn("\r\n## T-2 — First\r\n".encode("utf-8"), raw)
+        self.assertNotIn(b"\n", raw.replace(b"\r\n", b""))
+
+    def test_a_second_trap_follows_the_first(self):
+        r = self.traps_repo(decisions="")
+        self.add(r)
+        text = self.add(r, title="Second")
+        self.assertIn("\n## T-1 - First\n", text)
+        self.assertIn("\n## T-2 - Second\n", text)
+
+    def test_an_unreadable_log_writes_nothing(self):
+        r = self.traps_repo(decisions="")
+        before = (r.root / TRAPS).read_bytes()
+        (r.root / "docs/decisions/DECISIONS.md").write_bytes(b"\xff\xfe not utf-8")
+        code, out, err = r.run("trap-add", "--project", "myproject", "--title", "First",
+                               "--bites", "always")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("not valid UTF-8", err)
+        self.assertNotIn("Traceback", out + err)
+        self.assertEqual((r.root / TRAPS).read_bytes(), before)
+
+    def test_show_prints_the_heading_as_written(self):
+        r = self.repo(decisions=HYPHEN_ENTRY + entry(2))
+        code, out, _ = r.run("show", "--project", "myproject", "D-1", "D-2")
+        self.assertEqual(code, 0, out)
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "## D-1 - Title 1")
+        self.assertIn("## D-2 — Title 2", lines)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
-"""Decision logs and trap files: entries under `## P-N — Title` headings.
+"""Decision logs and trap files: entries under `## P-N - Title` headings.
 
-The heading grammar is a dialect setting. Whatever the grammar, three things hold:
+The heading grammar is a dialect setting: `any-dash`, the standard, reads a hyphen, an en dash
+or an em dash there. Whatever the grammar, three things hold:
 
 - a heading-shaped line the grammar rejects is reported, never skipped;
 - headings inside code fences and HTML comments are examples, not entries;
@@ -10,7 +11,9 @@ The heading grammar is a dialect setting. Whatever the grammar, three things hol
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
+from itertools import chain
 from pathlib import Path
 
 from govern.text import Markers, read, word_count
@@ -19,9 +22,43 @@ from govern.text import Markers, read, word_count
 GRAMMARS = {
     # `## O-107 — Title`, an em dash with whitespace on both sides.
     "em-dash": {"level": 2, "sep": r"\s+—\s+"},
-    # Canonical: `## O-107 — Title`, any dash, spacing optional.
+    # Canonical: `## O-107 - Title`, any dash (hyphen, en or em), spacing optional.
     "any-dash": {"level": 2, "sep": r"\s*[—–-]\s*"},
 }
+
+# What sits between an id and its title in a heading the engine writes when no entry in the
+# project says otherwise: plain ASCII, and read by every grammar but `em-dash`.
+DEFAULT_SEP = " - "
+# The dash an entry heading was written with: the first one after its id.
+HEADING_DASH_RE = re.compile(r"^#+ [A-Za-z]+-\d+\s*([—–-])")
+
+
+def heading_dash(heading: str) -> str:
+    """The separator one entry heading was written with (` — `, ` – ` or ` - `), a hyphen where
+    it has no dash."""
+    m = HEADING_DASH_RE.match(heading)
+    return f" {m.group(1)} " if m else DEFAULT_SEP
+
+
+def heading_sep(grammar: "Grammar", text: str, others: Iterable[str] = ()) -> str:
+    """Which separator a new entry heading gets in the file whose text is `text`: one of
+    ` — `, ` – ` or ` - `, so the engine never writes a heading the project's own writing
+    rules would fail.
+
+    Under the `em-dash` grammar, ` — `: it reads nothing else. Otherwise the dash of the last
+    entry heading already in the file; failing that, of the last entry in the first of `others`
+    that has one (the texts of the scope's other log and trap files, read only when needed);
+    failing that, `DEFAULT_SEP`. A heading inside a code fence or an HTML comment is an example,
+    not an entry, and decides nothing."""
+    if grammar.name == "em-dash":
+        return " — "
+    for candidate in chain([text], others):
+        entries = grammar.parse(candidate).entries
+        if entries:
+            m = HEADING_DASH_RE.match(entries[-1].heading)
+            if m:
+                return f" {m.group(1)} "
+    return DEFAULT_SEP
 
 STATUS_RE = re.compile(r"\*\*Status:\*\*\s*(\w+)")
 TOPIC_RE = re.compile(r"\*\*Topic:\*\*[ \t]*(.+)")
@@ -145,7 +182,8 @@ class Entry:
     bites: str = ""
     raw_num: str = ""                 # the number as written, padding and all
     topic: str | None = None          # `**Topic:**`, which the index groups by
-    replaced_by: str | None = None    # a one-line pointer, `## D-3 — Replaced by D-40`
+    replaced_by: str | None = None    # a one-line pointer, `## D-3 - Replaced by D-40`
+    heading: str = ""                 # the heading line as written, its own dash and spacing
 
     @property
     def ident(self) -> str:
@@ -176,6 +214,7 @@ class Parsed:
 class Grammar:
     def __init__(self, name: str, required_fields: list[str], markers: Markers) -> None:
         g = GRAMMARS[name]
+        self.name = name
         self.level = g["level"]
         hashes = "#" * self.level
         self.entry_re = re.compile(rf"^{hashes} ([A-Z]+)-(\d+){g['sep']}(.+)$")
@@ -224,6 +263,7 @@ class Grammar:
                 raw_num=m.group(2), topic=topic.group(1).strip() if topic else None,
                 replaced_by=pointer.group(1) if pointer else None,
                 line=i + 1, last_line=last, status=status.group(1).lower() if status else None,
+                heading=lines[i].rstrip(),
                 words=word_count(body, self.markers) - _topic_words(lines, live, i + 1, last),
                 fields={f: f"**{f}:**" in body for f in self.required_fields},
                 bites=bites))

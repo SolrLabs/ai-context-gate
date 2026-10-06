@@ -145,7 +145,7 @@ Every registry entry declares a license, and each configured conflict (say, copy
 
 ## Decision logs and traps
 
-Numbered decision entries (`## P-12 — Title`) and trap entries (`## T-3 — Title`).
+Numbered decision entries (`## P-12 - Title`) and trap entries (`## T-3 - Title`).
 
 ### `decision-log`
 

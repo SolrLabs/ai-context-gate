@@ -36,6 +36,7 @@ setting in [configuration](../docs/configuration.md), and every check in
 | `blocks.py` | Generated-block targets and renderers |
 | `ratchet.py` | Breach computation and the baseline file |
 | `usage.py` | Usage alerts at run time: usage steps, the owner's break points, and the text the plugin's hooks inject; standard library and `layout` only, so the hook can import it on every tool call |
+| `local_plugin.py` | The local plugin, assembled from one release's tree and swapped into `~/.claude/skills/`: what `tools/release/install-plugin.py` installs. `govern beta on` runs it from the beta it fetched; standard library, `layout` and `profile.rmtree` only |
 | `usage_setup.py` | Usage alerts, set up: install the statusline capture, uninstall it, re-wrap it when another tool replaces `statusLine`, and resolve a project's option and alerts file |
 | `checks/` | The built-in checks, one module per concern |
 
@@ -111,7 +112,7 @@ session-start hook shows the same notice when a session opens (see `plugin/READM
 off the network (the tests set it).
 
 `migrate` moves a project's logs from other common shapes onto the standard mechanically —
-sections grouping entries onto a `**Topic:**` line, bullet traps onto `## T-N — Title` headings, a superseded
+sections grouping entries onto a `**Topic:**` line, bullet traps onto `## T-N - Title` headings, a superseded
 decision with a named successor onto a one-line pointer. Upgrade first: `migrate` runs
 under the engine `config.toml` pins, so a pin mismatch refuses (exit 2) the same way `check`
 does — pin the project to this engine (`bin/upgrade`, or edit the pin by hand) before migrating.

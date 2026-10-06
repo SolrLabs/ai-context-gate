@@ -1354,5 +1354,143 @@ class NewlyVisibleFindings(Base):
         self.assertIn("fixed in the entries themselves", next_steps)
 
 
+def hyphens(text: str) -> str:
+    """A fixture's text with every ` — ` written ` - `: the hyphen heading form."""
+    return text.replace(" — ", " - ")
+
+
+SECTIONS_ONLY_LOG = FM + "# Decisions\n\n" + DECISIONS_INDEX + """
+## Server-side platform (D-500–D-599)
+
+### D-500 — Use UTC timestamps
+
+**Status:** locked
+
+**Rule:** Store and compare times in UTC.
+
+**Why:** One clock across machines.
+"""
+
+EMPTY_LOG = FM + "# Decisions\n\n" + DECISIONS_INDEX
+
+
+class MigrateKeepsTheProjectsSeparator(Base):
+    """Every heading `migrate` writes (a flattened entry, a bullet trap, a pointer)
+    uses the separator the project's own entries use, and a hyphen where there are none."""
+
+    def headings(self, path: Path) -> list[str]:
+        return [ln for ln in path.read_text(encoding="utf-8").splitlines()
+                if ln.startswith("## ")]
+
+    def test_hyphen_form_entries_get_hyphen_headings(self):
+        w = Fixture(self.tmp, decisions_text=hyphens(SECTIONS_LOG),
+                    trap_files={"traps.md": hyphens(TRAPS_INDEX),
+                                "platform-traps.md": PLATFORM_TRAPS})
+        code, _ = w.run(apply_=True)
+        self.assertEqual(code, 0)
+        log = self.headings(w.log())
+        self.assertIn("## D-500 - Use UTC timestamps", log)          # flattened
+        self.assertIn("## D-501 - Replaced by D-503", log)           # pointer
+        traps = self.headings(w.trap("traps.md"))
+        self.assertIn("## T-1 - A committed text fixture is LF, whatever the machine wrote it "
+                      "with", traps)                                 # bullet
+        self.assertIn("## T-3 - Never cache an error response",
+                      self.headings(w.trap("platform-traps.md")))    # no entry of its own
+        for line in log + traps + self.headings(w.trap("platform-traps.md")):
+            self.assertNotIn("—", line)
+        w.commit()
+        code, out = w.run(apply_=True)                               # idempotent
+        self.assertEqual(code, 0)
+        self.assertIn("migrated 0 file(s)", out)
+
+    def test_em_dash_form_entries_get_em_dash_headings(self):
+        w = base_fixture(self.tmp)
+        code, _ = w.run(apply_=True)
+        self.assertEqual(code, 0)
+        self.assertIn("## D-501 — Replaced by D-503", self.headings(w.log()))
+        self.assertIn("## T-2 — A byte-identical restore is not enough — touch it",
+                      self.headings(w.trap("traps.md")))
+        self.assertIn("## T-3 — Never cache an error response",
+                      self.headings(w.trap("platform-traps.md")))
+
+    def test_a_scope_with_no_entry_anywhere_gets_hyphens(self):
+        w = Fixture(self.tmp, decisions_text=EMPTY_LOG, trap_files={"traps.md": TRAPS_INDEX})
+        code, _ = w.run(apply_=True)
+        self.assertEqual(code, 0)
+        self.assertIn("## T-1 - A committed text fixture is LF, whatever the machine wrote it "
+                      "with", self.headings(w.trap("traps.md")))
+
+    def test_the_em_dash_grammar_gets_em_dashes_with_no_entry_anywhere(self):
+        w = Fixture(self.tmp, decisions_text=EMPTY_LOG, trap_files={"traps.md": TRAPS_INDEX})
+        cfg = w.root / CFG
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(
+            "[dialect]\n", '[dialect]\ndecision_heading = "em-dash"\n', 1))
+        w.commit()
+        code, _ = w.run(apply_=True)
+        self.assertEqual(code, 0)
+        self.assertIn("## T-1 — A committed text fixture is LF, whatever the machine wrote it "
+                      "with", self.headings(w.trap("traps.md")))
+
+    def test_a_trap_takes_the_separator_of_a_log_this_run_flattens(self):
+        # The log's only entries sit one level too deep until this same run flattens them: a
+        # trap heading follows what the log will hold, never the fallback.
+        for name, form, sep in (("em", SECTIONS_ONLY_LOG, " — "),
+                                ("hyphen", hyphens(SECTIONS_ONLY_LOG), " - ")):
+            with self.subTest(sep=sep):
+                (self.tmp / name).mkdir()
+                w = Fixture(self.tmp / name, decisions_text=form,
+                            trap_files={"platform-traps.md": PLATFORM_TRAPS})
+                code, _ = w.run(apply_=True)
+                self.assertEqual(code, 0)
+                self.assertIn(f"## D-500{sep}Use UTC timestamps", self.headings(w.log()))
+                self.assertIn(f"## T-3{sep}Never cache an error response",
+                              self.headings(w.trap("platform-traps.md")))
+
+    def test_a_trap_file_s_own_entries_decide_ahead_of_the_log(self):
+        traps = FM + ("\n# Traps\n\n## T-1 – Already a heading\n\n**Bites when:** x.\n\n"
+                      "- **2. Still a bullet.** Body.\n")
+        w = Fixture(self.tmp, decisions_text=SECTIONS_LOG, trap_files={"traps.md": traps})
+        code, _ = w.run(apply_=True)
+        self.assertEqual(code, 0)
+        self.assertIn("## T-2 – Still a bullet", self.headings(w.trap("traps.md")))
+
+    def test_a_pointer_keeps_the_dash_of_the_heading_it_replaces(self):
+        # The log's last entry is em-dash form; the superseded one before it is a hyphen.
+        log = FM + "# Decisions\n\n" + DECISIONS_INDEX + """
+## D-500 - Title
+
+**Status:** superseded by D-502
+
+**Rule:** old rule.
+
+**Why:** old reason.
+
+## D-502 — Successor
+
+**Status:** locked
+
+**Rule:** r.
+
+**Why:** w.
+"""
+        w = Fixture(self.tmp, decisions_text=log)
+        code, _ = w.run(apply_=True)
+        self.assertEqual(code, 0)
+        self.assertIn("## D-500 - Replaced by D-502", self.headings(w.log()))
+        self.assertNotIn("## D-500 — Replaced by D-502", self.headings(w.log()))
+        w.commit()
+        code, out = w.run(apply_=True)                               # idempotent
+        self.assertEqual(code, 0)
+        self.assertIn("nothing to migrate", out)
+
+    def test_crlf_hyphen_log_keeps_both(self):
+        w = Fixture(self.tmp, decisions_text=hyphens(SECTIONS_LOG).replace("\n", "\r\n"))
+        code, _ = w.run(apply_=True)
+        self.assertEqual(code, 0)
+        raw = w.log().read_bytes()
+        self.assertIn(b"\r\n## D-501 - Replaced by D-503\r\n", raw)
+        self.assertNotIn(b"\n", raw.replace(b"\r\n", b""))
+
+
 if __name__ == "__main__":
     unittest.main()
