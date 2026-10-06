@@ -4,8 +4,84 @@ Newest first. Each release says what changed and, under **Upgrading**, anything 
 do or decide. The upgrade report quotes every entry between the engine a project ran and the one
 it upgraded to.
 
-## 0.6.1-beta.1 — 2026-10-05
+## 0.7.0-beta.1 — 2026-10-06
 
+- **`decision-changes`, a check that reads what changed:** every other check reads the records as
+  they are. This one compares the decision logs with git and reports three things. A locked
+  decision whose text changed in place with no dated line saying so: ``<log>: P-12 (locked)
+  changed without a new dated **Revised:** line — add `**Revised:** YYYY-MM-DD (what changed)`,
+  or supersede it with a new decision``. A decision that was removed: ``<log>: P-12
+  (locked) was removed — a decision is superseded, not deleted: reduce it to `## P-12 - Replaced
+  by <id>` ``. And, under `--base` only, a decision or trap id your branch added that the base
+  branch has also added since, with different text: `<log>: P-31 was also added on origin/main
+  since this branch began ("<their title>") — if it is the same entry, merge origin/main into
+  this branch; if not, renumber yours to an id neither side uses and update what cites it`.
+  Adding a decision, editing a provisional one, re-wrapping a paragraph, changing a heading's
+  dash or an entry's `**Topic:**`, moving an entry to another log, renaming a log and
+  regenerating a block are not changes. `locked_statuses` (default `["locked"]`) names the
+  statuses that count as locked.
+- **`govern check --base <ref>`, the gate for a pull request:** it compares the branch with the
+  commit where it left `<ref>` (the merge base), in each repository, so what landed on `<ref>`
+  afterwards is not blamed on the branch. `decision-changes` then reports errors (a removed
+  decision that was not locked stays a warning). `--base` combines with `--project`,
+  `--workspace-only` and `--path` with `--history-from`. When the comparison cannot be made it
+  fails: `decision-changes: could not compare with origin/main — <reason>`, where the reason for
+  a shallow clone ends `fetch the full history (fetch-depth: 0)`. In a run of the whole
+  workspace, a project that is its own repository and does not have the ref is a warning,
+  `decision-changes: could not compare <project> with origin/main — <reason>`, and the rest is
+  still compared. Under `--project NAME` that is an error, and so is `--path` with no
+  `--history-from`: `decision-changes: could not compare <project> with origin/main — a snapshot
+  needs --history-from to be compared`.
+- **Without `--base`, the check only advises:** plain `govern check` compares uncommitted work
+  with the last commit, and everything `decision-changes` finds is a warning that goes once the
+  edit is committed. When there is nothing to compare with (no git, no commit yet) it says
+  nothing.
+- **`govern diff [--base <ref>] [--json]`, what a branch changed:** one line per changed decision
+  (`removed`, `added`, `superseded`, `moved`, `revised`, `status` or `changed`), trap (`added`,
+  `removed`, `changed`) and ratchet baseline number (`raised`, `lowered`, `added`, `removed`),
+  then the commit each repository was compared with, or `not compared (<reason>)`. A baseline
+  file that cannot be read is one line, `- unreadable <path> <reason>`. Every decision and trap
+  line is `- <word> <log> <id>` and what the word needs, and a decision now in another log than
+  at the base ends `, from <old log>` whatever its word. With no `--base` it compares with the
+  last commit. It is a report and never fails: it exits 0 whatever changed and whatever could
+  not be compared, and a reader that closes the pipe early (`govern diff | head -1`) ends it
+  quietly. With nothing to report it says `- nothing changed`, or `- nothing compared` when no
+  repository could be compared. The layout (the words, the punctuation, the arrows) is ASCII
+  and the text is valid Markdown; titles and paths are the project's own text, and in the text
+  a control character in a title is printed as `\xNN`. It names a commit by its first 12
+  characters. `--json` gives the same report as one object with the keys `base`, `compared`,
+  `decisions`, `traps` and `baseline`, and the full commit id: a tool that needs fields reads
+  that, not the text. `--project NAME` limits it to one project: the entries whose log, at the
+  base or now, is that project's.
+- **`govern ci github`, a workflow for pull requests:** it prints a GitHub Actions workflow and
+  writes nothing. The workflow checks out the pull request's own ref with the full history, runs
+  `check --base` against the branch the pull request targets, and appends `govern diff` to the
+  run's summary, also when the check failed. Put it in place with
+  `python3 .context-gate/bin/govern ci github > .github/workflows/context-gate.yml`, from the top
+  of the git repository. When `.context-gate/` is in a directory below the top, run it from that
+  directory and write to `"$(git rev-parse --show-toplevel)/.github/workflows/context-gate.yml"`
+  instead. The file is the project's from then on.
+
+- A beta: run it in a project on 0.6.1 or later with `python3 .context-gate/bin/govern beta on`.
+
+**Upgrading:** nothing to do. `decision-changes` arrives on, but no existing hook or CI job passes
+`--base`, so a project's runs gain warnings at most and exit as they did. To gate pull requests,
+run `python3 .context-gate/bin/govern check --base origin/<branch>` on a full clone, or commit
+the workflow `govern ci github` prints. From then on an edit to a locked decision carries a
+`**Revised:** YYYY-MM-DD (what changed)` line. A project whose statuses are not the standard ones
+sets `locked_statuses` under `[checks.decision-changes]`. `level = "error"` does not make plain
+`check` fail; to hold uncommitted work to the gate's rules locally, run `check --base HEAD`.
+
+## 0.6.1 — 2026-10-06
+
+- **Security: a source that starts with `-` is refused.** In 0.6.0 and earlier, a
+  `[governance] source` (or a git profile) beginning with a dash was passed to git, which read it
+  as an option, so a crafted `.context-gate/config.toml` could run a command at session start
+  (the plugin's upgrade notice), on a gate run and on `bin/upgrade`. This matters to anyone who
+  runs the gate or the plugin in a project whose `config.toml` they did not write. Every call now
+  refuses such a source before git runs (`… source '…' starts with "-", which git would read as
+  an option; name a git URL or a path`) and separates it with `--`. A tag whose name contains a
+  slash is no longer read as a release or a beta.
 - **A working file with no `status` is told the allowed values:** the `doc-frontmatter` error now
   reads `<file>: working file needs 'status', starting with one of ('active', 'held', 'planned',
   'complete', 'superseded') — it is what says which plan is active`, naming the project's own
@@ -49,10 +125,32 @@ it upgraded to.
   beta: the upgrade notice, `bin/upgrade`, the marketplace plugin and a series pin take releases
   only. To run one, see "Running a beta locally" in `docs/configuration.md`; it may break, and
   `govern beta off` returns the project to its pinned release.
+- **`govern beta on` fetches the beta:** when the beta's engine or its local plugin is not
+  installed, `beta on` installs it from the project's `[governance] source`, then switches. With
+  no version it takes the newest beta of those installed and those tagged at the source. Before,
+  it refused until both had been installed from a clone with `tools/release/install-engine.py`
+  and `install-plugin.py`, which is still the way for a project with no `source`. Nothing else
+  downloads a beta: not the gate, a session start or `bin/upgrade`.
+- **Fetching an engine survives two sessions at once:** when the pinned engine is missing and two
+  sessions start together, both now succeed (one used to end in a traceback). The fetch stages in
+  its own directory, never replaces an engine that is already there, and no longer waits
+  without end: every fetch of a pinned engine now has a 120 second limit, raised with
+  `CONTEXT_GATE_FETCH_TIMEOUT` (whole seconds), and git is told not to prompt for a credential
+  only when there is no terminal to answer.
+- **`install-plugin.py` only replaces its own install by default:** it refuses a directory under
+  `~/.claude/skills/` that it did not install, where it used to replace whatever was there.
+  `--out DIR` still replaces DIR whatever it holds.
 
-**Upgrading:** nothing to do, and no heading a project has written needs to change. A script that
+**Upgrading:** upgrade the plugin and each project: the source fix has two halves, one in the
+plugin's engine (session start) and one in the project's own `bin/govern` and `bin/upgrade`,
+which the upgrade replaces. Otherwise nothing to do, and no heading a project has written needs
+to change. A reworded finding shows as new in `upgrade-report.md`, with the old wording as
+gone; it is the same finding at the same severity. A script that
 matches one of the messages above by its exact text needs the new wording. A project with
-no entry heading yet gets hyphens from `trap-add` and `migrate`, where it got em dashes.
+no entry heading yet gets hyphens from `trap-add` and `migrate`, where it got em dashes. The beta
+fetch is in the project's own `bin/govern`, so it arrives with the upgrade to 0.6.1. On a slow
+link, set `CONTEXT_GATE_FETCH_TIMEOUT` to more than 120 seconds, where a pinned engine's fetch
+used to have no limit.
 
 ## 0.6.0 — 2026-10-05
 

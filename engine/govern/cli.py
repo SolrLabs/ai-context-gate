@@ -3,6 +3,7 @@ and scripts already call, installed from `engine/govern/templates/entrypoint.py`
 usage and in messages is whatever the engine was invoked as.
 
 Exit codes: 0 clean, 1 a finding or an unresolved problem, 2 usage or configuration error.
+`diff` is a report: it exits 0 whatever changed, and 2 only on a usage or configuration error.
 """
 from __future__ import annotations
 
@@ -121,7 +122,8 @@ def collect(ctx: Context, targets: list, workspace: bool) -> list[tuple[str, Fin
 
 
 def cmd_check(ctx: Context, project: str | None, path: str | None = None,
-             history_from: str | None = None, workspace_only: bool = False) -> int:
+             history_from: str | None = None, workspace_only: bool = False,
+             base: str | None = None) -> int:
     """`--path` checks a scope's files from a directory swapped in for the one the registry
     names — a git pre-commit hook's staged-tree snapshot, say — instead of the checkout on disk.
     `--history-from` then answers every git question a project-scope check asks about those
@@ -133,7 +135,16 @@ def cmd_check(ctx: Context, project: str | None, path: str | None = None,
     Every project scope is skipped, with its blocks, docs, the links into it and its ratchet
     entries, and the output names each project it skipped. A checkout that is present anyway
     can still be looked at by a check that works across the tree (the workspace pass of
-    `agent-worktrees`, a `writing-rules` glob that reaches into it)."""
+    `agent-worktrees`, a `writing-rules` glob that reaches into it).
+
+    `--base REF` makes a change-aware check (`decision-changes`) compare the tree with the
+    commit the branch left `REF` at, per repository, and report what it finds as errors: the
+    gate a pull request runs. Without it such a check compares uncommitted work with `HEAD`
+    and only warns. It combines with every other flag; under `--path` the base is read from
+    `--history-from`'s checkout."""
+    if base is not None and not base.strip():
+        return fail("--base needs a ref, e.g. --base origin/main")
+    ctx.base = base
     if workspace_only and (project or path is not None):
         return fail("--workspace-only checks no project: drop --project and --path")
     if workspace_only and ctx.registry.single:
@@ -178,6 +189,80 @@ def cmd_check(ctx: Context, project: str | None, path: str | None = None,
         total.extend(found)
     label = f"project:{project}" if project else ctx.workspace_label
     return 0 if REPORTERS["aggregate"](label, total) else 1
+
+
+# ---------------------------------------------------------------------------- diff
+
+def _emit(text: str) -> None:
+    """Write a whole report to stdout, and stop quietly when its reader has gone (`govern diff
+    | head -1`): a closed pipe is the reader's choice, not an error, so the command still
+    exits 0. It is flushed here, where the failure can be caught; left to the interpreter's
+    exit it would be a traceback."""
+    try:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # What is still buffered has nowhere to go: point stdout at nothing, so the flush
+        # the interpreter makes on its way out does not fail in turn.
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+            os.close(devnull)
+        except (OSError, ValueError):
+            pass
+
+
+def _say(text: str) -> None:
+    """Print text that holds a project's own words (a title, a path) on a console that may not
+    be able to encode them: a Windows console, or a pipe with a legacy encoding. What it cannot
+    encode is escaped, never a traceback."""
+    codec = sys.stdout.encoding or "utf-8"
+    try:
+        text = text.encode(codec, "backslashreplace").decode(codec, "replace")
+    except LookupError:
+        pass
+    _emit(text)
+
+
+def cmd_diff(ctx: Context, base: str | None, as_json: bool, project: str | None = None) -> int:
+    """What this branch did to the decision logs, the trap files and the ratchet baseline
+    (`govern.changes`): a report, never a gate. It exits 0 whether or not anything changed or
+    could be compared, so CI can always post it.
+
+    With no `--base` the base is `HEAD`, each repository's own: uncommitted work. `--base REF`
+    compares with the commit the branch left `REF` at, as `check --base` does. `--project`
+    limits the report to one project."""
+    from govern import changes
+    if base is not None and not base.strip():
+        return fail("--base needs a ref, e.g. --base origin/main")
+    scope = None
+    if project:
+        scope = ctx.registry.find(project)
+        if scope is None:
+            return fail(f"no project '{project}' in {ctx.registry.path.name}")
+    ctx.base = base
+    report = changes.build(ctx, scope)
+    _say(changes.as_json(report) if as_json else changes.text(report))
+    return 0
+
+
+# ---------------------------------------------------------------------------- ci
+
+# The workflow each provider's CI runs, shipped beside the entry point's template.
+CI_TEMPLATES = {"github": Path(__file__).resolve().parent / "templates" / "ci-github.yml"}
+
+
+def cmd_ci(provider: str | None, prog: str) -> int:
+    """Print the workflow that runs the gate and the report on a pull request. It writes
+    nothing: the project redirects it to where its provider reads workflows, and owns the
+    file from then on."""
+    template = CI_TEMPLATES.get(provider or "")
+    if template is None:
+        known = ", ".join(sorted(CI_TEMPLATES))
+        named = f"no workflow for '{provider}'" if provider else "name a provider"
+        return fail(f"ci: {named} — the one shipped is {known}: `{prog} ci {known}`")
+    _emit(template.read_text(encoding="utf-8"))
+    return 0
 
 
 # ---------------------------------------------------------------------------- explain
@@ -565,6 +650,20 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     c.add_argument("--workspace-only", dest="workspace_only", action="store_true",
                    help="check the workspace alone, skipping every project (an orchestrator's "
                         "CI without its projects' checkouts)")
+    c.add_argument("--base", default=None, metavar="REF",
+                   help="compare with the commit this branch left REF at (origin/main, say) and "
+                        "fail on what changed: the gate a pull request runs")
+    df = sub.add_parser("diff", help="what this branch did to the decision logs, traps and "
+                                     "baseline: a report, never a gate (always exits 0)")
+    df.add_argument("--base", default=None, metavar="REF",
+                    help="compare with the commit this branch left REF at (origin/main, say); "
+                         "without it, uncommitted work against HEAD")
+    df.add_argument("--json", action="store_true", dest="as_json")
+    df.add_argument("--project", "--repo", dest="project", default=None,
+                    help="report on this project alone")
+    ci = sub.add_parser("ci", help="print a CI workflow that runs the gate and the report on "
+                                   "a pull request; it writes nothing")
+    ci.add_argument("provider", nargs="?", help="github")
     sub.add_parser("index", help="regenerate generated blocks")
     bl = sub.add_parser("baseline", help="rewrite the ratchet baseline (lower/remove only)")
     bl.add_argument("--allow-raise", action="store_true",
@@ -629,6 +728,8 @@ def main(argv: list[str] | None = None, root: Path | None = None,
         except (ValueError, OSError) as exc:
             return fail(f"~/.claude/settings.json: {exc} — settings.json was not changed")
         return 0
+    if args.cmd == "ci":
+        return cmd_ci(args.provider, prog)    # a template: it reads nothing of the project's
     try:
         ctx = load_context(root, prog)
     except config.ConfigError as exc:
@@ -648,6 +749,8 @@ def main(argv: list[str] | None = None, root: Path | None = None,
 def dispatch(ctx: Context, args) -> int:
     if args.cmd == "index":
         return cmd_index(ctx)
+    if args.cmd == "diff":
+        return cmd_diff(ctx, args.base, args.as_json, args.project)
     if args.cmd == "baseline":
         return cmd_baseline(ctx, args.allow_raise)
     if args.cmd == "next-id":
@@ -667,4 +770,5 @@ def dispatch(ctx: Context, args) -> int:
     if args.cmd == "usage":
         return cmd_usage(ctx, args.as_json)
     return cmd_check(ctx, getattr(args, "project", None), getattr(args, "path", None),
-                     getattr(args, "history_from", None), getattr(args, "workspace_only", False))
+                     getattr(args, "history_from", None), getattr(args, "workspace_only", False),
+                     getattr(args, "base", None))

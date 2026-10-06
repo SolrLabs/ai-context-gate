@@ -1,0 +1,40 @@
+# Runs the context-gate checks on every pull request, and writes what the pull request changes
+# in the decision logs, the traps and the ratchet baseline to the run's summary.
+#
+# Printed by `python3 .context-gate/bin/govern ci github`. This file is yours from here on:
+# edit it as you would any workflow. It runs from the top of the repository; if
+# `.context-gate/` is in a directory below that, set `defaults.run.working-directory` to it.
+#
+# The branch a pull request targets reaches a command as an environment variable, never as
+# `${{ ... }}` in the command itself, which is pasted into the script before a shell reads it.
+name: context-gate
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The whole history: the gate compares with the commit this branch left the base at.
+          fetch-depth: 0
+          # The branch's own commit, not GitHub's merge of it into the base: by the pull
+          # request's own ref, which is there to fetch when the branch is in a fork.
+          ref: refs/pull/${{ github.event.pull_request.number }}/head
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Gate
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: python3 .context-gate/bin/govern check --base "origin/$BASE_REF"
+      - name: What this pull request changes
+        if: always()
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: python3 .context-gate/bin/govern diff --base "origin/$BASE_REF" >> "$GITHUB_STEP_SUMMARY"

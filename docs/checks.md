@@ -17,6 +17,7 @@ Each check has a level: `off`, `warn` or `error`. At `error`, a check reports wh
 | [`decision-history`](#decision-history) | `warn` | A decision entry's body carries no history label — a rewritten entry states only today's rule. |
 | [`trap-ids`](#trap-ids) | `error` | A trap id is owned by exactly one of a project's trap files. |
 | [`trap-entries`](#trap-entries) | `warn` | Every trap entry says when it bites: the **Bites when:** line is what the trap index shows. |
+| [`decision-changes`](#decision-changes) | `error` | A locked decision changed in place without a dated Revised line, a decision removed, or an id another branch already took. Advisory (warnings) unless run with `--base`. |
 | [`doc-frontmatter`](#doc-frontmatter) | `error` | Every governed doc carries valid frontmatter, a current review date, and resolvable related links; working files carry a status and stay bounded. |
 | [`workspace-docs`](#workspace-docs) | `error` | The workspace's own docs exist and pass the same doc check as project docs. |
 | [`governed-doc-count`](#governed-doc-count) | `error` | Bounds how many governed docs a project carries. |
@@ -145,7 +146,7 @@ Every registry entry declares a license, and each configured conflict (say, copy
 
 ## Decision logs and traps
 
-Numbered decision entries (`## P-12 - Title`) and trap entries (`## T-3 - Title`).
+Numbered decision entries (`## P-12 - Title`) and trap entries (`## T-3 - Title`), and what a change did to them.
 
 ### `decision-log`
 
@@ -221,6 +222,25 @@ Every trap entry says when it bites: the **Bites when:** line is what the trap i
 **Why:** An entry without one shows as a dash in the index, so nobody reading the index can tell whether it applies to them.
 
 No parameters: set its `level` only.
+
+### `decision-changes`
+
+A locked decision changed in place without a dated Revised line, a decision removed, or an id another branch already took. Advisory (warnings) unless run with `--base`.
+
+| | |
+|---|---|
+| Default level | `error` |
+| Scope | Runs once for the governance root; under `check --project X`, runs for that one project |
+| Ratchet | No |
+| Since | 0.7.0 |
+
+**Question:** Should a change to a settled decision have to say so?
+
+**Why:** A record that can be reworded silently is not a record; with more than one writer, the rewording is somebody else's decision.
+
+| Parameter | Type | Default | Looser when | Meaning |
+|---|---|---|---|---|
+| `locked_statuses` | list | `["locked"]` | — | Statuses whose entries may only change with a dated Revised line |
 
 ## Docs
 

@@ -25,7 +25,7 @@ on. It runs the same way on every machine and in CI.
 
 | Record | What the gate keeps true |
 |---|---|
-| **Decision logs** | Entries are headed `## P-12 - Title` (a prefix, a number, any dash, a title), unique, in ascending order and inside the project's id range. Each carries a `**Status:**` (`locked`, `provisional` or `deferred`), the required fields (`**Rule:**` and `**Why:**`) and an optional `**Topic:**`, and stays short (250 words). A changed decision is rewritten in place; git keeps the old text. A replaced decision shrinks to a one-line pointer, `## P-3 - Replaced by P-40`, so citations still resolve. `next-id` prints the next free id, and gaps are never reused. |
+| **Decision logs** | Entries are headed `## P-12 - Title` (a prefix, a number, any dash, a title), unique, in ascending order and inside the project's id range. Each carries a `**Status:**` (`locked`, `provisional` or `deferred`), the required fields (`**Rule:**` and `**Why:**`) and an optional `**Topic:**`, and stays short (250 words). A changed decision is rewritten in place, a locked one with a dated `**Revised:**` line; git keeps the old text. A replaced decision shrinks to a one-line pointer, `## P-3 - Replaced by P-40`, so citations still resolve. `next-id` prints the next free id, and gaps are never reused. |
 | **Traps** | Known pitfalls, one entry each (`## T-3 - Title`) with a `**Bites when:**` line, in the working-files directory (`traps*.md`). A trap id lives in exactly one file. A generated index lists them all. |
 | **Docs** | Every governed doc carries frontmatter (`doc_type`, `purpose`, `audience`, `load_when`, `last_reviewed`), is reviewed within 120 days if it is a control or reference doc, links only to files that exist, and is listed in the project's generated doc index when the project keeps one. The number of governed docs per project is bounded. |
 | **Working files** | The working-files directory holds at most 12 files. A file whose status says it is finished should be deleted a week after it was last touched (git keeps it); the gate warns until it is, and one that was never committed is flagged until it is. A working file and the HANDOFF have word limits. |
@@ -61,6 +61,9 @@ project pins:
 ```sh
 python3 .context-gate/bin/govern check                 # the gate
 python3 .context-gate/bin/govern check --project NAME  # one project of a workspace
+python3 .context-gate/bin/govern check --base origin/main   # the gate a pull request runs
+python3 .context-gate/bin/govern diff --base origin/main    # what the branch changed: a report
+python3 .context-gate/bin/govern ci github             # print a workflow that runs both
 python3 .context-gate/bin/govern index                 # regenerate every generated block
 python3 .context-gate/bin/govern baseline              # lower the ratchet baseline
 python3 .context-gate/bin/govern explain [CHECK]       # every effective setting, and where it came from
@@ -104,6 +107,193 @@ It skips every project's checks, blocks, docs, the links into it and its ratchet
 prints one `skipped` line per project. A checkout that is present anyway can still be looked at
 by a check that works across the tree, such as `agent-worktrees` or a `writing-rules` glob that
 reaches into it.
+
+## Changes to settled decisions
+
+Every other check reads the records as they are. `decision-changes` reads what changed in the
+decision logs, by comparing them with git:
+
+- **A locked decision changed in place** needs a dated line in the entry saying so:
+  `**Revised:** 2026-10-06 (what changed)`. A new line, or new text on the one already there,
+  with a date no older than the last, makes the edit legal. A typo fix and a status change need
+  the line too. Reducing the entry to a pointer, `## P-3 - Replaced by P-40`, needs none.
+- **A decision removed** is reported: a decision is superseded, not deleted. To withdraw a
+  locked decision added by mistake, first change its status with a `**Revised:**` line saying
+  so; once that has landed, removing it is a warning.
+- **An id the base branch also took** (decisions and traps, under `--base` only): your branch
+  added `P-31`, and so did the branch it merges into, with different text. If it is the same
+  entry (the base branch took yours in a squash merge, and you have edited it since), merge the
+  base branch into yours. If it is another entry, renumber yours.
+
+Adding a decision, editing a provisional or deferred one, re-wrapping a paragraph, changing a
+heading's dash or an entry's `**Topic:**`, moving an entry to another log, renaming a log and
+regenerating a block are not changes. A `**Topic:**` line that goes on to another field, such
+as `**Topic:** Process. **Rule:** ...`, is text like any other. An id is the same id whatever
+the case of its prefix, so `## p-3` is `P-3`. The check runs in two modes:
+
+| Command | Compares with | What it reports |
+|---|---|---|
+| `govern check` | The last commit (`HEAD`), so it sees uncommitted work | Warnings only, which go once the edit is committed |
+| `govern check --base origin/main` | The commit where the branch left `origin/main`, so what landed there since is not blamed on the branch | Errors; a removed decision that was not locked stays a warning |
+
+Run the second on a pull request, on a full clone:
+
+```sh
+python3 .context-gate/bin/govern check --base origin/main
+```
+
+When the comparison cannot be made, plain `check` says nothing: a project with no git history
+is not nagged. `--base` fails and names the reason: no git, no commit yet, a ref the clone does
+not have, a log git cannot read at the base, or a shallow clone, for which it says to fetch the
+full history (`fetch-depth: 0` in a GitHub Actions checkout). A log that is new since the base
+is not a failure. A log renamed since the base is compared with the file it was: the one git
+reads it as renamed from, or, when so much changed in the same commit that git reads no rename,
+each deleted Markdown file that held one of its ids. Only a log renamed with none of its ids
+kept reads as new. When a log is not at the base and more than 50 Markdown files were deleted
+since, they are not read, and `--base` fails and says so.
+
+In a workspace the ref is resolved in each repository. In a run of the whole workspace, a
+project that is its own repository and does not have the ref is a warning: the rest is still
+compared, and the exit code stays 0 unless something else is an error. Under
+`check --project NAME --base <ref>` the same project is an error and the run exits 1, because
+that run was asked to compare nothing else. Under `--path` the comparison is with the project's
+own files in the repository `--history-from` is in, whether that names the repository's top or
+the project's directory. `--path` with `--base` and no `--history-from` is an error:
+`decision-changes: could not compare <project> with <ref> — a snapshot needs --history-from to
+be compared`. While a merge or rebase is in progress the tree holds the other side's edits, so
+what the check reports then goes when the merge is finished.
+
+## What a branch changed
+
+`govern diff` prints what changed in the decision logs, the trap files and the ratchet baseline.
+With no `--base` it compares the tree with the last commit (`HEAD`), so it shows uncommitted
+work. With `--base origin/main` it compares with the commit where the branch left `origin/main`,
+as `check --base` does. `--project NAME` limits it to one project: the entries whose log, at
+the base or now, is that project's. A decision moved to another project's log is a line in the
+report of both.
+
+```text
+Governance changes since origin/main
+
+Decisions
+- revised    docs/DECISIONS.md P-8 (locked), Revised 2026-10-06
+- removed    docs/DECISIONS.md P-9 (deferred)
+- superseded docs/DECISIONS.md P-12 -> P-31
+- status     docs/DECISIONS.md P-14 provisional -> locked
+- changed    docs/DECISIONS.md P-20 (provisional)
+- added      docs/DECISIONS.md P-31 - Two writers, one log (provisional)
+- moved      projects/web/DECISIONS.md P-15 (locked), from docs/DECISIONS.md
+
+Traps
+- removed    projects/web/working-files/traps.md T-3
+- added      projects/web/working-files/traps.md T-7 - The cache is stale
+
+Baseline
+- lowered    decision_words:web:P-104 900 -> 700
+- raised     working_file_words:docs/plan.md 6100 -> 6400
+
+Compared
+- . at 9b5d6021d99d
+- projects/api: not compared (origin/main names no commit in this repository)
+```
+
+It is a report and never fails: it exits 0 whether or not anything changed, and whether or not
+a repository could be compared. Whether a change is allowed is for `check --base` to say.
+
+Every decision and trap line is `- <word> <log> <id>`, then what the word needs. The log is the
+file the entry is in now, or for `removed` the file it was in, so trap `T-7` in two projects is
+two lines. A decision that is in another log than at the base ends with `, from <old log>`
+whatever its word, so a decision moved and reworded keeps the move:
+`- changed    governance/DECISIONS.md A-100 (locked), from projects/alpha/DECISIONS.md`. A log
+renamed and rewritten so far that git reads no rename is reported that way too: every entry it
+kept is a line, `moved` when nothing else changed, ending `, from <old log>`. The lines of a
+section are in order of the log's path, then of the id: its prefix, then its number as a
+number. A decision gets the first word that applies, in this order:
+
+| Word | Meaning |
+|---|---|
+| `removed` | The id is in no log now |
+| `added` | The id was in no log at the base |
+| `superseded` | The entry became a pointer, `Replaced by <id>`, or a pointer now names another id |
+| `moved` | The same text, in another log |
+| `revised` | An entry in `locked_statuses` (`locked` by default) whose text changed with a new dated `**Revised:**` line |
+| `status` | Only the status changed |
+| `changed` | Any other change to the text |
+
+When one id is in more than one log and the copies cannot be paired one way (a decision copied
+into a second log, say), the report does not guess which copy was which: each copy now that has
+no counterpart at the base is `changed`, and each copy at the base that has none now is
+`removed`.
+
+A trap is `added`, `removed` or `changed`. A baseline number is `raised`, `lowered`, `added` or
+`removed`, and a baseline file that cannot be read is one line, `- unreadable <path> <reason>`.
+What `decision-changes` does not count as a change is not printed: a re-wrapped paragraph, a
+heading's dash, a `**Topic:**`, a regenerated block. A section with nothing in it is left out,
+and with nothing at all the report says `- nothing changed`, or `- nothing compared` when no
+repository could be compared. "Compared" always lists each repository with the first 12
+characters of the commit it was compared with, or the reason it was not.
+
+The layout (the words, the punctuation, the arrows) is ASCII, and the text is valid Markdown.
+Titles and paths are the project's own text, printed as written, with one exception: in the
+text form a control character in a title (anything below 0x20, and 0x7f) is printed as `\xNN`,
+so a title cannot steer a terminal or a job summary. A tool that needs fields reads `--json`,
+not the text.
+
+`govern diff --json` prints the same report as one JSON object, for a tool to read:
+
+| Key | Holds |
+|---|---|
+| `base` | The ref given to `--base`, or `HEAD` |
+| `compared` | One object per repository: `repo`, `commit` (the full commit id), `reason` |
+| `decisions` | One object per line: `change`, `log`, `id`, `title`, `status`, `was_status`, `was_log`, `replaced_by`, `revised` |
+| `traps` | One object per line: `change`, `log`, `id`, `title` |
+| `baseline` | One object per line: `change`, `key`, `from`, `to`, `reason` |
+
+`change` is the first word of the line. A value that does not apply is `null`. For a decision:
+
+| Key | Holds |
+|---|---|
+| `log` | The log the entry is in now; for `removed`, the log it was in |
+| `title`, `status` | The entry's title and status now; for `removed` and `superseded`, the ones it had at the base. `status` is `null` when the entry has no status |
+| `was_status` | The status at the base, when `status` is not it |
+| `was_log` | The log at the base, when `log` is not it |
+| `replaced_by` | The id a pointer names |
+| `revised` | The newest `**Revised:**` date, when `change` is `revised` |
+
+For a baseline number, `from` and `to` are the number at the base and the number now, and
+`reason` is `null`. For `unreadable`, `key` is the baseline's path as a finding prints it,
+`reason` says why it could not be read, and `from` and `to` are `null`. A JSON string escapes
+a control character itself, so a title is given as written.
+
+### On a pull request
+
+`govern ci github` prints a GitHub Actions workflow and writes nothing. It runs on every pull
+request: it checks out the pull request's own ref with the full history, runs `check --base`
+against the branch the pull request targets, and appends `govern diff` to the run's summary,
+also when the check failed. The name of that branch reaches each command as an environment
+variable, never pasted into the command. Put it in place from the top of the git repository:
+
+```sh
+mkdir -p .github/workflows
+python3 .context-gate/bin/govern ci github > .github/workflows/context-gate.yml
+```
+
+When `.context-gate/` is in a directory below the top of the git repository, run this from
+that directory instead, so the file still lands at the top:
+
+```sh
+top=$(git rev-parse --show-toplevel)
+mkdir -p "$top/.github/workflows"
+python3 .context-gate/bin/govern ci github > "$top/.github/workflows/context-gate.yml"
+```
+
+and set `defaults.run.working-directory` to that directory in the file: its commands run from
+the top of the repository otherwise.
+
+The file is the project's from then on: commit it and edit it as you would any workflow. The
+runner installs the pinned engine from `[governance] source`, as any machine does.
+[configuration.md](configuration.md#on-a-pull-request) has the lines that post the report as a
+comment, and the line a project testing a beta adds.
 
 ## How settings are decided
 

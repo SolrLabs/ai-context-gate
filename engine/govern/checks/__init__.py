@@ -1,5 +1,5 @@
 """Importing this package registers every built-in check, in the default order."""
 from govern.checks import (  # noqa: F401
-    repo, registry, docs, decisions, agents, blocks, memory, working, ratchet,
+    repo, registry, docs, decisions, changes, agents, blocks, memory, working, ratchet,
     checkouts, hooks, writing, licenses, references, links, overrides, usage,
 )

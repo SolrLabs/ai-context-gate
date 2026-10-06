@@ -1,0 +1,166 @@
+{
+  "base": "main",
+  "baseline": [
+    {
+      "change": "lowered",
+      "from": 900,
+      "key": "decision_words:alpha:A-100",
+      "reason": null,
+      "to": 700
+    },
+    {
+      "change": "added",
+      "from": null,
+      "key": "governed_docs:alpha",
+      "reason": null,
+      "to": 41
+    },
+    {
+      "change": "removed",
+      "from": 1720,
+      "key": "handoff_words:alpha",
+      "reason": null,
+      "to": null
+    },
+    {
+      "change": "raised",
+      "from": 6100,
+      "key": "working_file_words:docs/plan.md",
+      "reason": null,
+      "to": 6400
+    }
+  ],
+  "compared": [
+    {
+      "commit": "9b5d6021d99d4304b9c357c8c64ebc440cf40854",
+      "reason": null,
+      "repo": "."
+    },
+    {
+      "commit": "e761f8be87ae8a26d6a904a64517cf153938590e",
+      "reason": null,
+      "repo": "projects/beta"
+    },
+    {
+      "commit": null,
+      "reason": "main names no commit in this repository",
+      "repo": "projects/delta"
+    }
+  ],
+  "decisions": [
+    {
+      "change": "changed",
+      "id": "A-100",
+      "log": "docs/DECISIONS.md",
+      "replaced_by": null,
+      "revised": null,
+      "status": "locked",
+      "title": "Title 100",
+      "was_log": "projects/alpha/DECISIONS.md",
+      "was_status": null
+    },
+    {
+      "change": "revised",
+      "id": "D-08",
+      "log": "docs/DECISIONS.md",
+      "replaced_by": null,
+      "revised": "2026-10-06",
+      "status": "locked",
+      "title": "Keep the log short",
+      "was_log": null,
+      "was_status": null
+    },
+    {
+      "change": "removed",
+      "id": "D-09",
+      "log": "docs/DECISIONS.md",
+      "replaced_by": null,
+      "revised": null,
+      "status": "deferred",
+      "title": "Maybe later",
+      "was_log": null,
+      "was_status": null
+    },
+    {
+      "change": "superseded",
+      "id": "D-12",
+      "log": "docs/DECISIONS.md",
+      "replaced_by": "D-31",
+      "revised": null,
+      "status": "locked",
+      "title": "One writer per file",
+      "was_log": null,
+      "was_status": null
+    },
+    {
+      "change": "status",
+      "id": "D-14",
+      "log": "docs/DECISIONS.md",
+      "replaced_by": null,
+      "revised": null,
+      "status": "locked",
+      "title": "Review before merge",
+      "was_log": null,
+      "was_status": "provisional"
+    },
+    {
+      "change": "changed",
+      "id": "D-20",
+      "log": "docs/DECISIONS.md",
+      "replaced_by": null,
+      "revised": null,
+      "status": "provisional",
+      "title": "Monthly cleanup",
+      "was_log": null,
+      "was_status": null
+    },
+    {
+      "change": "added",
+      "id": "D-31",
+      "log": "docs/DECISIONS.md",
+      "replaced_by": null,
+      "revised": null,
+      "status": "provisional",
+      "title": "Two writers, one log",
+      "was_log": null,
+      "was_status": null
+    },
+    {
+      "change": "moved",
+      "id": "D-15",
+      "log": "projects/alpha/DECISIONS.md",
+      "replaced_by": null,
+      "revised": null,
+      "status": "locked",
+      "title": "Alpha owns its schema",
+      "was_log": "docs/DECISIONS.md",
+      "was_status": null
+    }
+  ],
+  "traps": [
+    {
+      "change": "removed",
+      "id": "T-3",
+      "log": "projects/alpha/working-files/traps.md",
+      "title": "Trap 3"
+    },
+    {
+      "change": "changed",
+      "id": "T-5",
+      "log": "projects/alpha/working-files/traps.md",
+      "title": "Trap 5"
+    },
+    {
+      "change": "added",
+      "id": "T-7",
+      "log": "projects/alpha/working-files/traps.md",
+      "title": "The cache is stale"
+    },
+    {
+      "change": "added",
+      "id": "T-7",
+      "log": "projects/beta/working-files/traps.md",
+      "title": "The clock is local"
+    }
+  ]
+}

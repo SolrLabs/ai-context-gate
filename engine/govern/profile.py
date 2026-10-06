@@ -83,9 +83,12 @@ def rmtree(path: Path) -> None:
 
 
 def fetch(url: str, ref: str, dest: Path) -> None:
+    if url.startswith("-"):     # git would read it as an option, and some name a command to run
+        raise ProfileError(f"profile {url}#{ref} starts with \"-\", which git would read as an "
+                           "option; name a git URL")
     tmp = dest.with_name(dest.name + ".tmp")
     rmtree(tmp)
-    res = subprocess.run(["git", "clone", "--quiet", "--depth", "1", "--branch", ref, url,
+    res = subprocess.run(["git", "clone", "--quiet", "--depth", "1", "--branch", ref, "--", url,
                           str(tmp)], capture_output=True, text=True,
                          env={"GIT_TERMINAL_PROMPT": "0", **_env()})
     if res.returncode != 0:
