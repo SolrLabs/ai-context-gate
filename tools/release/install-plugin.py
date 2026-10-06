@@ -20,7 +20,10 @@ installs the engine it runs into the user's engines directory only when it carri
 
 The plugin's name, and so its directory under ~/.claude/skills/, is the one the tag's own
 plugin.json gives. Refuses a tag whose plugin.json version and engine version disagree.
-Replaces an existing local install of the plugin; never touches anything else under ~/.claude/.
+Replaces an existing local install of the plugin, which is a directory carrying that stamp: one
+without it was not assembled by this tool, and is refused rather than deleted. That rule is for
+the default place under ~/.claude/skills/; `--out DIR` replaces DIR whatever it holds, as it
+always did. Never touches anything else under ~/.claude/.
 """
 from __future__ import annotations
 
@@ -75,6 +78,12 @@ def main() -> int:
         home = Path(os.environ.get("HOME") or Path.home())
         out = Path(args[args.index("--out") + 1]) if "--out" in args \
             else home / ".claude" / "skills" / name
+        if "--out" not in args and (out.exists() or out.is_symlink()) \
+                and not (out / "govern" / "RELEASE").is_file():
+            print(f"error: {out} is not a local install of the plugin (it has no "
+                  "govern/RELEASE), so it is not replaced; move it away, then run this again",
+                  file=sys.stderr)
+            return 1
         shutil.copytree(Path(tmp) / "engine" / "govern", stage / "govern")
         # The release stamp (the engine's layout.RELEASE_MARKER), in the assembled copy only:
         # adopt installs the engine it runs only when it carries this.

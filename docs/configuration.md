@@ -53,7 +53,7 @@ The tables:
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `engine` | string | required | The exact engine version this project runs, like `"0.4.0"`. The engine refuses to run under any other pin. A two-part pin such as `"0.4"` runs the newest installed release in that series, with a notice to pin exactly. |
-| `source` | string | none | A git URL or path holding the engine, with a `v<version>` tag per release. `bin/govern` installs a missing pinned engine from it, `bin/upgrade` finds new releases there, and the upgrade notice checks it. |
+| `source` | string | none | A git URL or path holding the engine, with a `v<version>` tag per release. `bin/govern` installs a missing pinned engine from it, `bin/upgrade` finds new releases there, and the upgrade notice checks it. The engine fetch gives up after 120 seconds; set `CONTEXT_GATE_FETCH_TIMEOUT` to a larger number of seconds on a slow link. |
 | `profile` | string | none | The profile this project inherits: a directory (absolute, or relative to the governance root) or a git URL pinned with `#<tag>`. See [Profiles](#profiles). |
 | `schema` | integer | `1` | The config schema version. This engine reads schema 1 only. |
 | `extensions` | list of strings | `[]` | Directories, relative to the governance root, whose `*.py` files register extension checks. Each directory must exist. See [Extensions](#extensions). |
@@ -436,6 +436,34 @@ RENAMED = {"licence": "license"}  # writing-rules: allow licence
 The old `Licence` heading stays for inbound links. <!-- writing-rules: allow licence -->
 ```
 
+`decision-changes` compares the decision logs with git, and how strict it is depends on how the
+gate is run, not on a setting. Plain `check` compares uncommitted work with the last commit and
+reports what it finds as warnings. `check --base <ref>` compares the branch with the commit where
+it left `<ref>` and reports errors; run it on a pull request, on a full clone, as
+`python3 .context-gate/bin/govern check --base origin/main`. A locked decision may change in
+place only with a dated line in the entry, `**Revised:** YYYY-MM-DD (what changed)`.
+`locked_statuses` lists the statuses that count as locked, so a project with its own statuses
+names its own:
+
+```toml
+[governance]
+engine = "0.7.0"
+
+[checks.decision-log]
+statuses = ["accepted", "proposed", "deferred"]
+reasons = { statuses = "The team's own words for a decision's state." }
+
+[checks.decision-changes]
+locked_statuses = ["accepted"]
+```
+
+`level = "warn"` turns the `--base` errors into warnings as well, and like any lowered level it
+needs a `reason`. An explicit `level = "error"` does not make plain `check` fail: without
+`--base` the check only warns, whatever its level. A project that wants the errors locally runs
+`python3 .context-gate/bin/govern check --base HEAD`, which holds uncommitted work to the gate's
+rules. [How it works](how-it-works.md#changes-to-settled-decisions) lists what counts as a
+change.
+
 ### Loosening needs a reason
 
 A setting looser than the engine standard needs a `reason` in the same check's table, or the
@@ -509,16 +537,18 @@ pin cannot reach CI or other clones. `govern beta on` adds `.context-gate/local.
 `.claude/settings.local.json` to `.git/info/exclude` (never a committed `.gitignore`) when git does
 not already ignore them.
 
-A beta comes from a `vX.Y.Z-beta.N` tag. Install its engine and plugin from a clone of the
-repository first, with `python3 tools/release/install-engine.py vX.Y.Z-beta.N` and
-`python3 tools/release/install-plugin.py vX.Y.Z-beta.N`. The beta plugin is the local install,
-`context-gate@skills-dir`; the stable plugin is the marketplace one, `context-gate@context-gate`.
+A beta comes from a `vX.Y.Z-beta.N` tag. `govern beta on` installs its engine and its plugin from
+the project's `[governance] source` when either is missing on this machine. The beta plugin is the
+local install, `context-gate@skills-dir`; the stable plugin is the marketplace one,
+`context-gate@context-gate`.
 
 Betas are published as prereleases of the repository, tagged `vX.Y.Z-beta.N`. No project is ever
 offered one: an upgrade, the marketplace plugin and the upgrade notice only ever name a release.
-To run a beta, fetch the tags in a clone of the repository, install the beta from its tag, then
-turn it on in the project. A beta may break. `govern beta off` returns the project to its pinned
-release.
+Nothing but `govern beta on` downloads one. To run a beta, turn it on in the project. A beta may
+break. `govern beta off` returns the project to its pinned release.
+
+A project with no `[governance] source`, or one not yet upgraded to 0.6.1, installs the beta from
+a clone of the repository first:
 
 ```sh
 git fetch --tags                                           # in a clone of the repository
@@ -531,24 +561,30 @@ Four commands, run through the project's gate:
 
 ```sh
 python3 .context-gate/bin/govern beta                      # show the state
-python3 .context-gate/bin/govern beta on                   # switch to the newest installed beta
+python3 .context-gate/bin/govern beta on                   # switch to the newest beta
 python3 .context-gate/bin/govern beta on X.Y.Z-beta.N      # switch this project to that beta
 python3 .context-gate/bin/govern beta off                  # switch back
 ```
 
 `govern beta on` checks before it writes anything. It refuses, changing nothing, when the version
-is not a beta, when that engine or the local plugin is not installed at that version, or when the
-project has no `.claude/` directory. It then writes `local.toml`, sets `enabledPlugins` in
+is not a beta, when that engine or the local plugin is not installed at that version and the
+project names no source to fetch it from, or when the project has no `.claude/` directory. It
+fetches what is missing after those checks and before it writes anything in the project, so a fetch
+that fails leaves `local.toml` and the settings as they were. The plugin is assembled by the
+beta's own engine. For a beta whose engine has no `govern/local_plugin.py` (a fork's, say), `beta on` installs the
+engine and then names the `install-plugin.py` command to run. `govern beta` and `govern beta off` never use the network.
+`beta on` then writes `local.toml`, sets `enabledPlugins` in
 `.claude/settings.local.json` to turn the beta plugin on and the stable plugin off, and keeps every
 other key in that file. `govern beta off` removes `local.toml`, puts the two plugin keys back as it
 found them, and works even when the beta engine is broken or gone. With no beta on, it says so and
 touches nothing.
 
-`govern beta on` without a version takes the newest beta engine installed, ordered by number, so
-`beta.10` is above `beta.9`. It then runs the same checks as with the version named. It refuses
-when no beta engine is installed, and when the newest one is a beta of a release the project
-already runs (`0.6.0-beta.4` with a pin of `0.6.0` or `0.6`). Name the version to switch to that
-beta anyway.
+`govern beta on` without a version takes the newest beta, of those installed and those tagged at
+the source, ordered by number, so `beta.10` is above `beta.9`. When the source cannot be asked, it
+says so in one line and takes the newest installed. It then runs the same checks as with the
+version named. It refuses when there is no beta, and when the newest one is a beta of a release the
+project already runs (`0.6.0-beta.4` with a pin of `0.6.0` or `0.6`). Name the version to switch to
+that beta anyway.
 
 `govern beta off` removes `local.toml` whole. When the file holds anything besides its
 `[governance]` table, `beta off` prints those lines after its usual output, so you can copy what
@@ -561,9 +597,11 @@ before the first beta. If it cannot find one plain `engine = "…"` line under `
 change, it changes nothing and asks you to edit that line by hand. It also changes nothing when
 `local.toml` is read-only or cannot be read, and says which.
 
-Only one beta plugin is installed on a machine at a time. Once a newer beta is installed, a project
-whose `local.toml` still names the older one runs the older engine with the newer plugin. The
-session start and `govern beta` then add one line:
+Only one beta plugin is installed on a machine at a time. When `govern beta on` replaces one that
+was at another version, it says so in one line: other projects on this machine still on that
+version load the new plugin until they run `govern beta on` themselves. Once a newer beta is
+installed, a project whose `local.toml` still names the older one runs the older engine with the
+newer plugin. The session start and `govern beta` then add one line:
 `context-gate: beta B is installed (this project runs beta A): govern beta on B`. A newer release
 is announced first. A project with no beta on is never told about a beta.
 
@@ -577,6 +615,57 @@ one line saying why, and does not fail. Run `govern beta off` to clear the file.
 
 Run `govern beta off` before `bin/uninstall`. Uninstall does not know about `local.toml`, and
 the beta plugin keys would stay in `.claude/settings.local.json`.
+
+## On a pull request
+
+`govern ci github` prints a GitHub Actions workflow that runs `check --base` and `diff` on every
+pull request ([how-it-works.md](how-it-works.md#on-a-pull-request)). The file is the project's
+to edit. Two additions:
+
+**Posting the report as a comment.** The workflow appends `govern diff` to the run's summary,
+which needs no token and no extra permission. To post it on the pull request too, give the
+workflow the permission:
+
+```yaml
+permissions:
+  contents: read
+  pull-requests: write
+```
+
+and add a step after the others:
+
+```yaml
+      - name: Comment with what this pull request changes
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ github.base_ref }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          python3 .context-gate/bin/govern diff --base "origin/$BASE_REF" > "$RUNNER_TEMP/governance.md"
+          gh pr comment "$PR_URL" --body-file "$RUNNER_TEMP/governance.md"
+```
+
+The branch name and the pull request's address reach the script as environment variables, as
+in the workflow itself: a `${{ ... }}` written inside `run:` is pasted into the script before
+a shell reads it. Each run adds one comment. A pull request from a fork runs with a read-only token, so the step
+cannot comment there; `continue-on-error` keeps that from failing the job, and the summary is
+still written.
+
+**Running a beta.** A committed `[governance] engine` pin is always a release, so CI runs a beta
+only when the workflow turns it on. Add one step before the check:
+
+```yaml
+      - name: Run the beta
+        run: python3 .context-gate/bin/govern beta on X.Y.Z-beta.N
+```
+
+`beta on` needs on the runner what it needs on any machine: a `[governance] source` to fetch the
+beta from, and a `.claude/` directory in the checkout (see
+[Running a beta locally](#running-a-beta-locally)). `check --base` and `diff` arrived in 0.7.0,
+so a project whose pin is older reaches them in CI only through this step. Remove it when the
+pin reaches the release.
 
 ## Renamed names
 

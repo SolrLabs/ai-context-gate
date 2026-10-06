@@ -3,4 +3,4 @@
 Policy lives in each project's `.context-gate/config.toml`; this package is the logic. See
 docs/how-it-works.md in this repository.
 """
-__version__ = "0.6.1-beta.1"
+__version__ = "0.7.0-beta.1"

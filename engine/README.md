@@ -21,13 +21,16 @@ setting in [configuration](../docs/configuration.md), and every check in
 | `report.py` | The install and upgrade reports: findings before against after |
 | `templates/entrypoint.py` | Installed as `bin/govern` and `bin/uninstall` |
 | `templates/capture.py` | Installed by `usage_setup.install` as the statusline capture writer: saves the snapshot, then chains to whatever `statusLine` ran before |
-| `cli.py` | Subcommands (`check`, `index`, `baseline`, `next-id`, `show`, `find`, `trap-add`), the check runner, exit codes. `check --project X --path DIR [--history-from DIR]` checks `X` from `DIR` instead of the checkout the registry names — a git pre-commit hook's staged-tree snapshot, say — dating any git question a project-scope check asks about those files from `--history-from`'s checkout instead, since the snapshot itself carries no history. `check --workspace-only` checks the workspace alone, skipping every project scope, for an orchestrator's CI without its checkouts |
+| `templates/ci-github.yml` | The GitHub Actions workflow `ci github` prints: `check --base` and `diff` on every pull request. Never installed: the project redirects it into `.github/workflows/` and owns the file |
+| `cli.py` | Subcommands (`check`, `index`, `baseline`, `next-id`, `show`, `find`, `trap-add`), the check runner, exit codes. `check --project X --path DIR [--history-from DIR]` checks `X` from `DIR` instead of the checkout the registry names — a git pre-commit hook's staged-tree snapshot, say — dating any git question a project-scope check asks about those files from `--history-from`'s checkout instead, since the snapshot itself carries no history. `check --workspace-only` checks the workspace alone, skipping every project scope, for an orchestrator's CI without its checkouts. `check --base REF` has a change-aware check compare the tree with the commit the branch left `REF` at, and report errors: the gate a pull request runs. `diff [--base REF] [--json] [--project X]` prints the report `changes.py` builds and always exits 0. `ci github` prints the workflow template, before any config is loaded, and writes nothing |
 | `manifest.py` | The `@check` decorator: every check declares its scope, level, parameters, question and rationale |
 | `config.py` | Loading and strictly validating `.context-gate/config.toml`; resolving each check's settings across layers; loading extensions |
 | `registry.py` | Scopes from the project's registry file, with each fact's location configured and checked — or, with no `[registry]` table, the one scope a single repo is |
 | `context.py` | What a check sees: the root, config, registry, layout paths, git, which scope owns a file (`owner`/`owned_by_project`), and (under `check --path`) a snapshot path's place in the real tree (`real_path`) |
-| `text.py` | Reading files, frontmatter, word counts, generated-block markers |
+| `text.py` | Reading files, frontmatter, word counts, generated-block markers, and `shown`, a project's own words with their control characters escaped for a message or a report |
 | `decisions.py` | Decision-log and trap parsing under a named heading grammar |
+| `base.py` | Comparing against a base: what a file held at a commit (`files`, `exists`, `read`, `since`, `renames`, `resolve`, `merge_base`, `ls`), with absence read off the commit's tree so a failed read is never a new log, a log under another name found by the rename git reads or else by the ids it holds, and `compare`, both sides of every decision log and trap file per repository, with each repository that could not be compared and why. `match` pairs the two sides by id, and returns the copies of an id that pairs more than one way as left over |
+| `changes.py` | The report `diff` prints, built from `base.compare`: one line per changed decision (`removed`, `added`, `superseded`, `moved`, `revised`, `status`, `changed`), trap and baseline number (or `unreadable` for a baseline that cannot be read), and the commit each repository was compared with. Its text layout and JSON keys are a contract, held byte for byte in `tests/expected/` |
 | `migrate.py` | Moving a project's decision logs and traps from other common shapes onto the standard mechanically |
 | `measure.py` | Reading a project's layout before it adopts: registry, scopes, decision logs, traps, working dir, docs, markers, nested checkouts (read-only, no config) |
 | `adopt.py` | `measure`, then `propose`, then with `--apply` install, create logs, migrate, index, baseline and check in one step, reported in `adopt-report.md` |
@@ -36,6 +39,7 @@ setting in [configuration](../docs/configuration.md), and every check in
 | `blocks.py` | Generated-block targets and renderers |
 | `ratchet.py` | Breach computation and the baseline file |
 | `usage.py` | Usage alerts at run time: usage steps, the owner's break points, and the text the plugin's hooks inject; standard library and `layout` only, so the hook can import it on every tool call |
+| `local_plugin.py` | The local plugin, assembled from one release's tree and swapped into `~/.claude/skills/`: what `tools/release/install-plugin.py` installs. `govern beta on` runs it from the beta it fetched; standard library, `layout` and `profile.rmtree` only |
 | `usage_setup.py` | Usage alerts, set up: install the statusline capture, uninstall it, re-wrap it when another tool replaces `statusLine`, and resolve a project's option and alerts file |
 | `checks/` | The built-in checks, one module per concern |
 
@@ -178,3 +182,11 @@ tools/ci/run-tests.sh                                 # and again on Python 3.11
 
 Run from the repo root. `engine/tests/test_regressions.py` holds the engine's behavioral tests,
 each named after the behavior it pins.
+
+`engine/tests/expected/` holds the output of `govern diff` for one fixture, as text and as JSON,
+compared byte for byte (`test_changes.py`). After a deliberate change to that output, regenerate
+both files and review the difference:
+
+```sh
+GOVERN_UPDATE_EXPECTED=1 python3 -m unittest discover -s engine/tests -k ExpectedOutput
+```
