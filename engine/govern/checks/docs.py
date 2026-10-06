@@ -44,7 +44,10 @@ def check_doc(ctx, params: dict, path: Path, label: str, f: Findings) -> None:
     if aud and aud not in params["audiences"]:
         f.error(f"{label}: audience '{aud}' not in {tuple(params['audiences'])}")
     if dt == "working" and not fm.get("status"):
-        f.error(f"{label}: working file needs 'status' — it is what says which plan is active")
+        allowed = (f", starting with one of {tuple(params['working_statuses'])}"
+                   if params["working_statuses"] else "")
+        f.error(f"{label}: working file needs 'status'{allowed} — it is what says which plan "
+                f"is active")
     elif dt == "working" and params["working_statuses"]:
         status = fm.get("status", "")
         if status_keyword(status) not in params["working_statuses"]:
@@ -74,9 +77,14 @@ def check_doc(ctx, params: dict, path: Path, label: str, f: Findings) -> None:
     if dt == "working":
         wc = word_count(body, ctx.markers)
         if wc > params["max_working_words"]:
+            # Imported here: `govern.ratchet` imports a check module that imports this one.
+            from govern import ratchet
+            # Tagged with the breach's ratchet key: when the ratchet reports the same breach
+            # in the same run, that is the one finding shown (`findings.one_per_breach`).
             f.warn(f"{label}: {wc} words exceeds doc-frontmatter max_working_words="
-                   f"{params['max_working_words']} — put permanent content behind an index, or "
-                   f"delete what is finished")
+                   f"{params['max_working_words']} — "
+                   f"{ratchet.NEW_BREACH_REMEDY['working_file_words']}",
+                   breach=ratchet.working_words_key(ctx, path))
 
 
 DOC_PARAMS = {

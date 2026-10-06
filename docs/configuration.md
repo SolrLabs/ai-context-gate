@@ -53,7 +53,7 @@ The tables:
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `engine` | string | required | The exact engine version this project runs, like `"0.4.0"`. The engine refuses to run under any other pin. A two-part pin such as `"0.4"` runs the newest installed release in that series, with a notice to pin exactly. |
-| `source` | string | none | A git URL or path holding the engine, with a `v<version>` tag per release. `bin/govern` installs a missing pinned engine from it, `bin/upgrade` finds new releases there, and the upgrade notice checks it. |
+| `source` | string | none | A git URL or path holding the engine, with a `v<version>` tag per release. `bin/govern` installs a missing pinned engine from it, `bin/upgrade` finds new releases there, and the upgrade notice checks it. The engine fetch gives up after 120 seconds; set `CONTEXT_GATE_FETCH_TIMEOUT` to a larger number of seconds on a slow link. |
 | `profile` | string | none | The profile this project inherits: a directory (absolute, or relative to the governance root) or a git URL pinned with `#<tag>`. See [Profiles](#profiles). |
 | `schema` | integer | `1` | The config schema version. This engine reads schema 1 only. |
 | `extensions` | list of strings | `[]` | Directories, relative to the governance root, whose `*.py` files register extension checks. Each directory must exist. See [Extensions](#extensions). |
@@ -308,7 +308,7 @@ Format settings. The defaults are the standard. A project may keep a different f
 
 | Key | Default | Other value | Meaning |
 |---|---|---|---|
-| `decision_heading` | `"any-dash"` | `"em-dash"` | Which dash separates an entry's id from its title. `any-dash` accepts an em dash, an en dash or a hyphen, with spacing optional; `em-dash` requires ` — `. A heading-shaped line that fails the grammar is an error either way. |
+| `decision_heading` | `"any-dash"` | `"em-dash"` | Which dash separates an entry's id from its title. `any-dash` accepts an em dash, an en dash or a hyphen, with spacing optional; `em-dash` requires ` — `. The examples in these docs use a hyphen (`## D-12 - Title`); an em or en dash is read too. A heading-shaped line that fails the grammar is an error either way. |
 | `next_id` | `"max-plus-one"` | `"first-free"` | Whether `next-id` prints the highest id plus one, or reuses the first gap. A reused gap can collide with a deleted id that is still cited. |
 | `id_overlap` | `"prefix-aware"` | `"prefix-blind"` | Whether id ranges are compared only within the same prefix, or across prefixes too |
 | `agent_turns_prose` | `"must-match"` | `"forbid"` | Whether an agent's prose may state a turn count that matches its `maxTurns`, or may state none at all |
@@ -509,34 +509,54 @@ pin cannot reach CI or other clones. `govern beta on` adds `.context-gate/local.
 `.claude/settings.local.json` to `.git/info/exclude` (never a committed `.gitignore`) when git does
 not already ignore them.
 
-A beta comes from a `vX.Y.Z-beta.N` tag. Install its engine and plugin from a clone of the
-repository first, with `python3 tools/release/install-engine.py vX.Y.Z-beta.N` and
-`python3 tools/release/install-plugin.py vX.Y.Z-beta.N`. The beta plugin is the local install,
-`context-gate@skills-dir`; the stable plugin is the marketplace one, `context-gate@context-gate`. Beta tags are not published to the public repository, so
-`govern beta` is for a maintainer's or a fork's own pre-release tags.
+A beta comes from a `vX.Y.Z-beta.N` tag. `govern beta on` installs its engine and its plugin from
+the project's `[governance] source` when either is missing on this machine. The beta plugin is the
+local install, `context-gate@skills-dir`; the stable plugin is the marketplace one,
+`context-gate@context-gate`.
+
+Betas are published as prereleases of the repository, tagged `vX.Y.Z-beta.N`. No project is ever
+offered one: an upgrade, the marketplace plugin and the upgrade notice only ever name a release.
+Nothing but `govern beta on` downloads one. To run a beta, turn it on in the project. A beta may
+break. `govern beta off` returns the project to its pinned release.
+
+A project with no `[governance] source`, or one not yet upgraded to 0.6.1, installs the beta from
+a clone of the repository first:
+
+```sh
+git fetch --tags                                           # in a clone of the repository
+python3 tools/release/install-engine.py vX.Y.Z-beta.N
+python3 tools/release/install-plugin.py vX.Y.Z-beta.N
+python3 .context-gate/bin/govern beta on                   # in the project
+```
 
 Four commands, run through the project's gate:
 
 ```sh
 python3 .context-gate/bin/govern beta                      # show the state
-python3 .context-gate/bin/govern beta on                   # switch to the newest installed beta
+python3 .context-gate/bin/govern beta on                   # switch to the newest beta
 python3 .context-gate/bin/govern beta on X.Y.Z-beta.N      # switch this project to that beta
 python3 .context-gate/bin/govern beta off                  # switch back
 ```
 
 `govern beta on` checks before it writes anything. It refuses, changing nothing, when the version
-is not a beta, when that engine or the local plugin is not installed at that version, or when the
-project has no `.claude/` directory. It then writes `local.toml`, sets `enabledPlugins` in
+is not a beta, when that engine or the local plugin is not installed at that version and the
+project names no source to fetch it from, or when the project has no `.claude/` directory. It
+fetches what is missing after those checks and before it writes anything in the project, so a fetch
+that fails leaves `local.toml` and the settings as they were. The plugin is assembled by the
+beta's own engine. For a beta whose engine has no `govern/local_plugin.py` (a fork's, say), `beta on` installs the
+engine and then names the `install-plugin.py` command to run. `govern beta` and `govern beta off` never use the network.
+`beta on` then writes `local.toml`, sets `enabledPlugins` in
 `.claude/settings.local.json` to turn the beta plugin on and the stable plugin off, and keeps every
 other key in that file. `govern beta off` removes `local.toml`, puts the two plugin keys back as it
 found them, and works even when the beta engine is broken or gone. With no beta on, it says so and
 touches nothing.
 
-`govern beta on` without a version takes the newest beta engine installed, ordered by number, so
-`beta.10` is above `beta.9`. It then runs the same checks as with the version named. It refuses
-when no beta engine is installed, and when the newest one is a beta of a release the project
-already runs (`0.6.0-beta.4` with a pin of `0.6.0` or `0.6`). Name the version to switch to that
-beta anyway.
+`govern beta on` without a version takes the newest beta, of those installed and those tagged at
+the source, ordered by number, so `beta.10` is above `beta.9`. When the source cannot be asked, it
+says so in one line and takes the newest installed. It then runs the same checks as with the
+version named. It refuses when there is no beta, and when the newest one is a beta of a release the
+project already runs (`0.6.0-beta.4` with a pin of `0.6.0` or `0.6`). Name the version to switch to
+that beta anyway.
 
 `govern beta off` removes `local.toml` whole. When the file holds anything besides its
 `[governance]` table, `beta off` prints those lines after its usual output, so you can copy what
@@ -549,9 +569,11 @@ before the first beta. If it cannot find one plain `engine = "…"` line under `
 change, it changes nothing and asks you to edit that line by hand. It also changes nothing when
 `local.toml` is read-only or cannot be read, and says which.
 
-Only one beta plugin is installed on a machine at a time. Once a newer beta is installed, a project
-whose `local.toml` still names the older one runs the older engine with the newer plugin. The
-session start and `govern beta` then add one line:
+Only one beta plugin is installed on a machine at a time. When `govern beta on` replaces one that
+was at another version, it says so in one line: other projects on this machine still on that
+version load the new plugin until they run `govern beta on` themselves. Once a newer beta is
+installed, a project whose `local.toml` still names the older one runs the older engine with the
+newer plugin. The session start and `govern beta` then add one line:
 `context-gate: beta B is installed (this project runs beta A): govern beta on B`. A newer release
 is announced first. A project with no beta on is never told about a beta.
 

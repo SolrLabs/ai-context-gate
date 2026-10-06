@@ -25,9 +25,10 @@ $GOVERN_ENGINE overrides all of this with an explicit engine directory, for engi
 
     python3 .context-gate/bin/govern beta [on [X.Y.Z-beta.N] | off]
 
-switches this project, on this machine, to a beta engine (the newest installed, when none is
-named) and the local beta plugin, and back. It is handled here, before any engine loads, so it
-works when the beta is broken or gone.
+switches this project, on this machine, to a beta engine (the newest installed or tagged at the
+source, when none is named) and the local beta plugin, and back. `beta on` installs the engine
+and the plugin from the source when either is missing; nothing else ever fetches a beta. It is
+handled here, before any engine loads, so it works when the beta is broken or gone.
 """
 import errno
 import json
@@ -43,9 +44,18 @@ HOME = Path(os.environ.get("HOME") or Path.home())
 ENGINES = HOME / ".local" / "share" / "context-gate" / "engines"
 BETA_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)-beta\.([1-9]\d*)", re.ASCII)
 LOCAL = GOV_DIR / "local.toml"
-STABLE_PLUGIN = "context-gate@context-gate"
-BETA_PLUGIN = "context-gate@skills-dir"
-PLUGIN_DIR = HOME / ".claude" / "skills" / "context-gate"
+PLUGIN = "context-gate"
+STABLE_PLUGIN = f"{PLUGIN}@context-gate"
+BETA_PLUGIN = f"{PLUGIN}@skills-dir"
+PLUGIN_DIR = HOME / ".claude" / "skills" / PLUGIN
+# Seconds a clone may take before it is given up: generous for one shallow tag over a slow link,
+# and short enough that a dead one ends a session start in a line instead of hanging it. A slower
+# link raises it with CONTEXT_GATE_FETCH_TIMEOUT.
+CLONE_TIMEOUT = 120
+FETCH_TIMEOUT_VAR = "CONTEXT_GATE_FETCH_TIMEOUT"
+# Seconds after which a stage directory in ENGINES is what a killed install left. A live install
+# holds its stage for about a second, so nothing younger than this is touched.
+STAGE_AGE = 300
 SETTINGS_LOCAL = ROOT / ".claude" / "settings.local.json"
 
 
@@ -104,25 +114,214 @@ def local_beta(pin: str) -> Path | None:
     return path
 
 
-def bootstrap(version: str, source: str) -> Path:
-    """Install one engine release from its source: the tag's engine/govern, read-only."""
+def _clone_timeout() -> int:
+    """The clone limit in seconds: CONTEXT_GATE_FETCH_TIMEOUT when it is a positive whole
+    number, else CLONE_TIMEOUT."""
+    raw = os.environ.get(FETCH_TIMEOUT_VAR, "").strip()
+    return int(raw) if raw.isascii() and raw.isdigit() and int(raw) > 0 else CLONE_TIMEOUT
+
+
+def _git_env() -> dict:
+    """The environment for a git call that reaches a source: git is told not to prompt unless
+    a person is at a terminal to answer."""
+    try:
+        interactive = sys.stdin is not None and sys.stdin.isatty()
+    except (OSError, ValueError):           # stdin closed
+        interactive = False
+    return os.environ.copy() if interactive else {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
+
+def _run_clone(cmd: list[str], timeout: int):
+    """Run `cmd` as subprocess.run would, in a process group of its own: when it does not
+    finish in `timeout` seconds, git and everything it started are killed. Returns the
+    CompletedProcess, or raises subprocess.TimeoutExpired."""
+    import signal
+    import subprocess
+    kw = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" \
+        else {"start_new_session": True}
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            env=_git_env(), **kw)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                               capture_output=True, timeout=10)
+            else:
+                os.killpg(proc.pid, signal.SIGKILL)
+        except (OSError, subprocess.SubprocessError):
+            proc.kill()
+        try:
+            proc.communicate(timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            pass                            # a grandchild still holds the pipe: carry on
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+def _rmtree(path: Path) -> None:
+    """Delete a directory this file made, read-only as an installed engine is; a symlink, or
+    anything that is no directory, is left alone."""
     import shutil
+    if path.is_symlink() or not path.is_dir():
+        return
+    for p in [path, *path.rglob("*")]:
+        if not p.is_symlink():
+            p.chmod(p.stat().st_mode | (0o700 if p.is_dir() else 0o600))
+    shutil.rmtree(path)
+
+
+def _holds_engine(path: Path) -> bool:
+    return (path / "govern" / "cli.py").is_file()
+
+
+def _refuse_option(source: object) -> None:
+    """Die when git would read the source as an option: a value starting with "-" is no URL
+    and no path, and some git options name a command to run. Every call that hands a source to
+    git comes here first, and puts `--` before it."""
+    if isinstance(source, str) and source.startswith("-"):
+        die(f"{GOV_DIR.name}/config.toml [governance] source {source!r} starts with \"-\", "
+            "which git would read as an option; name a git URL or a path")
+
+
+def _tags(listing: str) -> list[str]:
+    """What follows `refs/tags/v` in each line of `git ls-remote --tags` output, read from the
+    start of the ref: a tag named `x/refs/tags/v1.2.3` is not version 1.2.3."""
+    refs = (line.split("\t", 1)[-1] for line in listing.splitlines())
+    return [ref.removeprefix("refs/tags/v") for ref in refs if ref.startswith("refs/tags/v")]
+
+
+def _clear_stages(version: str) -> None:
+    """Delete the stage directories killed installs of this version left in ENGINES. One
+    younger than STAGE_AGE is left, and so is one that cannot be deleted: a dot name is never
+    taken for an engine, and blocks nothing."""
+    import time
+    try:
+        stages = [p for p in ENGINES.iterdir() if p.name.startswith(f".{version}.")]
+    except OSError:
+        return
+    for stage in stages:
+        try:
+            if time.time() - stage.lstat().st_mtime > STAGE_AGE:
+                _rmtree(stage)
+        except OSError:
+            pass
+
+
+def _set_aside(dest: Path, aside: Path) -> None:
+    """Take a directory with no engine in it out of an engine's place: moved aside, then
+    deleted there, never deleted where it is. It is looked at again once aside, so an engine
+    another run moved in at that instant is moved back, not lost. A symlink, or anything that
+    is no directory, stays where it is."""
+    if dest.is_symlink() or not dest.is_dir():
+        return
+    try:
+        os.rename(dest, aside)
+    except OSError:
+        return                              # gone or held: the next move into place tells
+    try:
+        os.utime(aside)                     # fresh, so a sibling's _clear_stages leaves it
+    except OSError:
+        pass
+    if _holds_engine(aside):
+        try:
+            os.rename(aside, dest)
+            return
+        except OSError:
+            pass                            # a third run filled the place: this one is spare
+    try:
+        _rmtree(aside)
+    except OSError:
+        pass                                # a sibling deleted it first: it is gone either way
+
+
+def _place(engine: Path, version: str) -> None:
+    """Install a copy of `engine` (a govern package) as ENGINES/<version>, read-only. The copy
+    is made in a directory of its own in ENGINES (a dot name, unique to this run), made
+    read-only there, and moved into place with one rename: the engine directory is whole and
+    read-only from the moment it exists, and two runs installing the same engine never share a
+    stage. An engine that is in place by then, another run's, is kept and this copy discarded;
+    a directory in place with no engine in it is set aside first. Raises OSError, with no
+    stage left and no engine removed."""
+    import shutil
+    import tempfile
+    import time
+    dest = ENGINES / version
+    ENGINES.mkdir(parents=True, exist_ok=True)
+    _clear_stages(version)
+    if _holds_engine(dest):
+        return                              # installed while this run was fetching it
+    stage = Path(tempfile.mkdtemp(dir=ENGINES, prefix=f".{version}."))
+    try:
+        shutil.copytree(engine, stage / "govern", ignore=shutil.ignore_patterns("__pycache__"))
+        stage.chmod(0o755)                  # mkdtemp makes it 0700: others read an engine
+        for path in sorted(stage.rglob("*"), reverse=True) + [stage]:
+            path.chmod(path.stat().st_mode & ~0o222)
+        for last in (False, True):
+            if _holds_engine(dest):
+                return
+            try:
+                for retry in range(6):      # Windows refuses a rename for a moment at times
+                    try:
+                        os.rename(stage, dest)
+                        return
+                    except PermissionError:
+                        if retry == 5 or _holds_engine(dest):
+                            raise
+                        time.sleep(0.2)
+            except OSError:
+                if _holds_engine(dest):
+                    return                  # another run's landed first: theirs is the engine
+                if last:
+                    raise
+            _set_aside(dest, stage.with_name(stage.name + ".broken"))
+    finally:
+        try:
+            _rmtree(stage)                  # still here unless it was moved into place
+        except OSError:
+            pass
+
+
+def bootstrap(version: str, source: str, then=None) -> Path:
+    """Install one engine release from its source: the tag's engine/govern, read-only, copied
+    beside its place and moved in whole (_place), so a copy that fails leaves no engine
+    directory. An engine already installed is left as it is, whenever it got there. `then`,
+    when given, is called with the clone of the tag before the clone is deleted."""
     import subprocess
     import tempfile
+    _refuse_option(source)
     dest = ENGINES / version
-    print(f"context-gate: installing engine {version} from {source}", file=sys.stderr)
-    with tempfile.TemporaryDirectory() as tmp:
-        res = subprocess.run(["git", "clone", "--quiet", "--depth", "1", "--branch",
-                              f"v{version}", source, tmp], capture_output=True, text=True)
+    have = _holds_engine(dest)
+    if not have:
+        print(f"context-gate: installing engine {version} from {source}", file=sys.stderr)
+    limit = _clone_timeout()
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        try:
+            res = _run_clone(["git", "clone", "--quiet", "--depth", "1", "--branch",
+                              f"v{version}", "--", source, tmp], limit)
+        except subprocess.TimeoutExpired:
+            die(f"could not fetch engine v{version} from {source}: git clone did not finish in "
+                f"{limit} seconds; set {FETCH_TIMEOUT_VAR} to allow longer")
+        except OSError as exc:              # no git to run
+            die(f"could not fetch engine v{version} from {source}: {exc}")
         if res.returncode != 0:
-            die(f"could not fetch engine v{version} from {source}: {res.stderr.strip()}")
+            die(f"could not fetch engine v{version} from {source}: "
+                + "; ".join(line.strip() for line in res.stderr.splitlines() if line.strip()))
         engine = Path(tmp) / "engine" / "govern"
-        if f'__version__ = "{version}"' not in (engine / "__init__.py").read_text(encoding="utf-8"):
+        try:
+            carried = (engine / "__init__.py").read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            carried = ""
+        if f'__version__ = "{version}"' not in carried:
             die(f"{source} tag v{version} does not carry engine {version}")
-        dest.mkdir(parents=True)
-        shutil.copytree(engine, dest / "govern", ignore=shutil.ignore_patterns("__pycache__"))
-    for path in sorted(dest.rglob("*"), reverse=True) + [dest]:
-        path.chmod(path.stat().st_mode & ~0o222)
+        if not have:
+            try:
+                _place(engine, version)
+            except OSError as exc:
+                die(f"could not install engine {version} in {ENGINES} ({exc})")
+        if then:
+            then(Path(tmp))
     return dest
 
 
@@ -173,15 +372,18 @@ def upgrade(argv: list[str]) -> int:
             if ENGINES.is_dir() else []
         released = []
         if source:
-            res = subprocess.run(["git", "ls-remote", "--tags", "--refs", source],
+            _refuse_option(source)
+            res = subprocess.run(["git", "ls-remote", "--tags", "--refs", "--", source],
                                  capture_output=True, text=True, timeout=30,
-                                 env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
-            released = [line.rsplit("/v", 1)[1] for line in res.stdout.splitlines()
-                        if "refs/tags/v" in line and version_key(line.rsplit("/v", 1)[1])]
+                                 env=_git_env())
+            released = [tag for tag in _tags(res.stdout) if version_key(tag)]
         candidates = installed + released
         if not candidates:
             die("no engine release found: none installed, and no [governance] source to ask")
         target = max(candidates, key=version_key)
+    if BETA_RE.fullmatch(target):
+        die(f"an upgrade takes a release, and {target} is a beta; "
+            f"run a beta with govern beta on {target}")
     if target == gov.get("engine"):
         print(f"already on context-gate {target}")
         return 0
@@ -241,9 +443,11 @@ def _write_settings(data: dict) -> None:
         raise
 
 
-def _exclude(*paths: Path) -> None:
-    """Make git ignore each path, through info/exclude, never a committed .gitignore. Dies,
-    writing nothing, when git cannot answer: a beta pin must never reach a commit unnoticed."""
+def _exclude_plan(*paths: Path) -> tuple[Path, list[str]] | None:
+    """What making git ignore each path takes, through info/exclude, never a committed
+    .gitignore: the exclude file and the lines to add to it; None when git ignores them all
+    already. Only asks git, writing nothing, so it runs with the other checks. Dies when git
+    cannot answer: a beta pin must never reach a commit unnoticed."""
     import subprocess
 
     def git(*args: str):
@@ -267,7 +471,7 @@ def _exclude(*paths: Path) -> None:
             die(f"git cannot say whether {rel} is ignored: {ignored.stderr.strip()}")
         todo.append(path)
     if not todo:
-        return
+        return None
     res = git("rev-parse", "--git-path", "info/exclude")
     top = git("rev-parse", "--show-toplevel")
     common = git("rev-parse", "--git-common-dir")
@@ -284,6 +488,14 @@ def _exclude(*paths: Path) -> None:
                          .as_posix())
         except ValueError:
             die(f"{path} is not inside the git repository at {top.stdout.strip()}")
+    return exclude, lines
+
+
+def _exclude(plan: tuple[Path, list[str]] | None) -> None:
+    """Add to git's exclude file the lines _exclude_plan found missing from it."""
+    if not plan:
+        return
+    exclude, lines = plan
     raw = exclude.read_bytes() if exclude.is_file() else b""
     lead = "\n" if raw and not raw.endswith(b"\n") else ""
     with exclude.open("a", encoding="utf-8") as fh:
@@ -421,37 +633,129 @@ def _pinned_release() -> tuple:
     return max(found, default=(key + (0, 0))[:3])
 
 
+def _source() -> str | None:
+    """config.toml's [governance] source; None when it names none or cannot be read."""
+    try:
+        with (GOV_DIR / "config.toml").open("rb") as fh:
+            gov = tomllib.load(fh).get("governance")
+    except (OSError, ValueError):
+        return None
+    source = gov.get("source") if isinstance(gov, dict) else None
+    return source if isinstance(source, str) and source else None
+
+
+def _source_betas(source: str | None) -> tuple[list[str], str | None]:
+    """The betas tagged at the source, and None; or [] and why the source could not be asked,
+    in git's own words: its first `fatal:` line, which names the cause, else its last line.
+    Only `beta on` with no version asks: nothing else looks for a beta there."""
+    import subprocess
+    if not source:
+        return [], f"{GOV_DIR.name}/config.toml names no [governance] source"
+    _refuse_option(source)
+    try:
+        res = subprocess.run(["git", "ls-remote", "--tags", "--refs", "--", source],
+                             capture_output=True, text=True, timeout=30,
+                             env=_git_env())
+    except (OSError, subprocess.SubprocessError) as exc:
+        return [], f"{source}: {exc}"
+    if res.returncode != 0:
+        said = [line.strip() for line in res.stderr.splitlines() if line.strip()]
+        fatal = [line for line in said if line.startswith("fatal:")]
+        why = fatal[0] if fatal else said[-1] if said else f"git ls-remote exited {res.returncode}"
+        return [], f"{source}: {why}"
+    return [tag for tag in _tags(res.stdout) if beta_key(tag)], None
+
+
 def _newest_beta() -> str:
-    """The beta `beta on` takes when none is named: the newest installed. Dies when there is
-    none, or when it is a beta of a release the committed pin already runs (or of an older one):
-    that is a step back, which takes naming the version."""
-    betas = _installed_betas()
+    """The beta `beta on` takes when none is named: the newest of those installed and those
+    tagged at the source (the installed ones alone, after one line saying why, when the source
+    cannot be asked). Dies when there is none, saying why the source could not be asked when
+    it could not, or when it is a beta of a release the committed pin already runs (or of an
+    older one): that is a step back, which takes naming the version."""
+    installed, source = _installed_betas(), _source()
+    there, why = _source_betas(source)
+    betas = sorted({*installed, *there}, key=beta_key)
+    if not betas and not why:
+        die(f"no beta engine is installed, and {source} has no beta tag")
     if not betas:
-        die("no beta engine is installed — from a clone that has the beta's tag, run: "
+        die(f"no beta engine is installed, and the source could not be asked for one ({why}) "
+            "— from a clone that has the beta's tag, run: "
             "python3 tools/release/install-engine.py vX.Y.Z-beta.N")
+    if why:
+        note(f"the source could not be asked for a newer beta ({why}); taking the newest "
+             "installed")
     newest, runs = betas[-1], _pinned_release()
     if beta_key(newest)[:3] <= runs:
-        die(f"the newest installed beta, {newest}, is not newer than the release this project "
-            f"runs ({'.'.join(str(n) for n in runs)}); to run it anyway: govern beta on {newest}")
+        die(f"the newest {'installed ' if newest in installed else ''}beta, {newest}, is not "
+            f"newer than the release this project runs ({'.'.join(str(n) for n in runs)}); to "
+            f"run it anyway: govern beta on {newest}")
     return newest
 
 
+def _plugin_release() -> str | None:
+    """The release the local plugin on this machine is stamped with (`vX.Y.Z`, or a beta's);
+    None when there is no local plugin, or its stamp cannot be read."""
+    try:
+        return (PLUGIN_DIR / "govern" / "RELEASE").read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        return None
+
+
+def _missing(version: str) -> str | None:
+    """What of beta `version` is not installed on this machine, as the refusal that says how to
+    install it by hand; None when its engine and the local plugin both are."""
+    if not (ENGINES / version / "govern" / "cli.py").is_file():
+        return (f"engine {version} is not installed — from a clone of the repository, run: "
+                f"python3 tools/release/install-engine.py v{version}")
+    if _plugin_release() != f"v{version}":
+        return (f"the local plugin is not {version} — from a clone of the repository, run: "
+                f"python3 tools/release/install-plugin.py v{version}")
+    return None
+
+
+def _fetch_beta(version: str, source: str) -> None:
+    """Install what of beta `version` is missing here from the source: its engine, as bootstrap
+    installs any release, and the local plugin, from the same clone. The plugin is assembled by
+    that beta's own engine (its govern.local_plugin), not by this file, so a beta can change its
+    plugin's layout without a project upgrading these scripts. It is told which plugin it is here
+    for (--name), so a tag whose plugin carries another name replaces nothing. A beta whose
+    engine has no such module leaves the plugin as it is. Dies, the project untouched, when a
+    step fails."""
+    import subprocess
+
+    def plugin(tree: Path) -> None:
+        if not (tree / "engine" / "govern" / "local_plugin.py").is_file():
+            return
+        note(f"installing the local plugin {version} from {source}")
+        env = {k: v for k, v in os.environ.items() if k != "GOVERN_ENGINE"}
+        env["PYTHONPATH"] = str(tree / "engine")
+        # -P: the working directory must not shadow the fetched engine; -B: nothing is written
+        # into the clone the plugin is copied from.
+        res = subprocess.run([sys.executable, "-P", "-B", "-m", "govern.local_plugin", "--tree",
+                              str(tree), "--home", str(HOME), "--name", PLUGIN], env=env,
+                             capture_output=True, text=True)
+        if res.returncode != 0:
+            said = (res.stderr.strip().splitlines() or [f"exit {res.returncode}"])[-1]
+            die(f"could not install the local plugin {version} from {source}: "
+                f"{said.removeprefix('error: ')}")
+
+    bootstrap(version, source, then=plugin)
+
+
 def _beta_on(version: str) -> int:
-    """Check everything, then switch: local.toml, the git exclude, two settings keys. With
-    another beta on, only local.toml's engine value moves: the rest of the file is the user's,
-    and plugins_before still says what the first `beta on` found."""
+    """Check everything, then switch: local.toml, the git exclude, two settings keys. An engine
+    or local plugin that is missing is fetched from the source between the two: after every
+    check of the project, git's answers about the exclude file included, none of which writes
+    anything, and before anything in the project is written. So a project that is refused
+    leaves the machine's engines and local plugin as they were. With another beta on, only
+    local.toml's engine value moves: the rest of the file is the user's, and plugins_before
+    still says what the first `beta on` found."""
     if not BETA_RE.fullmatch(version):
         die(f"{version} is not a beta (X.Y.Z-beta.N)")
-    if not (ENGINES / version / "govern" / "cli.py").is_file():
-        die(f"engine {version} is not installed — from a clone of the repository, run: "
-            f"python3 tools/release/install-engine.py v{version}")
-    try:
-        plugin = (PLUGIN_DIR / "govern" / "RELEASE").read_text(encoding="utf-8").strip()
-    except OSError:
-        plugin = None
-    if plugin != f"v{version}":
-        die(f"the local plugin is not {version} — from a clone of the repository, run: "
-            f"python3 tools/release/install-plugin.py v{version}")
+    missing = _missing(version)
+    source = _source() if missing else None
+    if missing and not source:
+        die(missing)
     was, swapped = None, None
     by_hand = (f"{GOV_DIR.name}/local.toml names another beta in a form this command does not "
                f"edit: change it to engine = \"{version}\" under [governance] by hand, then run "
@@ -482,7 +786,14 @@ def _beta_on(version: str) -> int:
     if not all(isinstance(v, bool) for v in before.values()):
         die(f"{SETTINGS_LOCAL} is not valid settings JSON (an enabledPlugins value for "
             "context-gate is not true or false); fix it, then run this again")
-    _exclude(LOCAL, SETTINGS_LOCAL)
+    ignore = _exclude_plan(LOCAL, SETTINGS_LOCAL)
+    plugin_was = _plugin_release()
+    if missing:
+        _fetch_beta(version, source)
+        missing = _missing(version)
+        if missing:
+            die(missing)
+    _exclude(ignore)
     saved = _snapshot(LOCAL, SETTINGS_LOCAL)
     try:
         if not LOCAL.is_file():
@@ -503,8 +814,12 @@ def _beta_on(version: str) -> int:
     kept = f" (was {was}; the rest of local.toml is kept)" if was else ""
     print(f"beta {version} on for this project, on this machine{kept}:\n"
           f"  {GOV_DIR.name}/local.toml          engine = \"{version}\"\n"
-          f"  .claude/settings.local.json       {BETA_PLUGIN} on, {STABLE_PLUGIN} off\n"
-          "Restart the Claude Code session to load the beta plugin.")
+          f"  .claude/settings.local.json       {BETA_PLUGIN} on, {STABLE_PLUGIN} off")
+    if plugin_was and plugin_was != f"v{version}":  # one local plugin on a machine: say whose
+        other = plugin_was.removeprefix("v")
+        print(f"The local plugin was {other}: other projects on this machine still on {other} "
+              "now load this plugin, until they run govern beta on themselves.")
+    print("Restart the Claude Code session to load the beta plugin.")
     return 0
 
 

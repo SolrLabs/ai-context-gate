@@ -4,6 +4,86 @@ Newest first. Each release says what changed and, under **Upgrading**, anything 
 do or decide. The upgrade report quotes every entry between the engine a project ran and the one
 it upgraded to.
 
+## 0.6.1 — 2026-10-06
+
+- **Security: a source that starts with `-` is refused.** In 0.6.0 and earlier, a
+  `[governance] source` (or a git profile) beginning with a dash was passed to git, which read it
+  as an option, so a crafted `.context-gate/config.toml` could run a command at session start
+  (the plugin's upgrade notice), on a gate run and on `bin/upgrade`. This matters to anyone who
+  runs the gate or the plugin in a project whose `config.toml` they did not write. Every call now
+  refuses such a source before git runs (`… source '…' starts with "-", which git would read as
+  an option; name a git URL or a path`) and separates it with `--`. A tag whose name contains a
+  slash is no longer read as a release or a beta.
+- **A working file with no `status` is told the allowed values:** the `doc-frontmatter` error now
+  reads `<file>: working file needs 'status', starting with one of ('active', 'held', 'planned',
+  'complete', 'superseded') — it is what says which plan is active`, naming the project's own
+  `working_statuses`. Before: `<file>: working file needs 'status' — it is what says which plan is
+  active`, which is still what a project with an empty list (free text) gets.
+- **One finding per over-long working file:** when the ratchet reports a working file's
+  `max_working_words` breach as new or grown, the `doc-frontmatter` warning for the same file is
+  no longer printed beside it. A breach recorded in the baseline that has not grown still shows
+  the warning, and so does any file the ratchet says nothing about (a workspace doc, a rule with
+  `ratchet = false`, a baseline or doc that cannot be read).
+- **A new over-long working file leads with the fix:** ``ratchet: 'working_file_words:<file>' is
+  a new breach at N words (doc-frontmatter max_working_words=M), not in baseline.json — split it
+  into smaller files, put permanent content behind an index, or delete what is finished; to
+  accept a file that predates the gate, run `govern baseline --allow-raise` ``. Before: ``… is a
+  new breach at N, not in baseline.json — fix it, or if it is accepted for now run `govern
+  baseline --allow-raise` ``, which every other kind of new breach still gets. A `grew` message
+  for a working file now reads ``… grew to N words (doc-frontmatter max_working_words=M,
+  baseline B) — fix it, …``, where it read ``… grew to N (baseline B) — fix it, …``; every other
+  kind's is unchanged.
+- **The over-long warning mentions splitting:** `<file>: N words exceeds doc-frontmatter
+  max_working_words=M — split it into smaller files, put permanent content behind an index, or
+  delete what is finished`. Before: `… — put permanent content behind an index, or delete what is
+  finished`.
+- **The "superseded" advice shows the project's dash:** the `decision-log` error for a superseded
+  entry reads `… reduce it to `## D-12 - Replaced by <id>` …` in a hyphen-form log, and with the
+  dash of the entry's own heading in any other. Before: always `## D-12 — Replaced by <id>`.
+- **`bin/upgrade --to X.Y.Z-beta.N` installs nothing:** it exits 2 with `error: an upgrade takes
+  a release, and X.Y.Z-beta.N is a beta; run a beta with govern beta on X.Y.Z-beta.N`. Before, it
+  downloaded the beta into the engines directory and then refused to pin it.
+- **The engine writes the heading separator the project uses:** `govern trap-add` and
+  `installer migrate` (a bullet trap's heading, a pointer's) wrote `## T-N — Title` whatever the
+  project's entries looked like. A pointer now keeps the dash of the heading it replaces. A new
+  heading takes the dash of the last entry in that file, else of the project's decision log and
+  other trap files, else a hyphen (`## T-N - Title`). With
+  `decision_heading = "em-dash"` it is always ` — `. `govern show` prints an entry's heading as it
+  is written in the file, where it printed an em dash.
+- **The docs show the hyphen form:** examples read `## D-12 - Title`. The default `any-dash`
+  grammar reads an em or en dash as before.
+- **Betas are published as prereleases:** a `vX.Y.Z-beta.N` tag is now in the public repository,
+  as a GitHub prerelease on a `beta` branch. Releases stay on `main`, and no project is offered a
+  beta: the upgrade notice, `bin/upgrade`, the marketplace plugin and a series pin take releases
+  only. To run one, see "Running a beta locally" in `docs/configuration.md`; it may break, and
+  `govern beta off` returns the project to its pinned release.
+- **`govern beta on` fetches the beta:** when the beta's engine or its local plugin is not
+  installed, `beta on` installs it from the project's `[governance] source`, then switches. With
+  no version it takes the newest beta of those installed and those tagged at the source. Before,
+  it refused until both had been installed from a clone with `tools/release/install-engine.py`
+  and `install-plugin.py`, which is still the way for a project with no `source`. Nothing else
+  downloads a beta: not the gate, a session start or `bin/upgrade`.
+- **Fetching an engine survives two sessions at once:** when the pinned engine is missing and two
+  sessions start together, both now succeed (one used to end in a traceback). The fetch stages in
+  its own directory, never replaces an engine that is already there, and no longer waits
+  without end: every fetch of a pinned engine now has a 120 second limit, raised with
+  `CONTEXT_GATE_FETCH_TIMEOUT` (whole seconds), and git is told not to prompt for a credential
+  only when there is no terminal to answer.
+- **`install-plugin.py` only replaces its own install by default:** it refuses a directory under
+  `~/.claude/skills/` that it did not install, where it used to replace whatever was there.
+  `--out DIR` still replaces DIR whatever it holds.
+
+**Upgrading:** upgrade the plugin and each project: the source fix has two halves, one in the
+plugin's engine (session start) and one in the project's own `bin/govern` and `bin/upgrade`,
+which the upgrade replaces. Otherwise nothing to do, and no heading a project has written needs
+to change. A reworded finding shows as new in `upgrade-report.md`, with the old wording as
+gone; it is the same finding at the same severity. A script that
+matches one of the messages above by its exact text needs the new wording. A project with
+no entry heading yet gets hyphens from `trap-add` and `migrate`, where it got em dashes. The beta
+fetch is in the project's own `bin/govern`, so it arrives with the upgrade to 0.6.1. On a slow
+link, set `CONTEXT_GATE_FETCH_TIMEOUT` to more than 120 seconds, where a pinned engine's fetch
+used to have no limit.
+
 ## 0.6.0 — 2026-10-05
 
 - **New option `usage`:** the orchestrating agent (never a subagent) is told its context, 5-hour
