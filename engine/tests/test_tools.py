@@ -118,13 +118,17 @@ class ReleaseInstallers(unittest.TestCase):
                       (engine / "govern" / "__init__.py").read_text(encoding="utf-8"))
         res = run("install-plugin.py")
         self.assertEqual(res.returncode, 0, res.stderr)
-        plugin = self.home / ".claude" / "skills" / "tag-plugin"
+        # A beta's plugin has a name of its own; the plugin's folder keeps the older launchers' marker.
+        plugin = self.home / ".claude" / "skills" / "tag-plugin-beta"
         self.assertEqual((plugin / "govern" / "RELEASE").read_text(encoding="utf-8"),
+                         "v1.3.0-beta.1\n")
+        marker = self.home / ".claude" / "skills" / "tag-plugin"
+        self.assertEqual((marker / "govern" / "RELEASE").read_text(encoding="utf-8"),
                          "v1.3.0-beta.1\n")
         manifest = json.loads((plugin / ".claude-plugin" / "plugin.json")
                               .read_text(encoding="utf-8"))
-        self.assertEqual((manifest["version"], manifest["defaultEnabled"]),
-                         ("1.3.0-beta.1", False))
+        self.assertEqual((manifest["name"], manifest["version"], manifest["defaultEnabled"]),
+                         ("tag-plugin-beta", "1.3.0-beta.1", False))
         # The clone itself is still the release it had checked out.
         self.assertEqual(git(clone, "symbolic-ref", "--short", "HEAD").strip(), stable)
         self.assertIn('"1.2.3"', (clone / "engine" / "govern" / "__init__.py")

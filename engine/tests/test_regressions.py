@@ -20,6 +20,7 @@ import unittest
 from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 ENGINE = Path(__file__).resolve().parent.parent
 REPO = ENGINE.parent
@@ -1458,6 +1459,61 @@ class EnginePin(Base):
                       f"Use python3 .context-gate/bin/upgrade to upgrade.", res.stderr)
         self.assertNotIn("\033[", res.stderr)
 
+    def test_upgrade_help_prints_usage_and_changes_nothing(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        self._engines(w, (__version__, NEXT_RELEASE))
+        cfg = w.root / CFG
+        before = cfg.read_bytes()
+        for flag in ("--help", "-h"):
+            res = subprocess.run([sys.executable, str(entry.with_name("upgrade")), flag],
+                                 env=env, capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertIn("usage: upgrade [--to X.Y.Z]", res.stdout)
+            self.assertEqual(cfg.read_bytes(), before)
+
+    def test_upgrade_refuses_an_unknown_argument(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        self._engines(w, (__version__, NEXT_RELEASE))
+        cfg = w.root / CFG
+        before = cfg.read_bytes()
+        res = subprocess.run([sys.executable, str(entry.with_name("upgrade")), "--dry-run"],
+                             env=env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("usage: upgrade [--to X.Y.Z]", res.stderr)
+        self.assertEqual(cfg.read_bytes(), before)
+
+    def test_upgrade_to_without_a_version_exits_2(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        cfg = w.root / CFG
+        before = cfg.read_bytes()
+        res = subprocess.run([sys.executable, str(entry.with_name("upgrade")), "--to"],
+                             env=env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("usage: upgrade [--to X.Y.Z]", res.stderr)
+        self.assertEqual(cfg.read_bytes(), before)
+
+    def test_uninstall_help_prints_usage_and_removes_nothing(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        for flag in ("--help", "-h"):
+            res = subprocess.run([sys.executable, str(entry.with_name("uninstall")), flag],
+                                 env=env, capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertIn("usage: uninstall [--force]", res.stdout)
+            self.assertTrue((w.root / layout.GOV_DIR).is_dir())
+
+    def test_uninstall_refuses_an_unknown_argument(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        res = subprocess.run([sys.executable, str(entry.with_name("uninstall")), "--purge"],
+                             env=env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("usage: uninstall [--force]", res.stderr)
+        self.assertTrue((w.root / layout.GOV_DIR).is_dir())
+
     def test_series_pin_runs_newest_in_the_series(self):
         w = self.ws()
         entry, env = self._installed(w)
@@ -1559,6 +1615,58 @@ class EnginePin(Base):
                           res.stderr)
             self.assertTrue(self._which(entry, env).endswith(__version__))
 
+class OldLauncherSwitchCorrected(Base):
+    """A beta engine run in a project whose settings.local.json an old launcher switched
+    (`context-gate@skills-dir`) corrects the switch and says so on stderr; the command's stdout
+    and exit code are the ones it would have had."""
+
+    OLD, NEW = layout.OLD_SKILLS_DIR_PLUGIN_ID, layout.SKILLS_DIR_PLUGIN_ID
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.w = self.ws()
+        (self.w.root / ".claude").mkdir()
+        self.settings = self.w.root / ".claude" / "settings.local.json"
+        wtext(self.settings, json.dumps({"enabledPlugins": {self.OLD: True}}, indent=2) + "\n")
+
+    def run_as(self, version: str, *argv: str) -> tuple[int, str, str]:
+        with mock.patch.object(cli, "__version__", version):
+            return self.w.run(*argv)
+
+    def test_a_beta_corrects_the_switch_and_the_command_is_unchanged(self):
+        plain = self.run_as(__version__, "check")
+        self.assertEqual(json.loads(self.settings.read_text(encoding="utf-8")),
+                         {"enabledPlugins": {self.OLD: True}})     # a release leaves it alone
+        code, out, err = self.run_as(BETA, "check")
+        self.assertEqual((code, out), plain[:2])
+        said = [line for line in err.splitlines() if self.NEW in line]
+        self.assertEqual(len(said), 1, err)
+        self.assertIn("restart Claude Code to load it", said[0])
+        self.assertEqual(json.loads(self.settings.read_text(encoding="utf-8")),
+                         {"enabledPlugins": {self.NEW: True}})
+        # Said once: the next command finds nothing to correct.
+        code, out, err = self.run_as(BETA, "check")
+        self.assertNotIn(self.NEW, err)
+
+    def test_a_failing_correction_never_changes_the_command(self):
+        plain = self.run_as(BETA, "check")
+        wtext(self.settings, json.dumps({"enabledPlugins": {self.OLD: True}}, indent=2) + "\n")
+        for fault in (mock.patch.object(os, "replace", side_effect=PermissionError(13, "in use")),
+                      mock.patch.object(notice, "correct_old_launcher_switch",
+                                        side_effect=RuntimeError("boom"))):
+            with fault:
+                code, out, err = self.run_as(BETA, "check")
+            self.assertEqual((code, out), plain[:2])
+            self.assertNotIn("Traceback", err)
+            self.assertEqual(json.loads(self.settings.read_text(encoding="utf-8")),
+                             {"enabledPlugins": {self.OLD: True}})
+
+    def test_a_project_with_no_claude_directory_is_not_given_one(self):
+        shutil.rmtree(self.w.root / ".claude")
+        self.run_as(BETA, "check")
+        self.assertFalse((self.w.root / ".claude").exists())
+
+
 class BetaCommand(Base):
     """`govern beta`, handled by the entry point before any engine loads: on checks everything
     before writing anything, off needs no engine, and the user's own settings survive both."""
@@ -1573,7 +1681,7 @@ class BetaCommand(Base):
         self.git("init", "-q", str(self.root))
         (self.root / ".claude").mkdir()
         self.settings = self.root / ".claude" / "settings.local.json"
-        self.plugin_release = self.home / ".claude/skills/context-gate/govern/RELEASE"
+        self.plugin_release = self.home / ".claude/skills/context-gate-beta/govern/RELEASE"
         self.plugin_release.parent.mkdir(parents=True)
         wtext(self.plugin_release, f"v{BETA}\n")
 
@@ -1603,7 +1711,7 @@ class BetaCommand(Base):
         res = self.run_beta("on", BETA)
         self.assertEqual(res.returncode, 0, res.stderr)
         got = json.loads(self.settings.read_text(encoding="utf-8"))
-        self.assertEqual(got["enabledPlugins"], {"x@y": True, "context-gate@skills-dir": True,
+        self.assertEqual(got["enabledPlugins"], {"x@y": True, "context-gate-beta@skills-dir": True,
                                                  "context-gate@context-gate": False})
         self.assertEqual(got["permissions"], own["permissions"])
         self.assertIn(f'engine = "{BETA}"', (self.root / layout.LOCAL).read_text(encoding="utf-8"))
@@ -1703,10 +1811,11 @@ class BetaCommand(Base):
         other = self._second_beta()
         # Someone flipped the two keys by hand in between: the switch sets them again.
         wtext(self.settings, json.dumps({"enabledPlugins": {
-            "context-gate@skills-dir": False, "context-gate@context-gate": True}}, indent=2) + "\n")
+            "context-gate-beta@skills-dir": False, "context-gate@context-gate": True}}, indent=2)
+            + "\n")
         self.assertEqual(self.run_beta("on", other).returncode, 0)
         self.assertEqual(json.loads(self.settings.read_text(encoding="utf-8"))["enabledPlugins"],
-                         {"context-gate@skills-dir": True, "context-gate@context-gate": False})
+                         {"context-gate-beta@skills-dir": True, "context-gate@context-gate": False})
         res = self.run_beta("off")
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn(f"beta {other} off", res.stdout)
@@ -1953,7 +2062,7 @@ class BetaCommand(Base):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertFalse(local.exists())
         self.assertEqual(res.stdout, self._off_output(
-            put_back="  .claude/settings.local.json       context-gate@skills-dir and "
+            put_back="  .claude/settings.local.json       context-gate-beta@skills-dir and "
                      "context-gate@context-gate put back\n")
             + self.HELD + "  # my alerts, kept across betas\n  [checks.usage]\n  enabled = true\n")
         for gone in ("[governance]", "plugins_before", "engine ="):
@@ -2327,6 +2436,33 @@ class BetaCommand(Base):
         self.assertEqual(self.run_beta("off").returncode, 0)
         self.assertEqual(self.settings.read_bytes(), before)
 
+    def test_on_removes_the_id_an_older_launcher_wrote_and_off_puts_it_back(self):
+        old = layout.OLD_SKILLS_DIR_PLUGIN_ID
+        own = {"permissions": {"allow": ["Bash(ls)"]},
+               "enabledPlugins": {"x@y": True, old: False, "context-gate@context-gate": True}}
+        wtext(self.settings, json.dumps(own, indent=2) + "\n")
+        before = self.settings.read_bytes()
+        self.assertEqual(self.run_beta("on", BETA).returncode, 0)
+        plugins = json.loads(self.settings.read_text(encoding="utf-8"))["enabledPlugins"]
+        self.assertEqual(plugins, {"x@y": True, layout.SKILLS_DIR_PLUGIN_ID: True,
+                                   "context-gate@context-gate": False})
+        recorded = (self.root / layout.LOCAL).read_text(encoding="utf-8")
+        self.assertIn(f'"{old}" = false', recorded)
+        self.assertEqual(self.run_beta("off").returncode, 0)
+        self.assertEqual(self.settings.read_bytes(), before)
+
+    def test_the_marker_an_older_launcher_reads_is_not_the_plugin(self):
+        """The folder a launcher older than the beta's own name reads holds a stamp only: this
+        launcher looks for the plugin in the beta's folder."""
+        self.plugin_release.unlink()
+        marker = self.home / ".claude/skills/context-gate/govern/RELEASE"
+        marker.parent.mkdir(parents=True)
+        wtext(marker, f"v{BETA}\n")
+        res = self.run_beta("on", BETA)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn(f"the local plugin is not {BETA}", res.stderr)
+        self.assertFalse((self.root / layout.LOCAL).exists())
+
     def test_no_plugins_before_line_when_neither_key_existed(self):
         self.assertEqual(self.run_beta("on", BETA).returncode, 0)
         self.assertNotIn("plugins_before", (self.root / layout.LOCAL).read_text(encoding="utf-8"))
@@ -2421,7 +2557,7 @@ class BetaFetch(Base):
         self.settings = self.root / ".claude" / "settings.local.json"
         self.engines = layout.engines_dir(self.home)
         self.skills = self.home / ".claude" / "skills"
-        self.plugin = self.skills / layout.PLUGIN
+        self.plugin = self.skills / layout.BETA_PLUGIN
         self.marker = self.plugin / "govern" / layout.RELEASE_MARKER
 
     def source(self, *tags: str, without_module: tuple = (), mismatched: tuple = (),
@@ -2498,11 +2634,12 @@ class BetaFetch(Base):
         manifest = json.loads((self.plugin / ".claude-plugin" / "plugin.json")
                               .read_text(encoding="utf-8"))
         self.assertEqual((manifest["name"], manifest["version"], manifest["defaultEnabled"]),
-                         (layout.PLUGIN, version, False))
+                         (layout.BETA_PLUGIN, version, False))
         self.assertTrue((self.plugin / "hooks" / "session_start.py").is_file())
         self.assertIn(f'__version__ = "{version}"',
                       (self.plugin / "govern" / "__init__.py").read_text(encoding="utf-8"))
-        self.assertEqual([p.name for p in self.skills.iterdir()], [layout.PLUGIN])
+        self.assertEqual(sorted(p.name for p in self.skills.iterdir()),
+                         sorted([layout.PLUGIN, layout.BETA_PLUGIN]))
         self.assertEqual([p.name for p in self.engines.iterdir()
                           if p.name.startswith(".") or p.name.endswith(".tmp")], [])
         for top in (self.engines, self.plugin):
@@ -2683,7 +2820,8 @@ class BetaFetch(Base):
                 self.assertEqual(self.marker.read_text(encoding="utf-8"), f"v{BETA}\n")
                 self.assertFalse((self.plugin / "hooks" / "gone.py").exists())
                 self.assertTrue((self.plugin / "hooks" / "session_start.py").is_file())
-                self.assertEqual([p.name for p in self.skills.iterdir()], [layout.PLUGIN])
+                self.assertEqual(sorted(p.name for p in self.skills.iterdir()),
+                         sorted([layout.PLUGIN, layout.BETA_PLUGIN]))
 
     def test_what_is_not_the_plugin_under_the_users_claude_directory_is_untouched(self):
         self.source(BETA)
@@ -2694,9 +2832,11 @@ class BetaFetch(Base):
                   if not k.startswith(f"skills/{layout.PLUGIN}")}
         self.assertEqual(self.run_beta("on", BETA).returncode, 0)
         after = tree_of(self.home / ".claude")
+        ours = (layout.PLUGIN, layout.BETA_PLUGIN)       # the beta's folder, and the marker
         self.assertEqual({k: v for k, v in after.items()
-                          if k != f"skills/{layout.PLUGIN}"
-                          and not k.startswith(f"skills/{layout.PLUGIN}/")}, before)
+                          if not any(k == f"skills/{n}" or k.startswith(f"skills/{n}/")
+                                     for n in ours)}, before)
+        self.assertIn(f"skills/{layout.BETA_PLUGIN}/govern/{layout.RELEASE_MARKER}", after)
         self.assertIn(f"skills/{layout.PLUGIN}/govern/{layout.RELEASE_MARKER}", after)
 
     # No version named: the newest of what is installed and what the source has.
@@ -3537,6 +3677,11 @@ class LineEndings(Base):
         self.assertIn("alpha/sub/bad.md: doc_type 'manual'", out)
 
 
+# The agent-roles option turned on, and where its rules file is rendered by default.
+ROLES_ON = '\n[checks.agent-roles]\nlevel = "error"\n'
+ROLES_RULES = ".claude/rules/context-gate-build.md"
+
+
 class Installer(Base):
     """Everything the tool owns lives in one directory; uninstall reverses the rest."""
 
@@ -3595,6 +3740,111 @@ class Installer(Base):
             self.install(root, cfg)
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(self.install(root, cfg), 2)
+
+    # ---------------------------------------------------------- rendered agent roles
+
+    def rendered(self, extra=""):
+        """Installed with the agent-roles option on and its roles rendered: (root, a snapshot
+        from before the install)."""
+        root, cfg = self.project(extra=ROLES_ON + extra)
+        before = self.snapshot(root)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.install(root, cfg), 0)
+            self.assertEqual(cli.main(["agents", "render"], root=root), 0)
+        self.assertEqual(len(installer.read_manifest(root)["rendered"]), 6)
+        return root, before
+
+    def uninstall(self, root, *extra):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = installer.main(["uninstall", "--root", str(root), *extra])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_uninstall_removes_the_rendered_roles_and_leaves_the_project_as_it_was(self):
+        root, before = self.rendered()
+        self.assertTrue((root / ".claude/agents/developer.md").is_file())
+        self.assertTrue((root / ROLES_RULES).is_file())
+        code, out, err = self.uninstall(root)
+        self.assertEqual(code, 0, err)
+        self.assertIn("  removed      .claude/agents/developer.md\n", out)
+        self.assertIn(f"  removed      {ROLES_RULES}\n", out)
+        self.assertEqual(self.snapshot(root), before)
+        self.assertFalse((root / ".claude").exists())       # the directories it left empty
+
+    def test_uninstall_reads_a_crlf_checkout_of_a_rendered_role_as_unchanged(self):
+        root, before = self.rendered()
+        for rel in (".claude/agents/developer.md", ROLES_RULES):
+            path = root / rel
+            wtext(path, path.read_bytes().decode("utf-8").replace("\n", "\r\n"))
+        code, _, err = self.uninstall(root)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.snapshot(root), before)
+
+    def test_uninstall_refuses_over_an_edited_rendered_role_and_force_removes_it(self):
+        root, before = self.rendered()
+        path = root / ".claude/agents/developer.md"
+        wtext(path, path.read_text(encoding="utf-8") + "\nAn edit.\n")
+        installed = self.snapshot(root)
+        code, _, err = self.uninstall(root)
+        self.assertEqual(code, 1)
+        self.assertIn("conflict     .claude/agents/developer.md was edited after it was "
+                      "rendered (--force removes it)", err)
+        self.assertEqual(self.snapshot(root), installed)             # nothing was changed
+        code, _, err = self.uninstall(root, "--force")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.snapshot(root), before)
+
+    def test_uninstall_never_removes_a_file_that_replaced_a_rendered_role(self):
+        root, before = self.rendered()
+        mine = "---\nname: developer\n---\nOur own developer, written by hand.\n"
+        wtext(root / ".claude/agents/developer.md", mine)
+        code, _, err = self.uninstall(root)
+        self.assertEqual(code, 1)
+        self.assertIn("conflict     .claude/agents/developer.md is no longer the file "
+                      "context-gate rendered (--force leaves it in place)", err)
+        self.assertTrue((root / layout.GOV_DIR).is_dir())
+        code, out, err = self.uninstall(root, "--force")
+        self.assertEqual(code, 0, err)
+        self.assertIn("  left         .claude/agents/developer.md", out)
+        self.assertEqual((root / ".claude/agents/developer.md").read_text(encoding="utf-8"), mine)
+        self.assertFalse((root / ".claude/agents/qa-engineer.md").exists())
+        self.assertFalse((root / layout.GOV_DIR).exists())
+
+    def test_uninstall_removes_a_rendered_role_that_no_record_names(self):
+        # An older engine rewriting installed.toml drops the table it does not know.
+        root, before = self.rendered(extra='rules_file = ".claude/rules/build.md"\n')
+        record = installer.read_manifest(root)
+        record["rendered"] = []
+        installer.write_manifest(root / layout.MANIFEST, record)
+        self.assertNotIn("rendered", (root / layout.MANIFEST).read_text(encoding="utf-8"))
+        mine = "---\nname: helper\n---\nWritten by hand.\n"
+        wtext(root / ".claude/agents/helper.md", mine)
+        code, _, err = self.uninstall(root)
+        self.assertEqual(code, 0, err)
+        left = self.snapshot(root)
+        self.assertEqual(left.pop(Path(".claude/agents/helper.md")), mine.encode())
+        self.assertEqual(left, before)                     # the moved rules file went too
+
+    def test_uninstall_leaves_a_copy_of_a_role_under_another_name(self):
+        root, before = self.rendered()
+        record = installer.read_manifest(root)
+        record["rendered"] = []
+        installer.write_manifest(root / layout.MANIFEST, record)
+        copy = root / ".claude/agents/my-dev.md"
+        copy.write_bytes((root / ".claude/agents/developer.md").read_bytes())
+        code, _, err = self.uninstall(root)
+        self.assertEqual(code, 0, err)
+        self.assertTrue(copy.is_file())
+        self.assertFalse((root / ".claude/agents/developer.md").exists())
+
+    def test_uninstall_removes_recorded_roles_after_the_option_is_turned_off(self):
+        root, before = self.rendered()
+        cfg = root / CFG
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(ROLES_ON, ""))
+        self.assertNotIn("agent-roles", cfg.read_text(encoding="utf-8"))
+        code, _, err = self.uninstall(root)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.snapshot(root), before)
 
 
 class InstallBaselinesTodaysBreaches(Base):
@@ -4255,6 +4505,153 @@ class UpgradeRefreshesBlocks(Base):
         self.assertEqual(after, before)             # config.toml and installed.toml included
 
 
+class UpgradeRendersRoles(Base):
+    """Where the agent-roles option is on, an upgrade renders the roles again with the engine
+    it pins, all or none, and never touches a file the engine did not render."""
+
+    def installed(self, extra=ROLES_ON):
+        w = self.ws(extra=extra)
+        cfg = self.tmp / "config.toml"
+        wtext(cfg, (w.root / CFG).read_text(encoding="utf-8").replace(
+            f'engine = "{__version__}"', f'engine = "{SERIES}"'))
+        (w.root / CFG).unlink()
+        (w.root / layout.GOV_DIR).rmdir()
+        with contextlib.redirect_stdout(io.StringIO()):
+            installer.main(["install", "--root", str(w.root), "--config", str(cfg),
+                            "--no-report"])
+        return w
+
+    def upgrade(self, w, *extra):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = installer.main(["upgrade", "--root", str(w.root), *extra])
+        return code, out.getvalue(), err.getvalue()
+
+    def tree(self, w):
+        return {p.relative_to(w.root).as_posix(): p.read_bytes()
+                for p in sorted(w.root.rglob("*")) if p.is_file()}
+
+    def fresh(self, w, role):
+        from govern import roles
+        ctx = installer._load_context(w.root)
+        return roles.render(roles.shipped(role), role, ctx.cfg.checks["agent-roles"].params)
+
+    def test_upgrade_renders_a_stale_role_again_and_records_it(self):
+        from govern import roles
+        w = self.installed()
+        w.run("agents", "render")
+        dev = w.root / ".claude/agents/developer.md"
+        # What an earlier engine rendered: the note, and a body this engine words differently.
+        wtext(dev, dev.read_text(encoding="utf-8").replace("You implement", "You build"))
+        self.assertEqual(installer_check(w.root)[0], 1)
+        record = installer.read_manifest(w.root)       # and that engine knew no such table
+        record["rendered"] = []
+        installer.write_manifest(w.root / layout.MANIFEST, record)
+        code, out, err = self.upgrade(w, "--no-report")
+        self.assertEqual(code, 0, err)
+        self.assertIn("  roles        1 file(s) rendered, 0 removed\n", out)
+        with open(dev, encoding="utf-8", newline="") as fh:
+            self.assertEqual(fh.read(), self.fresh(w, "developer"))
+        rows = {r["path"]: r["sha256"] for r in installer.read_manifest(w.root)["rendered"]}
+        self.assertEqual(len(rows), 6)
+        self.assertEqual(rows[".claude/agents/developer.md"],
+                         roles.digest(self.fresh(w, "developer")))
+        self.assertEqual(installer_check(w.root)[0], 0)
+
+    def test_upgrade_does_not_render_with_the_option_off(self):
+        w = self.installed(extra="")
+        code, out, err = self.upgrade(w, "--no-report")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("roles", out)
+        self.assertFalse((w.root / ".claude").exists())
+        self.assertEqual(installer.read_manifest(w.root)["rendered"], [])
+
+    def test_upgrade_leaves_a_file_it_did_not_render_alone_names_it_and_succeeds(self):
+        w = self.installed()
+        mine = "---\nname: developer\n---\nOur own developer, written by hand.\n"
+        w.write(".claude/agents/developer.md", mine)
+        shutil.copytree(ENGINE / "govern", layout.engines_dir(w.home) / __version__ / "govern",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        old_home = os.environ.get("HOME")
+        os.environ["HOME"] = str(w.home)
+        self.addCleanup(lambda: os.environ.__setitem__("HOME", old_home) if old_home
+                        else os.environ.pop("HOME", None))
+        code, out, err = self.upgrade(w)
+        self.assertEqual(code, 0, err)
+        self.assertEqual((w.root / ".claude/agents/developer.md").read_text(encoding="utf-8"),
+                         mine)
+        said = (".claude/agents/developer.md: was not rendered by context-gate, so it is left "
+                "alone")
+        self.assertIn(f"  roles        left alone: {said}", out)
+        self.assertIn("  roles        5 file(s) rendered, 0 removed\n", out)
+        self.assertTrue((w.root / ".claude/agents/qa-engineer.md").is_file())
+        rep = (w.root / layout.GOV_DIR / "upgrade-report.md").read_text(encoding="utf-8")
+        self.assertIn("## Agent roles left for a person\n", rep)
+        self.assertIn(f"\n- {said}", rep)
+        self.assertNotIn(".claude/agents/developer.md",
+                         [r["path"] for r in installer.read_manifest(w.root)["rendered"]])
+
+    def test_upgrade_goes_on_past_a_setting_that_cannot_be_rendered(self):
+        w = self.installed(extra=ROLES_ON + 'extra_roles = ["dba"]\n')
+        code, out, err = self.upgrade(w, "--no-report")
+        self.assertEqual(code, 0, err)
+        self.assertIn("  roles        not rendered: [checks.agent-roles] extra_roles names 'dba'",
+                      out)
+        self.assertFalse((w.root / ".claude").exists())
+
+    def test_an_unreadable_insert_rolls_the_upgrade_back_and_changes_nothing(self):
+        w = self.installed()
+        w.write(".context-gate/agents/all.md", b"- caf\xe9\n")
+        before = self.tree(w)
+        code, out, err = self.upgrade(w, "--no-report")
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("upgrade rolled back: .context-gate/agents/all.md: not valid UTF-8 "
+                      "(byte 5), so the agent roles cannot be rendered — nothing was changed",
+                      err)
+        self.assertEqual(self.tree(w), before)
+
+    def test_a_role_that_cannot_be_written_rolls_the_upgrade_back(self):
+        from unittest import mock
+        from govern import roles
+        w = self.installed()
+        w.run("agents", "render")
+        dev = w.root / ".claude/agents/developer.md"
+        wtext(dev, dev.read_text(encoding="utf-8").replace("You implement", "You build"))
+        (w.root / ".claude/agents/qa-engineer.md").unlink()
+        before = self.tree(w)
+        real, calls = roles.write, []
+
+        def failing(path, text):
+            calls.append(path)
+            if len(calls) == 2:
+                raise PermissionError(13, "Permission denied", str(path))
+            real(path, text)
+        with mock.patch.object(roles, "write", failing):
+            code, out, err = self.upgrade(w, "--no-report")
+        self.assertNotEqual(code, 0, out)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("upgrade rolled back:", err)
+        self.assertIn("so the agent roles cannot be rendered — nothing was changed", err)
+        self.assertEqual(self.tree(w), before)
+
+    def test_rendered_roles_are_put_back_when_the_tool_files_cannot_be_refreshed(self):
+        from unittest import mock
+        w = self.installed()
+        w.run("agents", "render")
+        dev = w.root / ".claude/agents/developer.md"
+        wtext(dev, dev.read_text(encoding="utf-8").replace("You implement", "You build"))
+        (w.root / ROLES_RULES).unlink()
+        (w.root / ROLES_RULES).parent.rmdir()
+        before = self.tree(w)
+        stuck = (PermissionError(13, "Permission denied", "bin/govern"), [])
+        with mock.patch.object(installer, "_refresh_tool_files", return_value=stuck):
+            code, out, err = self.upgrade(w, "--no-report")
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("nothing was changed", err)
+        self.assertEqual(self.tree(w), before)
+        self.assertFalse((w.root / ".claude/rules").exists())
+
+
 class UpgradeReportAndPluginOptIn(Base):
     """The upgrade report when both runs used one engine, the report's settings format, and the
     plugin opt-in recorded on install and reversed on uninstall."""
@@ -4806,6 +5203,42 @@ class Defaults(Base):
                 AGENT.format(extra="maxTurns: 10\n", body="Stop well before 20 turns."))
         code, out, _ = w.run("check")
         self.assertIn("agents/helper.md: prose says 20 turns, frontmatter says 10", out)
+
+    def test_max_turns_false_is_a_stated_no_cap(self):
+        # It meets require_max_turns, has no ceiling to exceed and is not a malformed number.
+        w = self.ws(extra="\n[checks.agents]\nrequire_max_turns = true\nmax_turns = 50\n")
+        for value in ("false", "False", '"false"'):
+            w.write(".claude/agents/helper.md",
+                    AGENT.format(extra=f"maxTurns: {value}\n", body="body"))
+            code, out, _ = w.run("check")
+            self.assertEqual(code, 0, out)
+            self.assertNotIn("maxTurns", out)
+
+    def test_max_turns_false_still_has_to_be_written(self):
+        w = self.ws(extra="\n[checks.agents]\nrequire_max_turns = true\n")
+        w.write(".claude/agents/helper.md", AGENT.format(extra="", body="body"))
+        code, out, _ = w.run("check")
+        self.assertEqual(code, 1, out)
+        self.assertIn("ERROR  agents/helper.md: no maxTurns", out)
+
+    def test_any_other_non_integer_max_turns_is_still_a_warning(self):
+        w = self.ws(extra="\n[checks.agents]\nrequire_max_turns = true\n")
+        for value in ("true", "no", "none"):
+            w.write(".claude/agents/helper.md",
+                    AGENT.format(extra=f"maxTurns: {value}\n", body="body"))
+            code, out, _ = w.run("check")
+            self.assertEqual(code, 0, out)
+            self.assertIn(f"warn   agents/helper.md: maxTurns '{value}' is not an integer", out)
+
+    def test_a_prose_turn_count_beside_max_turns_false_contradicts_it(self):
+        w = self.ws()
+        w.write(".claude/agents/helper.md",
+                AGENT.format(extra="maxTurns: false\n", body="Stop after 10 turns."))
+        code, out, _ = w.run("check")
+        self.assertEqual(code, 0, out)       # a warning before maxTurns: false was understood
+        self.assertIn("warn   agents/helper.md: prose says 10 turns, frontmatter says no cap "
+                      "(maxTurns: false)", out)
+        self.assertNotIn("no maxTurns to match", out)
 
     # ---------------------------------------------------------- working files
 

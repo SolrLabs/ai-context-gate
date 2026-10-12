@@ -89,8 +89,9 @@ class Collect(Base):
 
     def test_engine_only(self):
         o = self.by_id(repo(self.tmp))
-        self.assertEqual(sorted(o), ["checkout-hygiene", "hooks-wired", "licenses", "usage",
-                                     "writing-rules"])
+        self.assertEqual(sorted(o), ["agent-gates", "agent-measure", "agent-roles",
+                                     "checkout-hygiene", "hooks-wired",
+                                     "licenses", "usage", "writing-rules"])
         w = o["writing-rules"]
         self.assertEqual((w.state, w.layer, w.inherit, w.new), ("off", "engine", True, True))
 

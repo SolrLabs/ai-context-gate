@@ -3,7 +3,7 @@ doc_type: reference
 purpose: How context-gate works for a user adopting it — what it governs, its pieces, how settings resolve, the ratchet, what it installs, and how engines are pinned and upgraded.
 audience: human
 load_when: adopting context-gate, or deciding how to configure or upgrade a governed project
-last_reviewed: 2026-09-25
+last_reviewed: 2026-10-10
 ---
 
 # How context-gate works
@@ -409,6 +409,8 @@ and nothing overwrites it: restore it from git.
 | `.context-gate/bin/uninstall` | Removes the tool |
 | `.context-gate/installed.toml` | Everything the install touched outside `.context-gate/`, so uninstall can reverse it |
 | `.context-gate/README.md` | What each file is |
+| `.context-gate/build/` | A build in flight: the ledger and unit briefs (committed on the phase branch); reports and diffs inside are ignored by git |
+| `.context-gate/agents/` | Optional, yours: text added to the rendered agent roles (`all.md`, `<role>.md`). The engine never writes it |
 | `.context-gate/install-report.md`, `upgrade-report.md`, `adopt-report.md`, `migration-report.md` | What each operation found and changed |
 | `.context-gate/backup/` | Originals of anything the install replaced or retired |
 | `.context-gate/checks/` | Your extension checks, if you write any (by convention; see [Extensions](#extensions)) |
@@ -422,6 +424,9 @@ Outside `.context-gate/`, the install may touch:
   `extraKnownMarketplaces["context-gate"]` (a GitHub source naming the public repository, or your
   fork). Commit the file so teammates get the plugin too. The original bytes are backed up first,
   and a BOM and CRLF line endings are kept.
+- **Rendered agent files**, when `agent-roles` is on: the role definitions in the agents folder
+  and `.claude/rules/context-gate-build.md`, each recorded in `installed.toml` and removed by
+  uninstall.
 - When installing by hand with `govern.installer install` (see engine/README.md):
   **an existing gate script** your skills or CI already call (`--entrypoint`): it is backed up and
   replaced by a stub that runs `bin/govern`, so every caller keeps working.
@@ -437,6 +442,7 @@ Install is refused over an existing install, and rolled back if the policy does 
 | `~/.local/share/context-gate/engines/<version>/` | Installed engines, one read-only directory per release, shared by every project. A release is never overwritten. |
 | `~/.cache/context-gate/profiles/` | Profiles fetched from git, one directory per source and tag |
 | `~/.cache/context-gate/releases.json` | The upgrade notice's cache of release tags |
+| `~/.local/state/context-gate/agents/` | With the agent options on: per-session agent state, swept after 30 days, and the per-project run log under `runs/`, which is kept |
 
 These are user-level caches. They are not recorded in `installed.toml`, and uninstall leaves
 them.
@@ -563,13 +569,37 @@ nothing installed: it fetches its engine from the source.
 ## Options
 
 Checks that only some projects need — `writing-rules`, `hooks-wired`, `checkout-hygiene`,
-`licenses`, `usage` — ship off. Adopt shows an options panel once the layout questions are
+`licenses`, `usage`, `agent-roles`, `agent-gates`, `agent-measure` — ship off. Adopt shows an options panel once the layout questions are
 settled, and an unanswered option stays off (or at what the profile sets) and never blocks the
 apply. Upgrade's report carries a **New options** section for any option this project has not
 answered yet, plus any turned on without what it needs; `/context-gate:options` walks through
 those, and can also be run any time to review or change every option. See
 [configuration.md](configuration.md#options)
 for the states and the command.
+
+### Agents
+
+Three options carry the agent loop. `agent-roles` renders the engine's role definitions
+(`developer`, `senior-developer`, `code-reviewer`, `qa-engineer`, `technical-writer`, and
+optionally `ux-reviewer` and `architect`) into the project's agents folder, and the coordinator's
+build rules into `.claude/rules/context-gate-build.md`, from templates, check params and the
+project's own text in `.context-gate/agents/`. A rendered file starts with a note saying so.
+Upgrade re-renders them, uninstall removes them, and a file the engine did not render is never
+written over.
+
+`agent-gates` (needs the plugin) refuses a briefed role's launch without a brief file, a
+subagent's stop while its brief's promised files are missing, and a subagent's `git push`, at
+most `max_refusals` times per run. `agent-measure` (needs the plugin) records each subagent's
+tool calls and real token totals, tells the coordinator one line per finished run, and feeds
+`govern runs report`. `govern phase close` pushes a phase branch and removes the local branches
+it contains. See [configuration.md](configuration.md#agent-roles).
+
+Two plugin skills run a build. `/context-gate:plan` turns a spec into phases and units with
+checkable "done when" lines. `/context-gate:build` runs one phase with the rendered roles, and
+resumes a build in flight. They need no other plugin. Their state is a ledger in the repository,
+committed on the phase branch and pushed after every merged unit, so a compacted context, a
+restart or a lost machine does not lose the place. See
+[configuration.md](configuration.md#the-build-loop).
 
 ## Profiles
 

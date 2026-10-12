@@ -15,8 +15,13 @@ DISPLAY_NAME = "context-gate"
 PLUGIN = "context-gate"
 MARKETPLACE = "context-gate"
 PLUGIN_ID = f"{PLUGIN}@{MARKETPLACE}"
-# How a plugin under ~/.claude/skills/ is enabled: how development tests the plugin.
-SKILLS_DIR_PLUGIN_ID = f"{PLUGIN}@skills-dir"
+# A beta's plugin has a name of its own: Claude Code never loads a plugin under ~/.claude/skills/
+# whose name an installed marketplace plugin already has.
+BETA_PLUGIN = f"{PLUGIN}-beta"
+# How a plugin under ~/.claude/skills/ is enabled: the beta's, and how development tests the plugin.
+SKILLS_DIR_PLUGIN_ID = f"{BETA_PLUGIN}@skills-dir"
+# What launchers older than the beta plugin's own name write into settings.local.json.
+OLD_SKILLS_DIR_PLUGIN_ID = f"{PLUGIN}@skills-dir"
 PUBLIC_REPO = "SolrLabs/ai-context-gate"
 PUBLIC_SOURCE = f"https://github.com/{PUBLIC_REPO}.git"
 # In a released, assembled engine only (never in the repository): `govern/RELEASE` holding

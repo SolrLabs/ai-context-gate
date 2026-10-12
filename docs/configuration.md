@@ -3,7 +3,7 @@ doc_type: reference
 purpose: Every table and key .context-gate/config.toml accepts, with types, defaults and examples.
 audience: human
 load_when: writing or changing a project's config.toml or a profile's principles.toml
-last_reviewed: 2026-09-25
+last_reviewed: 2026-10-10
 ---
 
 # Configuration reference
@@ -524,6 +524,8 @@ level = "error"
 - `[governance] engine` names the beta to run. It must be a beta version (`X.Y.Z-beta.N`).
 - `[governance] plugins_before` records the plugin settings `govern beta on` found, so
   `govern beta off` can put them back. `govern beta on` writes it; do not write it by hand.
+- An option the pinned release does not have is turned on here too, by the options skill, because
+  the pinned engine, CI and other clones refuse a check they do not know.
 - `[checks.*]` tables hold the beta's own settings. They merge above the project's config under the
   same rules: a loosening needs its reason, and an unknown check or setting is an error. Layout
   tables (`[projects]`, `[registry]`, and so on) are a load error here.
@@ -539,8 +541,19 @@ not already ignore them.
 
 A beta comes from a `vX.Y.Z-beta.N` tag. `govern beta on` installs its engine and its plugin from
 the project's `[governance] source` when either is missing on this machine. The beta plugin is the
-local install, `context-gate@skills-dir`; the stable plugin is the marketplace one,
+local install, `context-gate-beta@skills-dir`, in `~/.claude/skills/context-gate-beta/`, and its
+skills are `/context-gate-beta:<skill>`; the stable plugin is the marketplace one,
 `context-gate@context-gate`.
+
+The beta plugin has a name of its own because Claude Code does not load a local plugin whose name
+an installed plugin already has, whatever a project's settings enable. Under the released plugin's
+name the beta plugin would never load where the release is installed. Launchers from 0.6.1 or
+earlier look for the beta in `~/.claude/skills/context-gate/govern/RELEASE`, so the beta install
+also leaves that marker folder, holding only `govern/RELEASE` and a README. Claude Code does not
+take it for a plugin. After `govern beta on` from a launcher that old, which enables the old id,
+run any `govern` command once in the project: the beta engine corrects the setting and says so.
+Then restart Claude Code. Where no beta is on (no `.context-gate/local.toml`), every hook of the
+beta plugin does nothing, so the released plugin and the beta copy never both act.
 
 Betas are published as prereleases of the repository, tagged `vX.Y.Z-beta.N`. No project is ever
 offered one: an upgrade, the marketplace plugin and the upgrade notice only ever name a release.
@@ -683,7 +696,7 @@ registry file other tools read too can keep `licence` with no warning by mapping
 ## Options
 
 An **option** is a check that ships `default = "off"` — today, `writing-rules`, `hooks-wired`,
-`checkout-hygiene`, `licenses` and `usage`. Run `python3 .context-gate/bin/govern options` to see
+`checkout-hygiene`, `licenses`, `usage`, `agent-roles`, `agent-gates` and `agent-measure`. Run `python3 .context-gate/bin/govern options` to see
 every option's state, or `/context-gate:options` in Claude Code to change them.
 
 | State | Project (`config.toml`) | Profile (`principles.toml`) |
@@ -825,6 +838,189 @@ effect. An edit that makes the file invalid keeps the alerts already loaded, and
 once (`usage: .context-gate/usage-alerts.toml has an error (...); keeping the previous alerts`);
 deleting the file keeps them too. Which file wins (project or profile) is settled at session start,
 and turning the `usage` option on or off needs a new session.
+
+## Agent roles
+
+With `agent-roles` on, the engine writes the project's agent definitions and the coordinator's
+build rules, so they are never copied by hand. Five roles are always rendered: `developer`,
+`senior-developer`, `code-reviewer`, `qa-engineer` and `technical-writer`. `extra_roles` adds
+`ux-reviewer` and `architect`. Each definition comes from an engine template, the check's params
+and the project's own text. The rules go to `.claude/rules/context-gate-build.md`.
+
+```toml
+[governance]
+engine = "0.4.0"
+
+[checks.agent-roles]
+level = "error"
+extra_roles = ["architect"]
+scoped_test = "python3 -m unittest -k"
+full_gate = "python3 -m unittest discover"
+high_risk_paths = ["engine/govern/installer.py"]
+
+[checks.agent-roles.models]
+developer = "sonnet"
+
+[checks.agent-roles.max_turns]
+developer = 60
+```
+
+A role's model, effort and turn cap default to the engine's choice; `models`, `efforts` and
+`max_turns` override one role at a time, and a role without a cap renders `maxTurns: false`, an
+explicit "no cap" that the `agents` check's `require_max_turns` accepts. A profile can set the
+same params for all its projects.
+
+The project's own rules go in `.context-gate/agents/all.md` (every role) and
+`.context-gate/agents/<role>.md`, each optional and copied in unchanged. The engine never writes
+those files.
+
+`handback_checks` adds lines to every role's hand-back checklist, for example
+`handback_checks = ["Licenses: each new dependency's license"]`.
+
+```
+python3 .context-gate/bin/govern agents render [--check]
+```
+
+Render prints one line per file (`  created`, `  updated`, `  unchanged`, or `  orphaned` for a
+file of a role no longer rendered, which it removes), then `[OK] ...`. `--check` writes nothing
+and exits 1 when anything would change. A file in the agents folder that does not start with the
+`context-gate:rendered` note is never written over: render names it and exits 1, and the fix is
+to move it or drop the role. Upgrade re-renders, uninstall removes what was rendered, and
+`agent-references` warns when a doc names an agent that has no definition.
+
+## Agent gates
+
+With `agent-gates` on, and the plugin installed, a hook holds a role agent to its brief. A brief
+is a file. Its contract is `Produces:` and `Red:` lines at the start of a line:
+
+```
+Brief text...
+Produces: /work/briefs/unit-3/developer-report.md
+Red: /work/briefs/unit-3/red
+```
+
+The launch prompt is one line, `Brief: <absolute path>`; the path may be quoted or contain
+spaces. A relative `Produces:` or `Red:` path resolves against the brief file's folder.
+
+```toml
+[governance]
+engine = "0.4.0"
+
+[checks.agent-gates]
+level = "error"
+briefed = ["developer", "senior-developer"]
+max_refusals = 2
+```
+
+| Gate | What is refused |
+|---|---|
+| Launch | A role in `briefed` launched with no `Brief:` line, or one naming a missing file |
+| Produces | A stop while a promised file is missing, empty or older than the run |
+| Claims | With `claims` on: a stop whose final message says `report`, `written to`, `saved to` or `wrote`, then an absolute path that does not exist |
+| Red | A bug fix's stop with no failing test output in the `Red:` folder saved before its last edit |
+| Push | With `deny_push` on: a subagent's `git push` |
+| Checklist | With `checklist` on: a stop whose report leaves a hand-back checklist line unanswered |
+
+A refusal names every unmet item. A stop is refused at most `max_refusals` times in one run; then
+the agent is let go and the coordinator is told what was unmet. A gate never traps an agent, and
+nothing in the main session is refused except a briefed role launched without a brief.
+
+Claude Code's Write tool refuses a subagent a file named `report.md`, `findings.md`, `summary.md`
+or `analysis.md`, and no hook sees the attempt. A brief names its report `<role>-report.md`, and a
+refusal tells the agent to write it with a shell heredoc.
+
+## Agent measurement
+
+With `agent-measure` on, and the plugin installed, every tool call inside a subagent is logged
+with its time and result size, and each finished run is totalled from its transcript: tokens
+summed over its requests, calls, time in tools and the largest results. The token figure in a
+completion notice is only the context size at the last request, so it is not the run's cost.
+
+```toml
+[governance]
+engine = "0.4.0"
+
+[checks.agent-measure]
+level = "error"
+notice = true
+```
+
+With `notice` on, the coordinator gets one line per finished run, and subagents never see it.
+Per-session state under `~/.local/state/context-gate/agents/` is swept after 30 days; the
+per-project run log under `agents/runs/` is kept.
+
+```
+python3 .context-gate/bin/govern runs mark "phase 3"
+python3 .context-gate/bin/govern runs report [--all] [--json]
+```
+
+`mark` prints `phase 'phase 3' started in <log path>`. `report` prints `N agent runs (since mark
+'phase 3').`, one line per run, then totals by role and model, by tool, the largest results, and
+`Suggestion:` lines. The suggestions are fixed rules, each printed only when its pattern is
+present, and none is applied. `--all` reports every run, and `--json` prints the same data as one
+object. `govern runs resolve [--json]` shows the settings both agent options resolve to.
+
+## Closing a phase
+
+```
+python3 .context-gate/bin/govern phase close [--remote R] [--keep BRANCH] [--dry-run] [--path DIR]
+```
+
+Run it in the repository when no agent is still working. It refuses a detached HEAD, the
+remote's default branch, uncommitted changes, and a branch whose upstream is the remote's
+default branch. It pushes the current branch (to `--remote`, or the only remote, when it has no
+upstream), checks that the remote holds the same commit, and only then removes the local branches
+and worktrees already contained in it. It keeps a branch of its own upstream, the default branch
+and anything named by `--keep`. It prints `pushed <branch> to <remote>/<branch> at <commit>`,
+`removed <branch>` (with `and its worktree`) and `kept <branch>: <reason>` lines. Where the push
+fails or the remote does not show the commit, it prints why and deletes nothing. It opens no pull
+request, merges nothing upward and never forces a deletion. `--dry-run` prints `would push`,
+`would remove` and `would keep` lines and changes nothing.
+
+## The build loop
+
+`/context-gate:plan` and `/context-gate:build` run a phase with the rendered roles. Their state is
+`govern build`'s ledger, `.context-gate/build/<phase>/ledger.toml`, written only by the commands
+and committed on the phase branch with the briefs. Reports, diffs and failing-test output under
+`.context-gate/build/` are ignored by git. One phase is in flight per branch.
+
+```toml
+# fragment: a build ledger, ledger.toml
+phase = "p1-login"
+branch = "phase/p1-login"
+from = "development"
+base = "3f2a9c1"
+stage = "build"             # build | review | fix | closing
+rulings = []
+
+[[unit]]
+id = "u1"
+title = "Session token store"
+role = "developer"
+status = "pending"          # pending | running | done | blocked | failed
+attempts = 0
+```
+
+| Command | Does |
+|---|---|
+| `build start <phase> [--plan FILE] [--from BRANCH] [--high-risk]` | Writes the ledger. Refuses on the default branch, a dirty tree, an existing ledger, or when git ignores the ledger (it prints the line to add to `.gitignore`) |
+| `build unit add <id> --title T [--role R] [--red]` | Adds a unit and writes its `brief.md` |
+| `build unit set <id> <status> [--role R] [--branch B] [--commit C] [--note N]` | Updates a unit |
+| `build launch <unit, review, fix or close>` | Refuses an unfilled or uncommitted brief; prints the launch prompt |
+| `build collect <branch>` | Copies what the agent on that branch produced (reports, failing output) from its worktree into this checkout's build folder |
+| `build ruling <text>` | Records a decision made without the owner: what, why, cost if wrong |
+| `build status [--json]` | The phase, a line per unit, and what is next |
+| `build review` | Writes the review package and the reviewers' briefs |
+| `build fix [--role R]` | Writes a ranked fix brief |
+| `build close` | Writes the technical writer's brief and prints the `phase close` command |
+
+The brief contract: the launch prompt carries `Brief:`, a path from the repository root (or an
+absolute one), and, for a role that works in a worktree, `Base:`, the commit the agent
+fast-forwards to first. `Produces:` and `Red:` are paths from the repository root, written and
+checked in the agent's own working tree; `build unit set <id> done --branch <branch>` and
+`build collect <branch>` copy what an agent produced into the coordinator's checkout. A brief still
+holding a `<!-- fill:` line is refused at launch by `agent-gates`. SessionStart tells the
+coordinator when a build is in flight.
 
 ## Profiles
 

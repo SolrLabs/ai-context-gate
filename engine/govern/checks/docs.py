@@ -32,7 +32,15 @@ def check_doc(ctx, params: dict, path: Path, label: str, f: Findings) -> None:
         return
     fm, body = parse_frontmatter(raw)
     if not fm:
-        f.error(f"{label}: no frontmatter")
+        keys = params["required_keys"]
+        msg = f"{label}: no frontmatter"
+        if keys:
+            msg += f" \u2014 add {', '.join(keys)}"
+        if "doc_type" in keys:
+            msg += f"; doc_type is one of {', '.join(params['doc_types'])}"
+        if "audience" in keys:
+            msg += f"; audience is one of {', '.join(params['audiences'])}"
+        f.error(msg)
         return
     for key in params["required_keys"]:
         if not fm.get(key):
