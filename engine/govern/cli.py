@@ -17,6 +17,7 @@ from pathlib import Path
 
 import govern.checks  # noqa: F401  (registers the built-in checks)
 from govern import __version__, blocks, config, layout, manifest, notice, ratchet, registry
+from govern import versions
 from govern.context import Context
 from govern.decisions import heading_sep
 from govern.findings import REPORTERS, Findings, one_per_breach, report_per_scope
@@ -342,6 +343,23 @@ def cmd_options(ctx: Context, global_: bool, as_json: bool, rec: list[str] | Non
     return 0
 
 
+def cmd_phase(args) -> int:
+    from govern import phase
+    try:
+        p = phase.plan(Path(args.path), args.remote, args.keep)
+    except phase.PhaseError as exc:
+        return fail(str(exc), 1)
+    if args.dry_run:
+        print("\n".join(phase.describe(p)))
+        return 0
+    res = phase.apply(p)
+    if res.lines:
+        print("\n".join(res.lines))
+    if res.error:
+        return fail(res.error, res.code)
+    return res.code
+
+
 def cmd_usage(ctx: Context, as_json: bool) -> int:
     from govern import usage_setup
     r = usage_setup.resolve(ctx.cfg, ctx.root)
@@ -354,6 +372,32 @@ def cmd_usage(ctx: Context, as_json: bool) -> int:
         print(f"  {a['signal']} at {a['at']}%")
     if r["error"]:
         print(f"error: {r['error']} (data lines only)")
+    return 0
+
+
+def cmd_runs(ctx: Context, args) -> int:
+    from govern import agent_runs
+    home = layout.home()
+    if args.runs_cmd == "mark":
+        agent_runs.mark(home, ctx.root, args.label)
+        print(f"phase '{args.label}' started in {agent_runs.durable_path(home, ctx.root)}")
+        return 0
+    if args.runs_cmd == "resolve":
+        r = agent_runs.resolve(ctx.cfg, ctx.root)
+        if args.as_json:
+            print(json.dumps(r, indent=2, ensure_ascii=False))
+            return 0
+        for name in ("gates", "measure"):
+            print(f"agent-{name}: {'on' if r[name] is not None else 'off'}")
+            for k, v in (r[name] or {}).items():
+                print(f"  {k} = {json.dumps(v)}")
+        return 0
+    runs, name = agent_runs.load_runs(home, ctx.root, args.all)
+    report = agent_runs.build_report(runs)
+    if args.as_json:
+        print(json.dumps({"since": name, **report}, indent=2, ensure_ascii=False))
+    else:
+        print(agent_runs.render_report(report, name, args.all))
     return 0
 
 
@@ -707,6 +751,77 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     usub.add_parser("uninstall", help="remove it and put your statusLine back")
     ur = usub.add_parser("resolve", help="the effective option and alerts for this project")
     ur.add_argument("--json", action="store_true", dest="as_json")
+    ph = sub.add_parser("phase", help="close a phase: push this branch, then remove the local "
+                                      "branches and worktrees it contains")
+    psub = ph.add_subparsers(dest="phase_cmd", required=True)
+    pc = psub.add_parser("close", help="push, verify the remote holds the commit, then clean up")
+    pc.add_argument("--remote", help="where to push a branch with no upstream")
+    pc.add_argument("--keep", action="append", default=[], metavar="BRANCH",
+                    help="a branch to keep whatever it contains (repeatable)")
+    pc.add_argument("--dry-run", action="store_true", dest="dry_run",
+                    help="print the plan and change nothing")
+    pc.add_argument("--path", default=".", help="the repository (default: the working directory)")
+    rp = sub.add_parser("runs", help="agent runs: start a phase, report on it, or resolve this "
+                                     "project's agent-gates and agent-measure settings")
+    rsub = rp.add_subparsers(dest="runs_cmd", required=True)
+    rm = rsub.add_parser("mark", help="start a phase in the project's durable run log")
+    rm.add_argument("label")
+    rr = rsub.add_parser("report", help="the runs since the last mark, and suggestions")
+    rr.add_argument("--all", action="store_true", help="every run, not only since the last mark")
+    rr.add_argument("--json", action="store_true", dest="as_json")
+    rv = rsub.add_parser("resolve", help="the effective agent-gates and agent-measure settings")
+    rv.add_argument("--json", action="store_true", dest="as_json")
+    ag = sub.add_parser("agents", help="the agent roles the engine renders into this project")
+    asub = ag.add_subparsers(dest="agents_cmd", required=True)
+    ar = asub.add_parser("render", help="write each configured role and the coordinator's "
+                                        "build rules, and remove the ones no longer configured")
+    ar.add_argument("--check", action="store_true", dest="check_only",
+                    help="write nothing; exit 1 when anything would change")
+    bd = sub.add_parser("build", help="the build ledger: the phase this branch has in flight, "
+                                      "its units and briefs, and what to do next")
+    bsub = bd.add_subparsers(dest="build_cmd", required=True)
+    bs = bsub.add_parser("start", help="start a phase on the checked-out branch")
+    bs.add_argument("phase", help="a slug: lower-case letters, digits and hyphens")
+    bs.add_argument("--plan", metavar="FILE", help="the phase's plan, from the project's root")
+    bs.add_argument("--high-risk", action="store_true", dest="high_risk",
+                    help="qa-engineer runs beside code-reviewer when the phase is reviewed")
+    bs.add_argument("--from", metavar="BRANCH", dest="source",
+                    help="the branch the phase was cut from, which review measures against "
+                         "(default: the default branch)")
+    bu = bsub.add_parser("unit", help="add a unit and write its brief, or update one")
+    busub = bu.add_subparsers(dest="unit_cmd", required=True)
+    ba = busub.add_parser("add", help="add a unit and write its brief")
+    ba.add_argument("id")
+    ba.add_argument("--title", required=True)
+    ba.add_argument("--role", help="a rendered role that writes code (default: developer)")
+    ba.add_argument("--red", action="store_true",
+                    help="the brief also names a folder for the failing test's output")
+    be = busub.add_parser("set", help="update a unit; `running` adds one to its attempts")
+    be.add_argument("id")
+    be.add_argument("status", help="pending, running, done, blocked or failed")
+    be.add_argument("--branch")
+    be.add_argument("--commit")
+    be.add_argument("--note")
+    be.add_argument("--role", help="hand the unit to another role that writes code; its report "
+                                   "then has that role's name")
+    bl = bsub.add_parser("launch", help="check the brief or briefs of a unit, `review`, `fix` or "
+                                        "`close`, mark a unit running and print the launch "
+                                        "prompt of each")
+    bl.add_argument("what", metavar="{unit id|review|fix|close}")
+    bc = bsub.add_parser("collect", help="copy the files git ignores under this phase's folder "
+                                         "from the worktree that has BRANCH checked out into "
+                                         "this checkout, for an agent that is not a unit")
+    bc.add_argument("branch")
+    bg = bsub.add_parser("ruling", help="record a decision the coordinator made without the "
+                                        "owner: what, why, and what it costs if wrong")
+    bg.add_argument("text", nargs="+")
+    bt = bsub.add_parser("status", help="the phase, a line per unit, and the next action")
+    bt.add_argument("--json", action="store_true", dest="as_json")
+    bsub.add_parser("review", help="write the review package and the reviewers' briefs")
+    bf = bsub.add_parser("fix", help="write the fix pass's brief, for the coordinator to fill; "
+                                     "a second pass gets a brief of its own")
+    bf.add_argument("--role", help="a rendered role that writes code (default: developer)")
+    bsub.add_parser("close", help="write technical-writer's closing brief")
     return ap
 
 
@@ -728,6 +843,8 @@ def main(argv: list[str] | None = None, root: Path | None = None,
         except (ValueError, OSError) as exc:
             return fail(f"~/.claude/settings.json: {exc} — settings.json was not changed")
         return 0
+    if args.cmd == "phase":
+        return cmd_phase(args)      # any git repository: it reads no project
     if args.cmd == "ci":
         return cmd_ci(args.provider, prog)    # a template: it reads nothing of the project's
     try:
@@ -738,6 +855,13 @@ def main(argv: list[str] | None = None, root: Path | None = None,
         return fail(f"{exc} not found")
     for warning in ctx.cfg.warnings:
         print(f"warning: {warning}", file=sys.stderr)
+    if versions.is_beta(__version__):
+        try:       # a launcher older than the beta plugin's name wrote the old id: correct it
+            line = notice.correct_old_launcher_switch(ctx.root)
+            if line:
+                print(line, file=sys.stderr)
+        except Exception:
+            pass   # never the command's business
     try:
         return dispatch(ctx, args)
     except Unreadable as exc:
@@ -769,6 +893,14 @@ def dispatch(ctx: Context, args) -> int:
         return cmd_principles(ctx)
     if args.cmd == "usage":
         return cmd_usage(ctx, args.as_json)
+    if args.cmd == "runs":
+        return cmd_runs(ctx, args)
+    if args.cmd == "agents":
+        from govern import roles
+        return roles.run(ctx, args.check_only)
+    if args.cmd == "build":
+        from govern import build
+        return build.run(ctx, args)
     return cmd_check(ctx, getattr(args, "project", None), getattr(args, "path", None),
                      getattr(args, "history_from", None), getattr(args, "workspace_only", False),
                      getattr(args, "base", None))

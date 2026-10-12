@@ -42,6 +42,8 @@ from govern.text import parse_frontmatter, read_text
 DEFAULT_LOG = "DECISIONS.md"
 FRONTMATTER_ONLY = "only files with frontmatter"
 WHOLE_DIR = "the whole dir"
+LEAVE_OUT = "leave them out"
+GOVERN_THEM = "govern them"
 SINGLE, WORKSPACE = "single", "workspace"
 # The registry adopt writes for a workspace that has none: one `[[project]]` per selected repo.
 REGISTRY_FILE, REGISTRY_ENTRIES = "projects.toml", "project"
@@ -370,6 +372,7 @@ class _Proposer:
         globs: list[str] = []
         mixed: dict[str, list[str]] = {}
         typed: dict[str, list[str]] = {}     # a mixed dir -> its files with frontmatter
+        untyped: list[tuple[str, str, int]] = []     # (dir, scope name, markdown files)
         for s in self.scopes:
             for d, (n, with_fm) in s.doc_dirs.items():
                 if n == 0 or d.startswith("."):
@@ -379,14 +382,14 @@ class _Proposer:
                     if glob not in globs:
                         globs.append(glob)
                 elif with_fm == 0:
-                    self.notes.append(f"{s.name}: {where} has {n} markdown file(s), none with "
-                                      f"frontmatter; left out of [projects] docs")
+                    untyped.append((d, s.name, n))
                 else:
                     mixed.setdefault(d, []).append(f"{s.name}: {with_fm} of {n}")
                     for f in s.doc_files.get(d, []):
                         rel = _under(f, s.dir)
                         if rel is not None and rel not in typed.setdefault(d, []):
                             typed[d].append(rel)
+        asked_mixed = False
         for d, counts in mixed.items():
             key, glob = f"docs:{d}", f"{d}/**/*.md"
             files = typed.get(d, [])
@@ -397,6 +400,7 @@ class _Proposer:
             elif a == FRONTMATTER_ONLY:
                 globs.extend(f for f in files if f not in globs)
             else:
+                asked_mixed = True
                 if a is not None:
                     self.notes.append(f"answer '{key}' = '{a}' is not one of "
                                       f"{[FRONTMATTER_ONLY, WHOLE_DIR]}; asked again")
@@ -405,14 +409,54 @@ class _Proposer:
                          f"some have frontmatter and some don't ({'; '.join(counts)}); "
                          f"'{FRONTMATTER_ONLY}' lists {', '.join(files) or 'none'}")
         if globs:
+            for d, name, n in untyped:
+                self.notes.append(f"{name}: {d}/ has {n} markdown file(s), none with "
+                                  f"frontmatter; left out of [projects] docs")
             cfg["projects"]["docs"] = globs
             return
+        # No typed dir: `[projects] docs` is not written, so the engine's default governs every
+        # markdown file and the gate fails each one without frontmatter. Ask before adopting that,
+        # once per directory, and only after every mixed directory is answered.
+        leave_out: list[str] = []
+        by_dir: dict[str, list[tuple[str, int]]] = {}
+        for d, name, n in untyped:
+            by_dir.setdefault(d, []).append((name, n))
+        for d, scopes in by_dir.items():
+            if asked_mixed:
+                break
+            key = f"docs-untyped:{d}"
+            # `exclude` is matched with fnmatch, where `*` spans folders: `<d>/*.md` is every depth
+            glob = f"{d}/*.md"
+            total = sum(n for _, n in scopes)
+            names = ", ".join(name for name, _ in scopes)
+            a = self.answer(key)
+            if a == LEAVE_OUT:
+                if glob not in leave_out:
+                    leave_out.append(glob)
+                self.notes.append(f"{names}: {glob} is in [projects] exclude (every markdown file "
+                                  f"under {d}/, at any depth); remove it to govern those files")
+            elif a == GOVERN_THEM:
+                for name, n in scopes:
+                    self.notes.append(f"{name}: {d}/ has {n} markdown file(s) the gate will fail "
+                                      f"until each has frontmatter")
+            else:
+                if a is not None:
+                    self.notes.append(f"answer '{key}' = '{a}' is not one of "
+                                      f"{[LEAVE_OUT, GOVERN_THEM]}; asked again")
+                self.ask(key, f"The gate will fail the {total} markdown file(s) under {d}/: none "
+                              f"has frontmatter. Leave them out?",
+                         [LEAVE_OUT, GOVERN_THEM],
+                         "; ".join(f"{name}: {d}/ has {n} markdown file(s), none with frontmatter"
+                                   for name, n in scopes)
+                         + f"; '{LEAVE_OUT}' adds {glob} to [projects] exclude")
+        if leave_out:
+            cfg["projects"]["exclude"] = leave_out
         # No docs dir: the engine's default `**/*.md` governs every markdown file, and a repo's
         # GitHub-facing files (which GitHub would render frontmatter in as a table) are not its
         # governed docs. They go in `exclude`, where a reader sees them and can take one out.
         community = self.community_files()
         if community:
-            cfg["projects"]["exclude"] = community
+            cfg["projects"]["exclude"] = leave_out + [c for c in community if c not in leave_out]
             self.notes.append(f"[projects] exclude lists {', '.join(community)}: GitHub-facing "
                               f"files, not governed docs; remove from exclude to govern them")
 

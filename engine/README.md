@@ -4,7 +4,7 @@ purpose: Layout of the governance engine, how a project runs it, and how it is t
 audience: both
 load_when: changing the engine, adding a check, or wiring the engine into a project
 related: [../docs/how-it-works.md, ../docs/configuration.md, ../docs/checks.md]
-last_reviewed: 2026-09-25
+last_reviewed: 2026-10-10
 ---
 
 # The engine (`govern`)
@@ -39,6 +39,10 @@ setting in [configuration](../docs/configuration.md), and every check in
 | `blocks.py` | Generated-block targets and renderers |
 | `ratchet.py` | Breach computation and the baseline file |
 | `usage.py` | Usage alerts at run time: usage steps, the owner's break points, and the text the plugin's hooks inject; standard library and `layout` only, so the hook can import it on every tool call |
+| `build.py` | `govern build`: the phase ledger (`.context-gate/build/<phase>/ledger.toml`), unit briefs, launch prompts, the review package, fix and close briefs, and the "what is next" sentence |
+| `roles.py` | The agent roles: renders each configured role and the coordinator's build rules from `templates/agents/` and `templates/build-rules.md`, the check's params and the project's inserts; `govern agents render`; the `agent-roles` and `agent-references` checks use it |
+| `agent_runs.py` | Agent gates and measurement at run time: briefs and their contracts, the gates, per-run totals from a transcript, the run logs, `govern runs mark` and `report`; standard library only, so the plugin's hook can import it |
+| `phase.py` | `govern phase close`: push the phase branch, confirm the remote holds it, remove the local branches and worktrees it contains |
 | `local_plugin.py` | The local plugin, assembled from one release's tree and swapped into `~/.claude/skills/`: what `tools/release/install-plugin.py` installs. `govern beta on` runs it from the beta it fetched; standard library, `layout` and `profile.rmtree` only |
 | `usage_setup.py` | Usage alerts, set up: install the statusline capture, uninstall it, re-wrap it when another tool replaces `statusLine`, and resolve a project's option and alerts file |
 | `checks/` | The built-in checks, one module per concern |
@@ -139,7 +143,7 @@ in `extraKnownMarketplaces` (the public repository, or `--marketplace <owner/rep
 each recorded in `installed.toml` and restored by uninstall. `[governance] source` defaults to
 the public repository, or the fork's GitHub URL with `--marketplace`; `--source none` leaves it
 unset. `enable-plugin` writes the same two settings on an existing install;
-`--id context-gate@skills-dir`, how development loads the plugin, writes no marketplace.
+`--id context-gate@skills-dir` (a beta's plugin: `context-gate-beta@skills-dir`), how development loads the plugin, writes no marketplace.
 
 `--entrypoint` keeps a gate path the project's skills already call working: the original is
 backed up and replaced by a stub that runs `bin/govern`, passing its own name so usage and

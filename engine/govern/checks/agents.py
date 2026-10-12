@@ -58,7 +58,12 @@ def agents(ctx, params) -> Findings:
         turns = fm.get("maxTurns")
         n = None
         malformed = False   # maxTurns was given but is not usable — reported once, below
-        if not turns:
+        # `maxTurns: false` is a stated "no cap": it meets require_max_turns, has no ceiling
+        # to stay under, and is not a malformed number. The key must still be there.
+        uncapped = turns is False or str(turns).strip().lower() == "false"
+        if uncapped:
+            pass
+        elif not turns:
             if params["require_max_turns"]:
                 f.error(f"{where}: no maxTurns — set a cap high enough that a properly "
                         f"performing agent never hits it, but a runaway agent is stopped for "
@@ -86,6 +91,11 @@ def agents(ctx, params) -> Findings:
             elif n is not None:
                 if int(m.group(1)) != n:
                     f.error(f"{where}: prose says {m.group(1)} turns, frontmatter says {n}")
+            elif uncapped:
+                # A warning, as it was before `maxTurns: false` was understood: an upgrade
+                # must not turn an existing project red.
+                f.warn(f"{where}: prose says {m.group(1)} turns, frontmatter says no cap "
+                       f"(maxTurns: false)")
             elif not malformed:
                 # Genuinely no maxTurns to match against — a malformed one was already
                 # reported once, above (one finding per agent problem).

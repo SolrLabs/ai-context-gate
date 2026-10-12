@@ -1,0 +1,41 @@
+{
+  "phase": "p1-login",
+  "branch": "phase/p1",
+  "base": "<base>",
+  "plan": "docs/plan-login.md",
+  "high_risk": true,
+  "stage": "build",
+  "ledger": ".context-gate/build/p1-login/ledger.toml",
+  "rulings": [
+    "Tokens live in a table, not a file: one writer; a migration if wrong"
+  ],
+  "units": [
+    {
+      "id": "u1",
+      "title": "Session token store",
+      "role": "developer",
+      "status": "done",
+      "attempts": 1,
+      "branch": "unit/u1",
+      "commit": "3f2a9c1",
+      "note": "merged",
+      "brief": ".context-gate/build/p1-login/u1/brief.md",
+      "report": ".context-gate/build/p1-login/u1/developer-report.md"
+    },
+    {
+      "id": "u2",
+      "title": "Token refresh",
+      "role": "senior-developer",
+      "status": "running",
+      "attempts": 1,
+      "branch": "",
+      "commit": "",
+      "note": "",
+      "brief": ".context-gate/build/p1-login/u2/brief.md",
+      "report": ".context-gate/build/p1-login/u2/senior-developer-report.md"
+    }
+  ],
+  "done": 1,
+  "total": 2,
+  "next": "Unit u2 is running and awaited: when one lands, merge it and run `python3 .context-gate/bin/govern build unit set <id> done --commit <hash>`."
+}

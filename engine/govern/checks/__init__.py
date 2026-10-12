@@ -2,4 +2,6 @@
 from govern.checks import (  # noqa: F401
     repo, registry, docs, decisions, changes, agents, blocks, memory, working, ratchet,
     checkouts, hooks, writing, licenses, references, links, overrides, usage,
+    agent_runs,
+    roles,
 )

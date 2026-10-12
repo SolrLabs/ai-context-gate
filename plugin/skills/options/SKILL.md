@@ -1,6 +1,6 @@
 ---
 name: options
-description: Review and change this project's context-gate options, the checks that stay off until turned on (writing rules, hooks wired, checkout hygiene, licenses, usage alerts). Shows each option's state and a suggestion, then turns options on, off or back to inherit. With --global, changes them in the user's profile instead. Use when the user asks about options, opt-in checks, or turning one on.
+description: Review and change this project's context-gate options, the checks that stay off until turned on (writing rules, hooks wired, checkout hygiene, licenses, usage alerts, agent roles). Shows each option's state and a suggestion, then turns options on, off or back to inherit. With --global, changes them in the user's profile instead. Use when the user asks about options, opt-in checks, or turning one on.
 argument-hint: "[--global]"
 allowed-tools: Bash(python3 .context-gate/bin/*), Read, Edit, AskUserQuestion
 ---
@@ -51,10 +51,27 @@ and tell the user their statusline is now wrapped and how to undo it
 
 Project scope: edit `.context-gate/config.toml` by hand, keeping its comments and layout.
 
+**A project running a beta** (`.context-gate/local.toml` exists): an option the pinned release
+does not have yet goes in `.context-gate/local.toml`, under the same `[checks.<id>]` table, not in
+`config.toml`. Compare the option's `since` with the `engine` value in `config.toml`: when `since`
+is newer, the pinned engine, CI and every other clone would refuse a check they do not know. Tell
+the user the option then applies on this machine only, until the project upgrades to a release
+that has it, when the table moves to `config.toml`.
+
 - On: `[checks.<id>]` with `level = "error"` and the settings from step 3.
 - Off: `level = "off"`. If the option came from the profile (`layer` is `profile`), ask for a
   `reason` and write it.
 - Inherit: remove the `level` key, and the table if it is left empty.
+
+When `agent-roles` is turned on, run `python3 .context-gate/bin/govern agents render` once its
+table is written: it writes the engine's role definitions into `.claude/agents/` and the
+coordinator's build rules into `.claude/rules/`, and removes the ones it rendered for a role no
+longer configured. Before the table is written the option is still off and the command writes
+nothing. If it names a conflict, a file of that name the project wrote itself, it has left that
+file alone: show the user both ways out it prints and let them choose. Never move or overwrite
+the file yourself. Run the command again after any later change to the option's settings.
+Claude Code loads agent definitions when a session starts, so tell the user that the roles
+can be launched only from a new session, and that a build must start in one.
 
 `--global`: ask for the path to the profile's local checkout (for example `~/src/principles`).
 Never edit the engine's cached copy. In its `principles.toml`, on is `level = "error"` and off is

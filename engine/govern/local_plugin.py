@@ -10,6 +10,12 @@ one version; the release stamp `govern/RELEASE` (`vX.Y.Z`), in the installed cop
 project. It lands in HOME/.claude/skills/<the plugin's own name>/ and loads in later sessions
 as `<name>@skills-dir`.
 
+A beta's plugin is named `<name>-beta` (Claude Code never loads a plugin under ~/.claude/skills/
+whose name an installed marketplace plugin has), lands in HOME/.claude/skills/<name>-beta/ and
+loads as `<name>-beta@skills-dir`. HOME/.claude/skills/<name>/ is then left holding only
+`govern/RELEASE` and a README: the marker launchers older than the beta's own name look for,
+which Claude Code does not take for a plugin. An existing local install there is replaced by it.
+
 `govern beta on` runs this module from the beta it fetched, so each beta lays out its own
 plugin. Standard library, `layout` and `profile.rmtree` only: it runs from a bare clone of the
 tag, whether or not that engine is installed anywhere.
@@ -81,63 +87,111 @@ def assemble(tree: Path, stage: Path) -> tuple[str, str]:
     return name, version
 
 
+def _marker(stage: Path, version: str, beta_name: str) -> None:
+    """What launchers from before a beta had a plugin name of its own look for at
+    ~/.claude/skills/<name>/: the release stamp and a README, and nothing Claude Code takes for
+    a plugin (no `.claude-plugin/`, no SKILL.md)."""
+    (stage / "govern").mkdir(parents=True)
+    (stage / "govern" / layout.RELEASE_MARKER).write_text(f"v{version}\n", encoding="utf-8")
+    (stage / "README.md").write_text(
+        "This folder is a marker, not a plugin: older launchers read govern/RELEASE here.\n"
+        f"The beta plugin is installed beside it, in {beta_name}/.\n", encoding="utf-8")
+
+
+def _swap(stage: Path, out: Path, aside: Path, name: str, version: str) -> None:
+    """Move the assembled `stage` into place at `out`, the earlier install set aside first and
+    put back when the move fails."""
+    if out.exists():
+        os.rename(out, aside)
+    try:
+        os.rename(stage, out)
+    except OSError as exc:
+        if aside.exists():
+            try:
+                os.rename(aside, out)
+            except OSError:
+                try:
+                    rmtree(stage)
+                except OSError:
+                    pass
+                raise PluginError(
+                    f"could not install plugin {name} {version} in {out.parent} ({exc}); "
+                    f"the earlier install is in {aside}, and the next run puts it back")
+        raise
+
+
 def install(tree: Path, home: Path, expected: str | None = None) -> tuple[str, str, Path]:
     """Install the tree's plugin as the local plugin under `home`, replacing an earlier local
-    install of it. Returns the plugin's name, its version and where it is. Raises PluginError,
-    with the earlier install as it was, when the tree is not one release, when it is not the
-    plugin `expected` names, when what is in the plugin's place is not a local install (it
-    has no release stamp), or when a step fails."""
+    install of it. Returns the plugin's name, its version and where it is. A beta's plugin is
+    named `<name>-beta` and lands in its own folder, and `<name>/` is left holding the marker
+    older launchers look for. Raises PluginError, with the earlier install as it was, when the
+    tree is not one release, when it is not the plugin `expected` names, when what is in the
+    plugin's place (or the marker's) is not a local install (it has no release stamp), or when a
+    step fails."""
     _, name, version = read(tree)
     if expected is not None and name != expected:
         raise PluginError(f"v{version} is the plugin {name!r}, not {expected!r}; nothing was "
                           "installed")
-    out = home / ".claude" / "skills" / name
+    skills = home / ".claude" / "skills"
+    beta = "-beta." in version
+    out = skills / (f"{name}-beta" if beta else name)
+    marker = skills / name if beta else None      # what an older launcher reads, for a beta only
+    places = [out] + ([marker] if marker else [])
     # Beside the destination, so the move into place never crosses a filesystem; dot names, so
     # nothing takes either for a plugin while it exists.
-    stage, aside = out.with_name(f".{name}.new"), out.with_name(f".{name}.old")
-    if out.is_symlink():
-        raise PluginError(f"{out} is a symbolic link, not an install of the plugin; remove it, "
-                          "then run this again")
-    if out.exists() and not out.is_dir():
-        raise PluginError(f"{out} is not a directory; remove it, then run this again")
+    stages = {p: p.with_name(f".{p.name}.new") for p in places}
+    asides = {p: p.with_name(f".{p.name}.old") for p in places}
+    for place in places:
+        if place.is_symlink():
+            raise PluginError(f"{place} is a symbolic link, not an install of the plugin; remove "
+                              "it, then run this again")
+        if place.exists() and not place.is_dir():
+            raise PluginError(f"{place} is not a directory; remove it, then run this again")
+    placed: list[Path] = []
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
-        if aside.is_dir() and not out.exists():
-            os.rename(aside, out)       # a run killed between the two moves: put it back first
-        if out.exists() and not (out / "govern" / layout.RELEASE_MARKER).is_file():
-            raise PluginError(f"{out} is not a local install of the plugin (it has no "
-                              f"govern/{layout.RELEASE_MARKER}), so it is not replaced; move it "
-                              "away, then run this again")
-        rmtree(stage)
-        rmtree(aside)
-        assemble(tree, stage)
-        if out.exists():
-            os.rename(out, aside)
+        for place in places:
+            if asides[place].is_dir() and not place.exists():
+                os.rename(asides[place], place)     # a run killed between the two moves: put it back first
+            if place.exists() and not (place / "govern" / layout.RELEASE_MARKER).is_file():
+                raise PluginError(f"{place} is not a local install of the plugin (it has no "
+                                  f"govern/{layout.RELEASE_MARKER}), so it is not replaced; move "
+                                  "it away, then run this again")
+        for place in places:
+            rmtree(stages[place])
+            rmtree(asides[place])
+        assemble(tree, stages[out])
+        if marker:
+            manifest = stages[out] / ".claude-plugin" / "plugin.json"
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            manifest.write_text(json.dumps({**data, "name": out.name}, indent=2) + "\n",
+                                encoding="utf-8")
+            _marker(stages[marker], version, out.name)
         try:
-            os.rename(stage, out)
-        except OSError as exc:
-            if aside.exists():
+            for place in places:
+                _swap(stages[place], place, asides[place], name, version)
+                placed.append(place)
+        except (OSError, PluginError):
+            for place in reversed(placed):      # one install: the first move goes back with the second
                 try:
-                    os.rename(aside, out)
+                    rmtree(place)
+                    if asides[place].exists():
+                        os.rename(asides[place], place)
                 except OSError:
-                    try:
-                        rmtree(stage)
-                    except OSError:
-                        pass
-                    raise PluginError(
-                        f"could not install plugin {name} {version} in {out.parent} ({exc}); "
-                        f"the earlier install is in {aside}, and the next run puts it back")
+                    pass
             raise
     except OSError as exc:
-        try:
-            rmtree(stage)
-        except OSError:
-            pass
+        for place in places:
+            try:
+                rmtree(stages[place])
+            except OSError:
+                pass
         raise PluginError(f"could not install plugin {name} {version} in {out.parent} ({exc})")
-    try:
-        rmtree(aside)
-    except OSError:
-        pass                            # the new plugin is in place; the next run clears this
+    for place in places:
+        try:
+            rmtree(asides[place])
+        except OSError:
+            pass                        # the new plugin is in place; the next run clears this
     return name, version, out
 
 

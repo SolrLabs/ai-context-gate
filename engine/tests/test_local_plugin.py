@@ -23,7 +23,9 @@ sys.path.insert(0, str(ENGINE))
 
 from govern import __version__, layout, local_plugin, profile  # noqa: E402
 
-VERSION = "9.8.7-beta.3"
+VERSION = "9.8.7"
+BETA = "9.8.7-beta.3"
+OLDER_BETA = "9.8.7-beta.2"
 TOOL = REPO / "tools" / "release" / "install-plugin.py"
 
 
@@ -79,7 +81,7 @@ class LocalPlugin(unittest.TestCase):
                               env=env, capture_output=True, text=True, encoding="utf-8",
                               timeout=60)
 
-    def tagged(self, tree: Path) -> Path:
+    def tagged(self, tree: Path, version: str = VERSION) -> Path:
         """The tree committed and tagged in a repository of its own that also holds the
         release tool: what the tool is run from."""
         git = lambda *a: subprocess.run(
@@ -90,13 +92,14 @@ class LocalPlugin(unittest.TestCase):
         shutil.copy(TOOL, tree / "tools" / "release" / TOOL.name)
         git("init", "-q")
         git("add", "-A")
-        git("commit", "-qm", VERSION)
-        git("tag", f"v{VERSION}")
+        git("commit", "-qm", version)
+        git("tag", f"v{version}")
         return tree
 
-    def tool(self, repo: Path, home: Path, *more: str) -> subprocess.CompletedProcess:
+    def tool(self, repo: Path, home: Path, *more: str,
+             version: str = VERSION) -> subprocess.CompletedProcess:
         return subprocess.run([sys.executable, str(repo / "tools" / "release" / TOOL.name),
-                               f"v{VERSION}", *more], capture_output=True, text=True,
+                               f"v{version}", *more], capture_output=True, text=True,
                               encoding="utf-8", env={**os.environ, "HOME": str(home)},
                               timeout=60)
 
@@ -416,6 +419,152 @@ class LocalPlugin(unittest.TestCase):
                              encoding="utf-8", timeout=60)
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertTrue((self.out / "govern" / layout.RELEASE_MARKER).is_file())
+
+    # A beta's plugin has a name of its own: context-gate-beta, with a marker for old launchers.
+    def beta_out(self) -> Path:
+        return self.skills / f"{layout.PLUGIN}-beta"
+
+    def test_a_beta_installs_under_its_own_name_and_leaves_a_marker(self):
+        tree = release_tree(self.tmp / "tree", BETA)
+        before = listing(tree)
+        res = self.module(tree)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.stdout.strip(),
+                         f"assembled plugin {layout.PLUGIN} {BETA} -> {self.beta_out()}")
+        manifest = json.loads((self.beta_out() / ".claude-plugin" / "plugin.json")
+                              .read_text(encoding="utf-8"))
+        self.assertEqual((manifest["name"], manifest["version"], manifest["defaultEnabled"]),
+                         (f"{layout.PLUGIN}-beta", BETA, False))
+        self.assertEqual((self.beta_out() / "govern" / layout.RELEASE_MARKER)
+                         .read_text(encoding="utf-8"), f"v{BETA}\n")
+        self.assertTrue((self.beta_out() / "hooks" / "session_start.py").is_file())
+        # What an older launcher looks for: the stamp, and a README saying what this is.
+        self.assertEqual(sorted(listing(self.out)),
+                         ["README.md", "govern", f"govern/{layout.RELEASE_MARKER}"])
+        self.assertEqual((self.out / "govern" / layout.RELEASE_MARKER)
+                         .read_text(encoding="utf-8"), f"v{BETA}\n")
+        self.assertEqual(len((self.out / "README.md").read_text(encoding="utf-8").splitlines()), 2)
+        self.assertEqual(listing(tree), before)
+        self.assertEqual(sorted(p.name for p in self.skills.iterdir()),
+                         sorted([layout.PLUGIN, f"{layout.PLUGIN}-beta"]))
+
+    def test_the_marker_is_no_plugin(self):
+        self.assertEqual(self.module(release_tree(self.tmp / "tree", BETA)).returncode, 0)
+        self.assertEqual([p for p in self.out.rglob("*")
+                          if p.name in (".claude-plugin", "SKILL.md")], [])
+
+    def test_a_beta_over_a_beta_leaves_nothing_of_the_first(self):
+        first = release_tree(self.tmp / "a", OLDER_BETA)
+        wtext(first / "plugin" / "hooks" / "only_in_a.py", "# gone with a\n")
+        self.assertEqual(self.module(first).returncode, 0)
+        self.assertTrue((self.beta_out() / "hooks" / "only_in_a.py").is_file())
+        res = self.module(release_tree(self.tmp / "b", BETA))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertFalse((self.beta_out() / "hooks" / "only_in_a.py").exists())
+        for where in (self.beta_out(), self.out):
+            self.assertEqual((where / "govern" / layout.RELEASE_MARKER)
+                             .read_text(encoding="utf-8"), f"v{BETA}\n")
+        self.assertEqual(sorted(p.name for p in self.skills.iterdir()),
+                         sorted([layout.PLUGIN, f"{layout.PLUGIN}-beta"]))
+        again = listing(self.home)
+        self.assertEqual(self.module(release_tree(self.tmp / "c", BETA)).returncode, 0)
+        self.assertEqual(listing(self.home), again)
+
+    def test_a_beta_replaces_a_stamped_local_install_with_the_marker(self):
+        self.earlier_install(self.home)         # a whole old-style install at context-gate/
+        res = self.module(release_tree(self.tmp / "tree", BETA))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(sorted(listing(self.out)),
+                         ["README.md", "govern", f"govern/{layout.RELEASE_MARKER}"])
+        self.assertEqual((self.skills / "another" / "SKILL.md").read_bytes(), b"# someone else's\n")
+
+    def test_a_beta_over_an_unstamped_directory_installs_nothing(self):
+        wtext(self.out / "SKILL.md", "# mine\n")
+        before = listing(self.home)
+        res = self.module(release_tree(self.tmp / "tree", BETA))
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertEqual(len(res.stderr.strip().splitlines()), 1, res.stderr)
+        self.assertIn(f"error: {self.out} is not a local install of the plugin", res.stderr)
+        self.assertEqual(listing(self.home), before)
+
+    def test_a_beta_whose_second_move_fails_leaves_the_earlier_state(self):
+        """The plugin and the marker are one install: when the second cannot be put in place,
+        the first is taken back out."""
+        self.earlier_install(self.home)
+        self.assertEqual(self.module(release_tree(self.tmp / "a", OLDER_BETA)).returncode, 0)
+        before = listing(self.home)
+        tree = release_tree(self.tmp / "b", BETA)
+        real = os.rename
+        calls = []
+
+        def fails_when_the_marker_moves_in(src, dst):
+            calls.append(Path(dst))
+            if Path(dst) == self.out and Path(src).name.endswith(".new"):
+                raise PermissionError(13, "a file in it is in use")
+            return real(src, dst)
+
+        with mock.patch.object(os, "rename", fails_when_the_marker_moves_in):
+            with self.assertRaises(local_plugin.PluginError):
+                local_plugin.install(tree, self.home)
+        self.assertEqual(calls.count(self.beta_out()), 2)   # moved in, then taken back out
+        self.assertEqual(listing(self.home), before)
+
+    def test_a_beta_still_passes_the_name_an_old_launcher_gives(self):
+        tree = release_tree(self.tmp / "tree", BETA)
+        res = self.module(tree, None, "--name", layout.PLUGIN)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertTrue((self.beta_out() / ".claude-plugin" / "plugin.json").is_file())
+        res = self.module(release_tree(self.tmp / "other", BETA, name="another"),
+                          None, "--name", layout.PLUGIN)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn("is the plugin 'another'", res.stderr)
+
+    def test_nothing_in_the_beta_plugin_names_the_old_id_but_to_explain_it(self):
+        self.assertEqual(self.module(release_tree(self.tmp / "tree", BETA)).returncode, 0)
+        old = layout.OLD_SKILLS_DIR_PLUGIN_ID
+        said = []
+        for path in sorted(self.beta_out().rglob("*")):
+            if path.is_file() and path.suffix in (".py", ".md", ".json", ".toml", ".txt"):
+                for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                    if old in line and "older launcher" not in line:
+                        said.append(f"{path.relative_to(self.beta_out())}:{n}")
+        self.assertEqual(said, [])
+
+    def test_the_release_tool_installs_a_beta_as_the_module_does(self):
+        repo = self.tagged(release_tree(self.tmp / "repo", BETA), BETA)
+        tree = self.tmp / "tree"
+        archive = subprocess.run(["git", "-C", str(repo), "archive", "--format=tar",
+                                  f"v{BETA}", "plugin", "engine/govern"], check=True,
+                                 capture_output=True).stdout
+        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+            tar.extractall(tree, filter="data")
+        by_tool = self.tmp / "tool-home"
+        by_tool.mkdir()
+        for home in (by_tool, self.home):
+            self.earlier_install(home)
+        res = self.tool(repo, by_tool, version=BETA)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.stdout.strip(), f"assembled plugin {layout.PLUGIN} {BETA} -> "
+                         f"{by_tool / '.claude' / 'skills' / (layout.PLUGIN + '-beta')}")
+        self.assertEqual(self.module(tree).returncode, 0)
+        self.assertEqual(listing(self.home), listing(by_tool))
+        # --out keeps its meaning: assemble the plugin there, and nothing under ~/.claude/.
+        elsewhere = self.tmp / "elsewhere"
+        before = listing(by_tool)
+        res = self.tool(repo, by_tool, "--out", str(elsewhere), version=BETA)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        manifest = json.loads((elsewhere / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["name"], f"{layout.PLUGIN}-beta")
+        self.assertEqual(listing(by_tool), before)
+
+    def test_the_release_tool_refuses_a_beta_over_an_unstamped_directory(self):
+        repo = self.tagged(release_tree(self.tmp / "repo", BETA), BETA)
+        wtext(self.out / "SKILL.md", "# mine\n")
+        before = listing(self.home)
+        res = self.tool(repo, self.home, version=BETA)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn("is not a local install of the plugin", res.stderr)
+        self.assertEqual(listing(self.home), before)
 
 
 if __name__ == "__main__":
