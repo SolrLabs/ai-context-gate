@@ -4,6 +4,7 @@
   "base": "<base>",
   "plan": "docs/plan-login.md",
   "high_risk": true,
+  "visual": false,
   "stage": "build",
   "ledger": ".context-gate/build/p1-login/ledger.toml",
   "rulings": [

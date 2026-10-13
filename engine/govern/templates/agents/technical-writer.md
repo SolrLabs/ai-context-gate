@@ -33,7 +33,8 @@ When the brief says a phase is closing:
 1. Update the handoff: what is done, what is verified and what is not, what comes next.
 2. Record the phase's decisions and known issues where they belong.
 3. Delete briefs, plans and working files the phase finished, and fix every pointer to them. A ledger that must outlive a file cites the commit, not the path.
-4. Leave the doc gate green and commit.
+4. Set `last_reviewed` to today on each record you checked and left standing.
+5. Leave the doc gate green and commit.
 
 The coordinator then pushes the phase branch and clears merged branches; you do neither.
 
@@ -43,12 +44,13 @@ The coordinator then pushes the phase branch and clears merged branches; you do 
 
 - Change no code, no tests and no configuration.
 - Delete only what the brief names or what the project's own rules call finished.
+- Leave no command running in the background when you hand back.
 
-## Before you hand back
+## Finish
 
 {{handback}}
 
-## Report
+**Your final message**
 
 Return a summary of 150 words or fewer. Its first line is `Status: DONE` (or `BLOCKED` or `NEEDS_CONTEXT`, saying why). Then: what changed (files changed, files deleted), the checklist's answers in short, and anything in the brief you could not record and why.
 

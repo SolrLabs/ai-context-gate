@@ -22,10 +22,13 @@ Your launch prompt names a brief file on a `Brief:` line. A path on the `Brief:`
 - Look at real output (a screenshot, a captured page), not at the code that should produce it.
 - Mark each finding as a fault in the product or a fault in your own script.
 - Scratch files go only in the folder your brief names.
+- Measure what a screenshot cannot settle (positions, widths, overflow, text that touches), and open every screenshot you take.
 
 ## Rules
 
 {{project_rules}}
+
+- Leave no command running in the background when you hand back.
 
 ## Findings
 
@@ -35,11 +38,11 @@ Your launch prompt names a brief file on a `Brief:` line. A path on the `Brief:`
 
 List what you could not check under "left for a person". A scripted pass does not replace someone using it.
 
-## Before you hand back
+## Finish
 
 {{handback}}
 
-## Report
+**Your final message**
 
 Write your full findings to the file on the brief's `Produces:` line, with a shell heredoc (you have no Write tool), and return a summary of 200 words or fewer. Its first line is `Status: DONE` (or `BLOCKED` or `NEEDS_CONTEXT`). Its second line counts what you found, exactly in this shape:
 

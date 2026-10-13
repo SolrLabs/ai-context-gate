@@ -26,6 +26,7 @@ def main() -> None:
     from govern import notice
     home = layout.home()
     left = _beta_left_behind(root)
+    differs = _beta_differs(root)
     if PLUGIN_ROOT.name.endswith("-beta") and not (root / layout.LOCAL).is_file():
         # The beta copy in a project that is not on a beta: say the one thing above, if it
         # applies, and nothing else. The released plugin speaks for this project.
@@ -34,7 +35,8 @@ def main() -> None:
                               "hookSpecificOutput": {"hookEventName": "SessionStart",
                                                      "additionalContext": left}}))
         return
-    msgs = [notice.for_project(root, home), notice.both_plugins_warning(root, home), left]
+    msgs = [notice.for_project(root, home), notice.both_plugins_warning(root, home), left,
+            differs]
     msgs.extend(_usage(root, home))
     msg = "\n".join(m for m in msgs if m)
     if msg:
@@ -66,6 +68,28 @@ def _beta_left_behind(root: Path) -> str | None:
             return None
         return (f"the beta is off in this project; removed {layout.SKILLS_DIR_PLUGIN_ID} from "
                 ".claude/settings.local.json. Restart Claude Code to unload the beta plugin.")
+    except Exception:
+        return None
+
+
+def _beta_differs(root: Path) -> str | None:
+    """When local.toml names a beta of the plugin's own release but not the plugin's beta, the
+    one line saying the hooks follow the plugin's (the command to move the project is in the
+    notice for_project prints). None in any other state; never raises."""
+    try:
+        import tomllib
+        import govern
+        from govern import layout, versions
+        with (root / layout.LOCAL).open("rb") as fh:
+            named = (tomllib.load(fh).get("governance") or {}).get("engine")
+        plugin = govern.__version__
+        if not isinstance(named, str) or named == plugin or not versions.is_beta(named) \
+                or not versions.is_beta(plugin) \
+                or versions.parse(named)[:3] != versions.parse(plugin)[:3]:
+            return None
+        return (f"context-gate: this project runs beta {named}; this machine's plugin is beta "
+                f"{plugin}, and its hooks (usage alerts, agent gates, run measurement) follow "
+                f"{plugin}.")
     except Exception:
         return None
 
@@ -151,6 +175,9 @@ def _usage(root: Path, home: Path) -> list:
                 with open(usage.log_path(home), "a", encoding="utf-8") as fh:
                     fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {sid} usage resolution "
                             f"failed or timed out\n")
+                msgs.append("context-gate: this project's settings could not be read by the "
+                            "plugin; usage alerts, agent gates and run measurement are OFF for "
+                            "this session. Run python3 .context-gate/bin/govern check.")
             return msgs
         usage.sweep(home, time.time())
         if resolved.get("enabled"):

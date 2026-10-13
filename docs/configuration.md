@@ -506,6 +506,25 @@ The same check warns when a project changes a setting its profile set without a 
 `[governance] require_reasons = false` removes the requirement for a `reason` and for a
 `reasons` entry; the `standard-overrides` check warns instead, a widened list included.
 
+## Finished working files
+
+`doc-frontmatter` has two settings that say when a document is due for attention: `stale_days`
+(120) and `stale_types` (`control`, `reference`) warn when a review is older than that.
+When a scope is over `governed-doc-count`'s `max_docs`, the warning and the ratchet's message
+name up to five finished working files that could go. `finished-files` is the check that reports
+a finished working file, and its `finished_statuses` and `exempt` settings decide which are named. With `ticked` on (the default), a working file whose every
+checkbox is ticked also counts: `finished-files` warns about it whatever its status, and the
+limit message names it.
+
+## Merged branches
+
+`merged-branches` warns once per workspace, naming up to ten local branches already merged into
+the default branch (and counting the rest). It never deletes one. It leaves out the default
+branch, the branch checked out here, any branch another worktree has checked out, and every name
+that matches its `keep` setting, a list of `fnmatch` patterns (default `main`, `master`,
+`development`, `beta-*`, `release-*`). When git cannot answer, or the default branch cannot be
+told, it warns that merged branches were not checked.
+
 ## Running a beta locally
 
 You can run a locally installed prerelease in one project, on one machine, without touching the
@@ -857,6 +876,7 @@ extra_roles = ["architect"]
 scoped_test = "python3 -m unittest -k"
 full_gate = "python3 -m unittest discover"
 high_risk_paths = ["engine/govern/installer.py"]
+visual_paths = ["web/"]
 
 [checks.agent-roles.models]
 developer = "sonnet"
@@ -887,6 +907,13 @@ and exits 1 when anything would change. A file in the agents folder that does no
 `context-gate:rendered` note is never written over: render names it and exits 1, and the fix is
 to move it or drop the role. Upgrade re-renders, uninstall removes what was rendered, and
 `agent-references` warns when a doc names an agent that has no definition.
+
+When `agent-roles` is on in `config.toml`, the rendered files are committed and listed in
+`installed.toml`, as above. When it is on only in the git-ignored `.context-gate/local.toml`,
+the files stay on that machine: they are recorded in `.context-gate/rendered.local.toml`, kept
+out of git through the repository's own `info/exclude`, and `render` names any of them git still
+tracks (`--untrack` stops that, leaving the files). A param that `local.toml` sets while
+`config.toml` has the check on is refused, because it would be rendered into committed files.
 
 ## Agent gates
 
@@ -990,6 +1017,8 @@ phase = "p1-login"
 branch = "phase/p1-login"
 from = "development"
 base = "3f2a9c1"
+visual = false              # set by `build start --visual`
+launched = []               # fix briefs already launched
 stage = "build"             # build | review | fix | closing
 rulings = []
 
@@ -1003,7 +1032,7 @@ attempts = 0
 
 | Command | Does |
 |---|---|
-| `build start <phase> [--plan FILE] [--from BRANCH] [--high-risk]` | Writes the ledger. Refuses on the default branch, a dirty tree, an existing ledger, or when git ignores the ledger (it prints the line to add to `.gitignore`) |
+| `build start <phase> [--plan FILE] [--from BRANCH] [--high-risk] [--visual]` | Writes the ledger; `--visual` marks the phase visual, so `build review` writes a third brief for `ux-reviewer`, and is refused unless `visual_paths` renders that role. Refuses on the default branch, a dirty tree, an existing ledger, or when git ignores the ledger (it prints the line to add to `.gitignore`) |
 | `build unit add <id> --title T [--role R] [--red]` | Adds a unit and writes its `brief.md` |
 | `build unit set <id> <status> [--role R] [--branch B] [--commit C] [--note N]` | Updates a unit |
 | `build launch <unit, review, fix or close>` | Refuses an unfilled or uncommitted brief; prints the launch prompt |

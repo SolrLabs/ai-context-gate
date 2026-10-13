@@ -27,16 +27,20 @@ Read the project's decisions by index and open only the entries the work touches
 the work will change before you cut it: the files, their tests, and any existing implementation a
 unit could follow.
 
+Before you plan a new check or command, search what exists: `python3 .context-gate/bin/govern
+explain` lists every check and its settings. Say in the plan's Constraints what you found, so
+nothing is built twice.
+
 ## 2. Cut it
 
-**Phases.** A phase is one coherent body of work that is reviewed once, as one diff, and ends in
-something a person can check.
+**Phases.** A phase is everything up to the next owner checkpoint: all of it is built, then
+reviewed once as one diff, fixed once and closed once, and it ends in something a person can check.
 
 - Mark the owner checkpoints: a phase is one when a large body of work becomes usable at its end,
   so the owner tries it before more is built on it. Days of work never pile up untried, and the
   plan's last phase is always one. A phase a command can judge is not one.
-- A unit that carries the most risk (a schema, stored data, a release or install path, anything
-  the triggers name) is a small phase of its own, so it is reviewed before work piles on top.
+- Only a migration, or security work that later units build on, is cut into a small phase reviewed
+  early: every phase pays for a review, a fix pass and a close.
 - Mark a phase **high-risk** when it touches one of the project's high-risk paths. That is what
   brings `qa-engineer` in.
 
@@ -57,7 +61,8 @@ feels. A unit for `senior-developer` holds only the work that sends it there; th
 
 Save the plan where the project keeps working documents, with the frontmatter the project's other
 working documents carry (copy one). Keep it under the project's word limit for a working file; a
-plan that will not fit is two plans.
+plan that will not fit is two plans. Run the project's `python3 .context-gate/bin/govern check`
+before the plan is committed, since a new working file can break a document limit.
 
 ```markdown
 # Plan: <name>
@@ -67,6 +72,13 @@ Goal: <one sentence>
 
 ## Constraints
 <exact values from the spec that every unit must respect, one line each>
+
+## Agents
+| Step | Agent | Model | Effort | Why this one |
+|---|---|---|---|---|
+| <the units, each review role, the fix pass, the close: one row per kind of run> | | | | |
+
+Reviewed: <who and when, or "(not yet)">
 
 ## Phase 1: <name>          (slug: <p1-name>; high-risk: yes|no; checkpoint: yes|no)
 
@@ -107,6 +119,9 @@ which findings you did not accept and why.
 
 Tell the user where the plan is, the phases and how many units each has, what is routed to
 `senior-developer` and why, and anything you decided that they might have decided differently.
+
+The owner reviews the `## Agents` table before any build; fill its `Reviewed:` line only on the
+owner's word.
 
 Planning is a phase of its own. Before the build starts, commit the plan on a branch, push it,
 bring the project's handoff up to date and merge it the way the project merges: the build needs a

@@ -4,9 +4,28 @@ Newest first. Each release says what changed and, under **Upgrading**, anything 
 do or decide. The upgrade report quotes every entry between the engine a project ran and the one
 it upgraded to.
 
-## 0.7.0-beta.9 — 2026-10-11
+## 0.7.0-beta.12 — 2026-10-12
 
-- **One hand-back checklist in every role:** every role now ends with one binding sentence and a numbered checklist under `## Before you hand back`. The lines are `Scope`, `Red`, `Gate`, `Commit`, `Not verified` and `Report` for the roles that write, and the last two for the roles that review. It replaces the report paragraph added in the bullet below. A line is answered as `Key: <answer>`. A run that stops early still owes the file. `handback_checks` on `agent-roles` adds lines for every role.
+This release adds agent roles, hooks and a `govern build` ledger for running a plan phase by phase with role agents. To try a beta, run `govern beta on <version>` in a project; it installs the beta engine and a plugin named `context-gate-beta`, whose skills are `/context-gate-beta:plan`, `/context-gate-beta:build` and `/context-gate-beta:options`. Restart the Claude Code session after it so the plugin loads. To leave, run `govern beta off`. Everything below was added in the betas leading to this release, and the first group of bullets is the newest.
+
+- **Rendered files follow the settings that made them:** with `agent-roles` on only in `.context-gate/local.toml`, `govern agents render` records the files in `.context-gate/rendered.local.toml` and lists them in a marked block of the repository's `info/exclude`; `installed.toml` holds no rendered rows. Files git already tracks are named, and `govern agents render --untrack` stops tracking them. A param set in `local.toml` while committed config has the check on is refused, and a level set in both counts as committed. Turning the check off removes what was rendered locally, never a file git tracks and never an edited one. A failing git call is an error, never "not a repository" (UB-45). `upgrade` and `adopt` still write rendered rows into `installed.toml` for a local-only project (UB-98): run `govern agents render` after an upgrade.
+- **A finished plan says so:** `finished-files` has a new param `ticked` (default true). A working file with every checkbox ticked and an unfinished status gets a warning to delete it, and the document-limit message names it (UB-96).
+- **Merged branches are named:** new check `merged-branches` (arrives at `warn`, param `keep`) names local branches merged into the default branch (UB-96).
+- **Build:** `govern build unit drop <id>` removes a unit. `build start` warns when the review base is more than 50 commits behind, and may be run again while the ledger has no unit (UB-71, UB-88). The brief skeleton's Tests hint says to name no whole-suite run.
+- **Skills and roles:** the plan skill says to search existing checks first (UB-97). The build skill says a blocked first attempt travels by its own branch (UB-93) and that a plan is deleted when its last checkpoint passes. The technical-writer role re-dates the records it checked.
+- **Output another tool may parse changed:** `govern agents render` prints new line kinds: `excluded`, `tracked`, `untracked`, `kept`, `note` and `exclude`.
+- **A unit runs its own tests; the coordinator runs the gate:** new `agent-roles` parameter `unit_gate`, `"scoped"` by default. `developer` and `senior-developer` run only the tests their unit touches and are told not to run the full gate; their checklist's `Gate` line asks for the scoped command and its result. The build rules tell the coordinator to run the full gate on the phase branch after each merge, and that a unit that turns it red is failed; the build skill says what to do then (leave the merge, launch nothing else until green, a fresh agent). `unit_gate = "full"` keeps the earlier behavior. Role text changes for a project on upgrade: after `govern agents render`, developers stop running the full gate and the coordinator must run it after each merge; a project that wants the old behavior sets `unit_gate = "full"` under `[checks.agent-roles]`.
+- **The QA run reads no diff:** `govern build review` also writes `review/package-stat.txt` (commit list and stat), and the `qa-engineer` brief names that file in place of `package.diff`; the role says it is given no diff and opens the files it probes.
+- **A limit message names what could go:** when a scope is over its governed-docs limit, the `governed-doc-count` warning and the ratchet's messages end with `Finished working files that could go:` and up to five names. The names come from the `finished-files` check's own `finished_statuses` and `exempt`, and only files git already holds are named.
+- **The hooks never go quiet without saying so:** the machine's one beta plugin now reads a project's `local.toml` when it names any beta of the same release, so a project one beta behind keeps its usage alerts, agent gates and run measurement. Session start says `this project runs beta X; this machine's plugin is beta Y, and its hooks (...) follow Y` when they differ, and says the three are OFF when the project's settings cannot be read.
+- **A blocked run is measured:** a run the stop gate blocks leaves a row marked unfinished. `govern runs report` counts it once, and lists it as `blocked on its contract and never ended` if it never stops again.
+- **`govern build` fix and close do what the skill says:** `build launch fix` prints a prompt for every fix brief not yet launched (the ledger records them under the key `launched`), and the latest again when all were. `build fix` over an unfilled fix brief exits 1 and changes nothing, and works after `build close`. A second `build close` brings the close brief's rulings up to date and keeps everything else. The close brief says as-built notes go to the decision log.
+- **Visual phases and `ux-reviewer`:** the new `agent-roles` parameter `visual_paths` renders the `ux-reviewer` role and names it in the build rules. `build start --visual` marks a phase visual, and `build review` then writes a third brief, `review/ux-reviewer-brief.md`. `--visual` is refused when the role is not rendered. `govern build status --json` gained the key `visual`, for anything that parses it.
+- **Brief skeletons:** a unit brief starts with `## Context`. A fix brief says findings are copied in full, names its own red folder (`red-2`), and says a finding made on a running system is proved fixed on a running system.
+- **Role and rule text:** the security trigger is narrower (credentials, keys, tokens, signing, sign-in and sessions, the code that decides who may read or change protected data, or input from outside the project; a product rule about who may do what is not security). The rules say never stop a running agent to change its routing. Every role ends in one `## Finish` section instead of two or three. `qa-engineer` verifies rules and flow on a running system, `ux-reviewer` measures and opens every screenshot, and no role leaves a command running in the background.
+- **The skills:** plan says a phase is everything up to the next owner checkpoint, every plan carries an `## Agents` table the owner reviews before a build, and `govern check` runs before a plan is committed. Build stops on an unreviewed table, takes `--visual` and `--from`, and checks a brief against itself before it is committed.
+- **The beta line is said once an hour:** the launcher's `running beta ...` line is printed once an hour per project and beta. A project gets this when an upgrade next writes its launcher.
+- **One hand-back checklist in every role:** every role now ends with one binding sentence and a numbered checklist, in its `## Finish` section. The lines are `Scope`, `Red`, `Gate`, `Commit`, `Not verified` and `Report` for the roles that write, and the last two for the roles that review. It replaces the report paragraph earlier betas put in each role. A line is answered as `Key: <answer>`. A run that stops early still owes the file. `handback_checks` on `agent-roles` adds lines for every role.
 - **The stop gate can read the checklist:** `checklist` on `agent-gates`, off by default. With it on, the gate refuses a report that leaves a checklist line unanswered. `python3 .context-gate/bin/govern runs resolve` now prints `checklist`, `checklist_keys` and `checklist_texts`.
 - **Shorter role definitions:** the sentences the checklist now says are gone from the templates; no rule was removed. The note line in every brief and the stop gate's block reason have new wording.
 - **The report is part of the task, written before the hand-back:** every role's Report section now opens with one shared paragraph saying the report file is part of the work, is written before any final message, and that the message carries `Report: <full path>`. Every brief the build commands write says the same in one line above its `Produces:` line. The stop gate's block message says the run is not finished, nothing sent has been accepted, to put each line right now even after a summary was sent, and to send the final message again with the `Report:` line.
@@ -16,7 +35,7 @@ it upgraded to.
   finished: ... Treat its report as not filed.` A resume clears it.
 - **Helper agents are kept out of the run log:** a stop for an agent the launch hook never saw, with
   no type, no contract and no tool calls (a helper the harness starts itself), writes no row, so
-  `govern runs report` no longer lists ` (None): token totals unavailable` rows for them.
+  `govern runs report` stops listing ` (None): token totals unavailable` rows for them.
 - **A beta's plugin now loads:** Claude Code does not load a local plugin whose name an
   installed plugin has, so the beta plugin, named like the release, never loaded where the release
   was installed, and a project on a beta ran the beta engine with the release's hooks and skills.
@@ -24,10 +43,10 @@ it upgraded to.
   `/context-gate-beta:<skill>`), and its hooks do nothing in a project that is not on a beta. A
   launcher from 0.6.1 or earlier enables the old id; the beta engine corrects it on any `govern`
   command and says so.
-- **Two plugin skills run the build loop:** `/context-gate:plan` turns a spec into phases and
+- **Two plugin skills run the build loop:** `/context-gate-beta:plan` turns a spec into phases and
   units, each with a checkable "done when" line, routed by the project's triggers.
-  `/context-gate:build` runs one phase with the rendered roles, resumes a build in flight, and with
-  `--long` carries on through later phases unattended. Neither needs another plugin.
+  `/context-gate-beta:build` runs one phase with the rendered roles, resumes a build in flight, and carries
+  on through later phases by default (`--one` stops after one). Neither needs another plugin.
 - **`govern build`, a ledger for one phase:** `start`, `unit add`, `unit set`, `launch`, `collect`, `ruling`,
   `status`, `review`, `fix` and `close`. The ledger is `.context-gate/build/<phase>/ledger.toml`.
   It is committed on the phase branch with the unit briefs. Reports, diffs and failing-test output
@@ -146,10 +165,10 @@ it upgraded to.
 - **`memory-index` counts memories, not lines:** lines whose memory is of a kind in `exempt_types`
   (default `["feedback"]`) are not counted against `max_lines`, and a line that links two
   memories is a warning (`one_link_per_line`, default `true`).
-- **The build, plan and options skills say four things they left out:** the build skill confirms each role is launchable in this session before the phase branch is cut, tells the coordinator to open the files a brief names and never to brief an agent to run a beta-only command (an agent's worktree runs the committed pin), runs a unit's gate without moving the coordinator's shell, and runs the run report before `phase close`. The options skill says the roles can be launched only from a new session. The plan skill says planning is a phase of its own. The build rules now run the run report before `phase close`.
+- **The build, plan and options skills gain four lines:** the build skill confirms each role is launchable in this session before the phase branch is cut, tells the coordinator to open the files a brief names and never to brief an agent to run a beta-only command (an agent's worktree runs the committed pin), runs a unit's gate without moving the coordinator's shell, and runs the run report before `phase close`. The options skill says the roles can be launched only from a new session. The plan skill says planning is a phase of its own. The build rules now run the run report before `phase close`.
 
 - **`operator_rules`, a rule for every role:** a list on `agent-roles`, settable in a profile, rendered at the top of every role's project rules.
-- **The build stops for the owner only at checkpoints:** the build rules stop only at phases a plan marks `checkpoint: yes`, and a build carries on from phase to phase by default. The build skill's `--long` section is now "Carrying on"; `--long` changes nothing and `--one` stops after the phase.
+- **The build stops for the owner only at checkpoints:** the build rules stop only at phases a plan marks `checkpoint: yes`, and a build carries on from phase to phase by default. The build skill's `--long` section is now "Carrying on"; `--long` is still accepted and changes nothing, and `--one` stops after the phase.
 - **The developer roles say how to work under the worktree guard:** the `developer` and `senior-developer` roles say to run one plain git command per call and to put multi-line scripts in a scratch file.
 - **A relative `Brief:` resolves from the project root:** the launch gate reads it from the session's project root first, then the hook's working folder.
 - **The launcher reads its arguments first:** `bin/upgrade` and `bin/uninstall` print usage and exit 0 on `-h` or `--help`, and exit 2 on an argument they do not know, before anything is fetched or written.
@@ -165,18 +184,18 @@ run `python3 .context-gate/bin/govern check --base origin/<branch>` on a full cl
 the workflow `govern ci github` prints. From then on an edit to a locked decision carries a
 `**Revised:** YYYY-MM-DD (what changed)` line. A project whose statuses are not the standard ones
 sets `locked_statuses` under `[checks.decision-changes]`. `level = "error"` does not make plain
-`check` fail; to hold uncommitted work to the gate's rules locally, run `check --base HEAD`.
+`check` fail; to hold uncommitted work to the gate's rules locally, run `check --base HEAD`. Role text changes on upgrade: after `govern agents render`, developers stop running the full gate and the coordinator must run it after each merge; a project that wants the old behavior sets `unit_gate = "full"` under `[checks.agent-roles]`.
 
-A project with `agent-roles` on that never set `senior_triggers` loses four triggers (schemas and public APIs, deleting or moving files the project did not create, a release or migration path, and the old wording for credentials and outside input) and its rendered files read as out of date until `govern agents render` is run; to keep the old list, set `senior_triggers` in the project's config before rendering.
+A project with `agent-roles` on that never set `senior_triggers` drops four triggers the earlier list had (schemas and public APIs, deleting or moving files the project did not create, a release or migration path, and the old wording for credentials and outside input) and its rendered files read as out of date until `govern agents render` is run; to keep the old list, set `senior_triggers` in the project's config before rendering.
 
 The three agent options (`agent-roles`, `agent-gates`, `agent-measure`) are off until answered:
-`/context-gate:options` offers them and `govern options` shows them. `agent-gates` and
+`/context-gate-beta:options` offers (`/context-gate:options` outside a beta) them and `govern options` shows them. `agent-gates` and
 `agent-measure` work only with the plugin installed. The plugin's new hooks start one short
 Python process (about 19 ms measured on one machine) on every shell call and every tool call in
 every project with the plugin enabled, even with both options off. `agent-references` and
 `memory-index`'s new finding (a line that links two memories) arrive as warnings, not errors.
 A project with `agent-roles` on, or that turns it on, runs
-`python3 .context-gate/bin/govern agents render` to pick up the rules' and roles' new text, and to get the hand-back checklist into the role files; nothing turns red until then. `bin/upgrade` and `bin/uninstall` now exit 2 on an argument they used to ignore, so a script that passes one must drop it. The `no frontmatter` finding's text changed, for anything that parses it.
+`python3 .context-gate/bin/govern agents render` to pick up the rules' and roles' new text, and to get the hand-back checklist into the role files; nothing turns red until then. After moving to 0.7.0-beta.10, run `govern agents render` again: role files gain `## Finish`. `bin/upgrade` and `bin/uninstall` now exit 2 on an argument they used to ignore, so a script that passes one must drop it. The `no frontmatter` finding's text changed, for anything that parses it.
 
 ## 0.6.1 — 2026-10-06
 

@@ -17,7 +17,7 @@ ENGINE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ENGINE))
 
 import govern.checks  # noqa: E402,F401  (registers the built-in checks)
-from govern import installer, layout, manifest, roles  # noqa: E402
+from govern import config, installer, layout, manifest, roles  # noqa: E402
 from test_single_repo import CFG, Base, SingleRepo, fm, wtext  # noqa: E402
 
 ON = '\n[checks.agent-roles]\nlevel = "error"\n'
@@ -90,20 +90,53 @@ class Render(unittest.TestCase):
         self.assertIn("\n- Keep {{model}} out of prose.\n", text)
         self.assertNotIn(roles.NO_RULES, text)
 
-    def test_every_role_renders_the_checklist_above_the_report(self):
+    def test_every_role_renders_one_finish_section_that_ends_the_file(self):
         self.assertEqual(len(roles.ROLES), 7)
         for role in roles.ROLES:
             with self.subTest(role=role):
-                text = rendered(role, extra_roles=["ux-reviewer", "architect"])
-                self.assertEqual(text.count("\n## Before you hand back\n"), 1)
-                self.assertEqual(text.count(roles.HANDBACK_BINDING), 1)
-                block = text.split("\n## Before you hand back\n\n", 1)[1]
-                block, rest = block.split("\n\n## Report\n", 1)
+                text = rendered(role, extra_roles=["ux-reviewer", "architect"],
+                                unit_gate="full")
+                headings = [ln for ln in text.split("\n") if ln.startswith("## ")]
+                self.assertEqual(headings.count("## Finish"), 1)
+                self.assertEqual(headings[-1], "## Finish")
+                for gone in ("## Report", "## Before you report", "## Before you hand back"):
+                    self.assertNotIn("\n" + gone + "\n", text)
+                finish = text.split("\n## Finish\n\n", 1)[1]
+                self.assertEqual(finish.count(roles.HANDBACK_BINDING), 1)
+                self.assertEqual(finish.count("\n\n**Your final message**\n\n"), 1)
+                block, tail = finish.split("\n\n**Your final message**\n\n", 1)
+                self.assertIn("Status:", tail)
+                if role in ("developer", "senior-developer"):
+                    self.assertTrue(block.startswith("- Re-read every comment"))
+                    block = block.split("\n\n" + roles.HANDBACK_BINDING, 1)[1]
+                    block = roles.HANDBACK_BINDING + block
+                else:
+                    self.assertTrue(block.startswith(roles.HANDBACK_BINDING))
                 binding, items = block.split("\n\n", 1)
                 self.assertEqual(binding, roles.HANDBACK_BINDING)
                 keys = roles.HANDBACK_ROLES.get(role, roles.HANDBACK_DEFAULT)
                 self.assertEqual(items.split("\n"), [
                     f"{n}. `{k}:` {roles.HANDBACK[k]}" for n, k in enumerate(keys, 1)])
+
+    def test_the_final_message_formats_follow_the_final_message_line(self):
+        for role in roles.ROLES:
+            with self.subTest(role=role):
+                tail = rendered(role, extra_roles=["ux-reviewer", "architect"]).split(
+                    "**Your final message**", 1)[1]
+                self.assertIn("Status:", tail)
+                if role in ("code-reviewer", "qa-engineer", "architect", "ux-reviewer"):
+                    self.assertIn("`Findings: critical=0 important=0 minor=0`", tail)
+
+    def test_the_architect_ties_a_small_phase_to_a_migration_or_security(self):
+        self.assertIn("a phase is everything up to the next owner checkpoint, reviewed once; "
+                      "only a migration, or security work that later units build on, is a "
+                      "small phase reviewed early.", rendered("architect", extra_roles=["architect"]))
+
+    def test_the_rules_tie_a_small_phase_to_a_migration_or_security(self):
+        text = rendered(roles.RULES)
+        self.assertIn("Only a migration, or security work that later units build on, becomes a "
+                      "small phase of its own, reviewed early.", text)
+        self.assertNotIn("needs early eyes", text)
 
     def test_handback_keys_per_role(self):
         full = ["Scope", "Red", "Gate", "Commit", "Not verified", "Report"]
@@ -267,13 +300,17 @@ class Render(unittest.TestCase):
                       rendered("developer", authority="docs/plan.md"))
 
     def test_a_command_renders_in_backticks_or_not_at_all(self):
-        plain = rendered("developer")
+        plain = rendered("developer", unit_gate="full")
         self.assertIn("run only the tests your unit touches. A filter", plain)
         self.assertIn("once, before you report.\n", plain)
-        named = rendered("developer", scoped_test="make test T=<name>", full_gate="make ci")
+        named = rendered("developer", scoped_test="make test T=<name>", full_gate="make ci",
+                         unit_gate="full")
         self.assertIn("run only the tests your unit touches (`make test T=<name>`). A filter",
                       named)
         self.assertIn("once, before you report (`make ci`).\n", named)
+        rules = rendered(roles.RULES, full_gate="make ci")
+        self.assertIn("on the phase branch (`make ci`). A unit that turns it red is failed.\n",
+                      rules)
 
     def test_triggers_and_high_risk_paths_are_bulleted(self):
         rules = rendered(roles.RULES)
@@ -284,13 +321,58 @@ class Render(unittest.TestCase):
         mine = rendered(roles.RULES, senior_triggers=["money"], escalate_after=3,
                         high_risk_paths=["db/**", "auth/"])
         self.assertIn("failed it 3 times:\n- money\n- You may send", mine)
-        self.assertIn("touches:\n- db/**\n- auth/\n- Hand reviewers", mine)
+        self.assertIn("touches:\n- db/**\n- auth/\n" + roles.NO_VISUAL + "\n- Hand reviewers", mine)
+
+    def test_rules_never_stop_a_running_agent_for_routing(self):
+        rules = rendered(roles.RULES)
+        self.assertIn("A fix pass goes to a fresh agent.\n- Never stop a running agent to change "
+                      "its routing: let it finish, or let it fail.\n- `developer` takes", rules)
+
+    def test_visual_paths_turn_on_ux_reviewer(self):
+        rules = rendered(roles.RULES)
+        self.assertIn("\n- The project can also render `ux-reviewer`, which launches the built "
+                      "product and looks at it: set `visual_paths` on `agent-roles` to turn it "
+                      "on.\n", rules)
+        self.assertNotIn("A phase is visual", rules)
+        self.assertNotIn("ux-reviewer", roles.rendered(defaults()))
+        on = defaults(visual_paths=["web/**"])
+        self.assertIn("ux-reviewer", roles.rendered(on))
+        self.assertIn("ux-reviewer", roles.rendered(defaults(extra_roles=["ux-reviewer"])))
+        text = rendered(roles.RULES, visual_paths=["web/**"])
+        self.assertIn("\n- A phase is visual when it touches one of these. Start it with "
+                      "`--visual`, and `ux-reviewer` then looks at the running product beside "
+                      "`code-reviewer`:\n- web/**\n- Hand reviewers", text)
+        self.assertNotIn("can also render", text)
+        self.assertIn("| `ux-reviewer` |", roles.roles_table(on))
+        self.assertNotIn("| `ux-reviewer` |", roles.roles_table(defaults()))
+
+    def test_role_lines_from_the_last_builds(self):
+        wt = ("In a worktree the harness refuses compound commands. One plain command per call: "
+              "no chaining, pipes, substitution, loops or heredocs. Put a multi-line script in a "
+              "file inside your own worktree, run the file, and delete it before you hand back. "
+              "Edit files with the edit tool.")
+        for role in ("developer", "senior-developer"):
+            self.assertIn(wt, rendered(role), role)
+        self.assertIn("- Measure what a screenshot cannot settle (positions, widths, overflow, "
+                      "text that touches), and open every screenshot you take.\n",
+                      rendered("ux-reviewer"))
+        self.assertIn("\n4. When the phase has a running system, verify its rules and its flow "
+                      "on that system, never on a fixture or a copied page.\n",
+                      rendered("qa-engineer"))
+        last = "- Leave no command running in the background when you hand back.\n\n## "
+        for role in ("technical-writer", "qa-engineer", "ux-reviewer"):
+            text = rendered(role)
+            self.assertIn(last, text, role)
+            self.assertEqual(text.count("Leave no command running"), 1, role)
 
     def test_default_rules_route_only_security_to_senior(self):
         rules = rendered(roles.RULES)
-        self.assertIn("\n- security: credentials, tokens, signing, authentication, access "
-                      "control, or input from outside the project (a download, an archive, "
-                      "pasted text)\n", rules)
+        sentence = ("security: credentials, keys, tokens, signing, sign-in and sessions, the "
+                    "code that decides who may read or change protected data, or input from "
+                    "outside the project (a download, an archive, pasted text). A product rule "
+                    "about who may do what is not security.")
+        self.assertIn("\n- " + sentence + "\n", rules)
+        self.assertIn("\n- " + sentence + "\n", rendered("developer"))
         self.assertNotIn("a schema, a public API", rules)
         self.assertNotIn("a release or migration path", rules)
 
@@ -323,13 +405,13 @@ class Render(unittest.TestCase):
     def test_developer_roles_say_how_to_work_under_the_worktree_guard(self):
         for role in ("developer", "senior-developer"):
             text = rendered(role)
-            self.assertIn("Run git as one plain command per call", text, role)
-            self.assertLess(text.index("Run git as one plain command per call"),
+            self.assertIn("One plain command per call", text, role)
+            self.assertLess(text.index("One plain command per call"),
                             text.index("## Rules that bind every change"), role)
 
     def test_other_roles_do_not_carry_the_worktree_guard_rule(self):
         for role in ("code-reviewer", "qa-engineer", "technical-writer"):
-            self.assertNotIn("Run git as one plain command per call", rendered(role), role)
+            self.assertNotIn("One plain command per call", rendered(role), role)
 
     def test_housekeeping_renders_two_bullets_or_nothing(self):
         on = rendered(roles.RULES)
@@ -357,6 +439,87 @@ class Render(unittest.TestCase):
         self.assertIn("\n| `architect` | sonnet | low | Reviews a large plan before code is "
                       "written", more)
         self.assertNotIn("| `ux-reviewer` |", more)
+
+
+NO_FULL_GATE = ("Do not run the full gate: the coordinator runs it once your unit is merged.")
+BOTH = ["ux-reviewer", "architect"]
+
+
+class UnitGate(unittest.TestCase):
+    """`unit_gate`: a unit runs its own tests, and the coordinator runs the full gate."""
+
+    def test_scoped_is_the_default_and_the_developers_run_no_full_gate(self):
+        for role in ("developer", "senior-developer"):
+            with self.subTest(role=role):
+                text = rendered(role)
+                self.assertIn(NO_FULL_GATE, text)
+                self.assertIn("A filter that matches nothing prints a pass: check the total "
+                              "is not zero. " + NO_FULL_GATE.split(".")[0], text)
+                self.assertIn("`DONE`: everything in the brief is done and your unit's tests "
+                              "are green.", text)
+                self.assertNotIn("Run the full gate once", text)
+                self.assertNotIn("run the full gate once", text)
+                self.assertNotIn("the full gate is green", text)
+                self.assertIn("3. `Gate:` the command you ran for your unit's tests and its "
+                              "result line (the count is not zero). The coordinator runs the "
+                              "full gate.\n", text)
+
+    def test_the_rules_hold_the_merge_gate_bullet_after_the_worktree_bullet(self):
+        rules = rendered(roles.RULES, full_gate="make ci")
+        self.assertIn(
+            "You merge unit branches into the phase branch.\n"
+            "- After you merge a unit, run the full gate on the phase branch (`make ci`). A "
+            "unit that turns it red is failed.\n- After each unit you merge, commit", rules)
+        self.assertIn("phase branch. A unit that turns it red is failed.\n",
+                      rendered(roles.RULES))
+
+    def test_the_roles_that_run_no_unit_gate_render_the_same_under_both(self):
+        for role in ("architect", "code-reviewer", "qa-engineer", "technical-writer",
+                     "ux-reviewer"):
+            with self.subTest(role=role):
+                self.assertEqual(rendered(role, extra_roles=BOTH, unit_gate="full"),
+                                 rendered(role, extra_roles=BOTH, unit_gate="scoped"))
+
+    def test_full_drops_the_scoped_text_from_the_developers_and_the_rules(self):
+        for role in ("developer", "senior-developer", roles.RULES):
+            with self.subTest(role=role):
+                text = rendered(role, unit_gate="full")
+                for gone in (roles.NO_FULL_GATE, roles.GATE_SCOPED, "After you merge a unit"):
+                    self.assertNotIn(gone, text)
+        for role in ("developer", "senior-developer"):
+            with self.subTest(role=role):
+                text = rendered(role, unit_gate="full")
+                for kept in ("the full gate once, before you report",
+                             "the full gate is green", roles.HANDBACK["Gate"]):
+                    self.assertIn(kept, text)
+
+    def test_full_renders_the_developers_with_the_full_gate(self):
+        dev = rendered("developer", unit_gate="full", full_gate="make ci")
+        self.assertIn("Run the full gate once, before you report (`make ci`).", dev)
+        self.assertIn("`DONE`: everything in the brief is done and the full gate is green.", dev)
+        senior = rendered("senior-developer", unit_gate="full", full_gate="make ci")
+        self.assertIn("touches; run the full gate once, before you report (`make ci`).\n", senior)
+        self.assertNotIn(NO_FULL_GATE, senior)
+        self.assertIn("2. `Red:`", dev)
+        self.assertIn("`Gate:` the full gate's result line. You ran it once, at the end.", dev)
+        self.assertNotIn("After you merge a unit", rendered(roles.RULES, unit_gate="full"))
+
+    def test_another_value_is_a_problem_that_names_it(self):
+        found = roles.problems(defaults(unit_gate="sometimes"))
+        self.assertEqual(len(found), 1)
+        self.assertIn("sometimes", found[0])
+        self.assertEqual(roles.problems(defaults(unit_gate="full")), [])
+        self.assertEqual(roles.problems(defaults()), [])
+
+    def test_the_technical_writer_renders_the_same_under_both(self):
+        self.assertEqual(rendered("technical-writer", unit_gate="full"),
+                         rendered("technical-writer", unit_gate="scoped"))
+        self.assertEqual(roles.handback_texts("technical-writer", defaults())["Gate"],
+                         roles.HANDBACK["Gate"])
+
+    def test_a_params_dict_without_the_param_reads_as_scoped(self):
+        self.assertEqual(roles.handback_texts("developer", {"handback_checks": []})["Gate"],
+                         roles.GATE_SCOPED)
 
 
 class Command(Base):
@@ -480,6 +643,21 @@ class Command(Base):
         self.assertIn("or point [checks.agent-roles] rules_file at another path", out)
         self.assertEqual(raw(r.root / RULES), "# Our own rules\n")
 
+    def test_a_conflict_on_ux_reviewer_names_visual_paths(self):
+        r = self.on('visual_paths = ["web/**"]\n')
+        r.write(f"{AGENTS}/ux-reviewer.md", BY_HAND.replace("developer", "ux-reviewer"))
+        code, out, _ = r.run("agents", "render")
+        self.assertEqual(code, 1, out)
+        self.assertIn("or empty [checks.agent-roles] visual_paths", out)
+        self.assertNotIn("extra_roles", out)
+
+    def test_a_conflict_on_ux_reviewer_in_both_places_names_both(self):
+        r = self.on('visual_paths = ["web/**"]\nextra_roles = ["ux-reviewer"]\n')
+        r.write(f"{AGENTS}/ux-reviewer.md", BY_HAND.replace("developer", "ux-reviewer"))
+        code, out, _ = r.run("agents", "render")
+        self.assertIn("or drop 'ux-reviewer' from [checks.agent-roles] extra_roles and empty "
+                      "[checks.agent-roles] visual_paths", out)
+
     def test_a_target_that_is_not_utf8_is_left_alone_and_reported(self):
         r = self.on()
         path = r.root / AGENTS / "developer.md"
@@ -534,12 +712,13 @@ class Command(Base):
         wtext(cfg, raw(cfg) + 'full_gate = "make ci"\n')
         code, out, _ = r.run("check")
         self.assertEqual(code, 1, out)
-        self.assertIn(f"  ERROR  {AGENTS}/developer.md: differs from what the engine renders "
-                      f"for `developer` (a setting, an insert or the engine changed, or the file "
-                      f"was edited) — run `{RENDER}`\n", out)
+        self.assertIn(f"  ERROR  {RULES}: differs from what the engine renders "
+                      f"for `build-rules` (a setting, an insert or the engine changed, or the "
+                      f"file was edited) — run `{RENDER}`\n", out)
         self.assertNotIn(f"{AGENTS}/code-reviewer.md", out)     # it names no full gate
+        self.assertNotIn(f"{AGENTS}/developer.md", out)         # a unit runs no full gate
         r.run("agents", "render")
-        self.assertIn("(`make ci`)", raw(r.root / AGENTS / "developer.md"))
+        self.assertIn("(`make ci`)", raw(r.root / RULES))
         self.assertEqual(r.run("check")[0], 0)
 
     def test_inserts_are_all_then_the_roles_own_and_a_change_makes_the_file_stale(self):
@@ -773,7 +952,9 @@ senior_triggers = ["money"]
 operator_rules = ["no attribution lines"]
 handback_checks = ["Licences: each new dependency's licence"]
 high_risk_paths = ["db/**"]
+visual_paths = ["web/**"]
 escalate_after = 3
+unit_gate = "full"
 housekeeping = false
 rules_file = ".claude/rules/build.md"
 ''')
@@ -944,6 +1125,21 @@ class References(Base):
         r = self.repo(extra=ON + 'extra_roles = ["ux-reviewer", "architect"]\n')
         r.run("agents", "render")
         self.assertEqual(self.found(r), [])
+
+
+class QaEngineerGivenNoDiff(unittest.TestCase):
+    def test_the_rendered_qa_engineer_says_it_is_given_no_diff(self):
+        text = rendered("qa-engineer")
+        self.assertIn("You are given no diff: open the files you probe.", text)
+        self.assertNotIn("full diff", text)
+
+
+class ClosingRecords(unittest.TestCase):
+    def test_the_rendered_technical_writer_sets_last_reviewed_on_records_it_left_standing(self):
+        text = rendered("technical-writer")
+        self.assertIn("Set `last_reviewed` to today on each record you checked and left standing.", text)
+        self.assertIn("you do not change code", text.lower())
+        self.assertIn("never push", text.lower())
 
 
 if __name__ == "__main__":

@@ -27,21 +27,23 @@ The model and effort are fixed in each definition. Launch by name and pass no mo
 
 - Sort pending work by model before you launch anything. Related work for one model goes in one brief.
 - Never add work to a running agent, and never resume a finished one for new work: it re-reads its whole history on every turn. A fix pass goes to a fresh agent.
+- Never stop a running agent to change its routing: let it finish, or let it fail.
 - `developer` takes every unit and every fix pass. `senior-developer` takes a unit only for one of these, or after the developer handed it back or failed it {{escalate_after}} times:
 {{senior_triggers}}
 - You may send a unit to `senior-developer` outside that list when you can say why. Say the reason when you launch it. This is rare.
 - A unit for `senior-developer` holds only the work that sends it there. The work around it that `developer` can do is a unit of its own.
 - A plan's own routing label is checked against the trigger list, never followed.
 - Each agent that writes works in its own worktree and commits there. It never pushes and never merges. You merge unit branches into the phase branch.
-- After each unit you merge, commit the build's ledger and push the phase branch, so a machine that dies loses nothing that was merged. A phase is built on a branch of its own, never on the default branch.
+{{merge_gate}}- After each unit you merge, commit the build's ledger and push the phase branch, so a machine that dies loses nothing that was merged. A phase is built on a branch of its own, never on the default branch.
 
 ## Review
 
 - A unit gets no review of its own. The project's gates and your reading of the diff close it.
 - When the last unit of a phase is green, `code-reviewer` reviews the whole phase once, as one diff. For a high-risk phase, `qa-engineer` runs beside it. A phase is high-risk when it touches:
 {{high_risk_paths}}
+{{visual_paths}}
 - Hand reviewers the diff as a file (commit list, stat, full diff). It never enters your context.
-- A unit that needs early eyes (a schema, data at risk) becomes its own small phase in the plan.
+- Only a migration, or security work that later units build on, becomes a small phase of its own, reviewed early.
 - Merge both reports into one ranked fix brief, at most five items per agent, for a fresh `developer`.
 - A fix pass is not reviewed again. The gates and your reading close it. One exception: a fix that touched a high-risk path gets `qa-engineer`'s failed probes re-run, never a fresh sweep.
 - Do not add a review pass or a stronger model on your own. The owner asks for more.

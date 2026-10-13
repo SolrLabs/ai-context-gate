@@ -208,7 +208,9 @@ def _checklist(cfg) -> dict:
     if chk is None or chk.level == "off":
         return {}
     params = {"extra_roles": list(chk.params.get("extra_roles", [])),
-              "handback_checks": list(chk.params.get("handback_checks", []))}
+              "handback_checks": list(chk.params.get("handback_checks", [])),
+              "visual_paths": list(chk.params.get("visual_paths", [])),
+              "unit_gate": chk.params.get("unit_gate", "scoped")}
     return {role: roles.handback_texts(role, params) for role in roles.rendered(params)}
 
 
@@ -855,6 +857,31 @@ def parse_final(final: str) -> dict:
             if found else None}
 
 
+def _run_row(d, launch, agent_id, totals, tools, final, problems, produced, now) -> dict:
+    """One run's measured row. A resumed agent's transcript holds every earlier run too, so the
+    figures are the difference from what the last stop saw."""
+    seen, run = launch.get("seen") or {}, {}
+    if totals:
+        for k in ("requests", "input_tokens", "cache_creation_input_tokens",
+                  "cache_read_input_tokens", "output_tokens"):
+            run[k] = totals[k] - int(seen.get(k) or 0)
+        run["context_at_end"] = totals["context_at_end"]
+    mine = [r for r in tools if (r.get("t") or 0) >= (launch.get("t") or 0)]
+    return {
+        "t": now, "agent": agent_id, "type": launch.get("agent_type"),
+        "model": read_json(d / f"model-{agent_id}.json"),
+        "description": launch.get("description"),
+        "resumed": bool(launch.get("resumed")),
+        "wall_s": round(now - (launch.get("t") or now), 1),
+        "tokens": run or None, "tool_calls": len(mine),
+        "tool_ms": sum(int(r.get("ms") or 0) for r in mine),
+        "failed_calls": sum(1 for r in mine if r.get("failed")),
+        "result_bytes": sum(int(r.get("out_bytes") or 0) for r in mine),
+        **summarize(mine), **parse_final(final),
+        "gate_blocks": launch.get("blocks", 0), "gate_unmet": problems,
+        "produced": produced}
+
+
 def on_stop(home, sid, gates, measure, root, data) -> dict | None:
     agent_id = data.get("agent_id")
     if not _safe(agent_id):
@@ -887,6 +914,12 @@ def on_stop(home, sid, gates, measure, root, data) -> dict | None:
         launch["blocks"] = launch.get("blocks", 0) + 1
         launch["blocked_on"] = {"unmet": problems, "t": time.time()}
         write_json(launch_path, launch)
+        if measure and root:
+            # The run may never stop again; this row (dropped by `load_runs` once a later one
+            # for the same agent exists) keeps its cost in the report. `seen` stays as it was.
+            append(durable_path(home, root), {
+                **_run_row(d, launch, agent_id, totals, tools, final, problems, [], time.time()),
+                "unfinished": True, "session": sid, "phase": phase_label(home, root)})
         return {"decision": "block", "reason": BLOCK_HEAD + "\n- ".join(problems) + BLOCK_TAIL}
     launch.pop("blocked_on", None)
     launch["ended"] = {"unmet": problems, "blocks": launch.get("blocks", 0),
@@ -897,26 +930,8 @@ def on_stop(home, sid, gates, measure, root, data) -> dict | None:
     if measure:
         # The run's own figures: a resumed agent's transcript holds every earlier run too, so
         # take the difference from what the last stop saw.
-        seen, run = launch.get("seen") or {}, {}
-        if totals:
-            for k in ("requests", "input_tokens", "cache_creation_input_tokens",
-                      "cache_read_input_tokens", "output_tokens"):
-                run[k] = totals[k] - int(seen.get(k) or 0)
-            run["context_at_end"] = totals["context_at_end"]
-        mine = [r for r in tools if (r.get("t") or 0) >= (launch.get("t") or 0)]
-        row = {
-            "t": now, "agent": agent_id, "type": launch.get("agent_type"),
-            "model": read_json(d / f"model-{agent_id}.json"),
-            "description": launch.get("description"),
-            "resumed": bool(launch.get("resumed")),
-            "wall_s": round(now - (launch.get("t") or now), 1),
-            "tokens": run or None, "tool_calls": len(mine),
-            "tool_ms": sum(int(r.get("ms") or 0) for r in mine),
-            "failed_calls": sum(1 for r in mine if r.get("failed")),
-            "result_bytes": sum(int(r.get("out_bytes") or 0) for r in mine),
-            **summarize(mine), **parse_final(final),
-            "gate_blocks": launch.get("blocks", 0), "gate_unmet": problems,
-            "produced": launch["ended"]["produced"]}
+        row = _run_row(d, launch, agent_id, totals, tools, final, problems,
+                       launch["ended"]["produced"], now)
         append(d / "runs.jsonl", row)
         if root:
             append(durable_path(home, root),
@@ -1060,6 +1075,15 @@ def load_runs(home: Path, root, everything: bool = False) -> tuple[list[dict], s
             models[(row.get("session"), row["model_for"])] = row.get("model")
         elif "agent" in row:
             runs.append(row)
+    later = set()
+    kept = []
+    for r in reversed(runs):
+        key = (r.get("session"), r.get("agent"))
+        if r.get("unfinished") and key in later:
+            continue
+        later.add(key)
+        kept.append(r)
+    runs = kept[::-1]
     for r in runs:
         if not r.get("model"):
             r["model"] = models.get((r.get("session"), r.get("agent")))
@@ -1160,6 +1184,10 @@ def render_report(report: dict, name: str | None, everything: bool) -> str:
         out += ["", "Largest results (each is re-read on every later turn of its agent):"]
         out += [f"- {x['bytes'] / 1024:.1f} KB {x['tool']} {str(x.get('label'))[-70:]}"
                 for x in report["largest"]]
+    unfinished = [r for r in runs if r.get("unfinished")]
+    if unfinished:
+        out += [""] + [f"- {r.get('type') or 'an agent'}: blocked on its contract and never ended"
+                       for r in unfinished]
     if report["suggestions"]:
         out += [""] + report["suggestions"]
     return "\n".join(out)

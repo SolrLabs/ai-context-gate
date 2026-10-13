@@ -1,6 +1,6 @@
 """`govern phase close`: push the branch, check the remote holds it, then remove what it contains.
 Against real repositories in temporary directories, with a local bare repository as the remote
-and a HOME of their own (the fixtures `test_base` builds).
+and a HOME of their own (the fixtures `base_support` builds).
 
     python3 -m unittest discover -s engine/tests -k test_phase
 """
@@ -18,7 +18,7 @@ sys.path.insert(0, str(ENGINE))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from govern import phase  # noqa: E402
-from test_base import Case, Tree  # noqa: E402
+from base_support import Case, Tree  # noqa: E402
 
 
 class Phase(Case):

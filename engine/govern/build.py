@@ -22,10 +22,11 @@ import stat
 import sys
 import time
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from govern import agent_runs, layout, phase, roles, tomlw
+from govern import agent_runs, layout, phase, profile, roles, tomlw
+from govern.decisions import mask_lines
 
 BUILD_DIR = f"{layout.GOV_DIR}/build"
 LEDGER = "ledger.toml"
@@ -34,6 +35,10 @@ STAGES = ("build", "review", "fix", "closing")
 STATUSES = ("pending", "running", "done", "blocked", "failed")
 # The rendered roles that write code: the only ones a unit goes to.
 CODE_ROLES = ("developer", "senior-developer")
+# The statuses of a unit that is not done: the only ones `unit drop` removes.
+DROPPABLE = ("pending", "blocked", "failed")
+# More commits than this between the review base and HEAD: `start` warns.
+FAR_BEHIND = 50
 # A phase's own folders, which no unit may be named after.
 RESERVED = ("review", "fix", "close")
 # File names the Write tool refuses a subagent: no brief names its report one of these.
@@ -86,20 +91,40 @@ def _fill(what: str) -> str:
 
 # The sections of a unit's brief the coordinator fills, each with what belongs there.
 UNIT_SECTIONS = (
+    ("Context", "what the agent needs to know before the task: what this code is for, and why "
+                "the unit exists"),
     ("Task", "what this unit must do, as a ranked list of five items at most"),
     ("Files", "the files this unit creates or changes"),
-    ("Tests", "the tests that prove it, each by name, and the command that runs only them"),
+    ("Tests", "the tests that prove it, each by name, and the command that runs only them; "
+                "name no whole-suite run here: the role's own rule and your gate after the "
+                "merge cover that"),
     ("Follow", "an existing implementation to follow, read end to end, or \"none\""),
     ("Out of scope", "what this unit must leave alone"),
 )
-FIX_SECTIONS = (
-    ("Fixes", "the findings to fix, ranked, five at most; each names its file, the test to "
-              "write first and see fail, then the change"),
-    ("Out of scope", "the findings ruled out or left for later, and anything else this pass "
-                     "must leave alone"),
+def fix_sections(red: str) -> tuple:
+    """The fix brief's sections; `red` is the pass's own red folder (`red-2` for `brief-2.md`)."""
+    return (
+        ("Fixes", "the findings to fix, ranked, five at most; copy each finding in full (file, "
+                  "line, the input that shows it), because no review report is in the fixer's "
+                  "worktree; each names its file, the test to write first and see fail "
+                  f"(its failing output is saved in {red}), then the change"),
+        ("Out of scope", "the findings ruled out or left for later, and anything else this pass "
+                         "must leave alone"),
+    )
+
+
+FIX_RUNNING_NOTE = ("A finding made on a running system is proved fixed on a running system, "
+                    "never on a copied page or a fixture.")
+UX_SECTIONS = (
+    ("What to launch and how", "the command that starts an isolated copy, and how to stop it"),
+    ("What to look at", "the pages or screens this phase changed, and what a user does on each"),
+    ("The design it must match", "the spec, mock-up or earlier screen it is compared with"),
 )
 CLOSE_SECTION = ("What landed and what was decided", "what landed and what was decided in this "
                                                      "phase, in the coordinator's words")
+RULINGS_HEADING = "## Rulings the coordinator made without the owner"
+AS_BUILT_NOTE = ("What was built differently from the plan goes in the project's decision log, "
+                 "never into the plan.")
 DONE_SECTION = ("Definition of done", "the phase's definition of done, as a checklist of "
                                       "things a command can show, in the order to check them")
 
@@ -116,8 +141,10 @@ class Ledger:
     base: str                          # the commit the phase branch left its source at, at start
     plan: str = ""                     # relative to the project's root; "" when there is none
     high_risk: bool = False
+    visual: bool = False
     stage: str = "build"
     rulings: list[str] = field(default_factory=list)
+    launched: list[str] = field(default_factory=list)   # the fix briefs `launch fix` has printed
     units: list[dict] = field(default_factory=list)
     origin: str = ""                   # `from`: the branch it was cut from; "" is the default
     crlf: bool = False                 # how the file on disk ends its lines, kept on a rewrite
@@ -150,7 +177,9 @@ def render(ledger: Ledger) -> str:
         head["from"] = ledger.origin
     if ledger.plan:
         head["plan"] = ledger.plan
-    head.update(high_risk=ledger.high_risk, stage=ledger.stage, rulings=list(ledger.rulings))
+    head.update(high_risk=ledger.high_risk, visual=ledger.visual, stage=ledger.stage, rulings=list(ledger.rulings))
+    if ledger.launched:
+        head["launched"] = list(ledger.launched)
     text = tomlw.dumps(head, HEADER)
     for unit in ledger.units:
         text += "\n[[unit]]\n" + tomlw.dumps({k: unit[k] for k in UNIT_KEYS})
@@ -170,11 +199,16 @@ def _shape(data: dict, folder: str) -> str | None:
         return "`from` is not text"
     if not isinstance(data.get("high_risk", False), bool):
         return "`high_risk` is not true or false"
+    if not isinstance(data.get("visual", False), bool):
+        return "`visual` is not true or false"
     if data.get("stage") not in STAGES:
         return f"`stage` is {data.get('stage')!r}, not one of {', '.join(STAGES)}"
     rulings = data.get("rulings", [])
     if not isinstance(rulings, list) or not all(isinstance(r, str) for r in rulings):
         return "`rulings` is not a list of text lines"
+    launched = data.get("launched", [])
+    if not isinstance(launched, list) or not all(isinstance(n, str) for n in launched):
+        return "`launched` is not a list of text lines"
     units = data.get("unit", [])
     if not isinstance(units, list) or not all(isinstance(u, dict) for u in units):
         return "`unit` is not a list of tables"
@@ -225,7 +259,9 @@ def load(path: Path) -> Ledger:
               "note": u.get("note", "")} for u in data.get("unit", [])]
     return Ledger(path=path, phase=data["phase"], branch=data["branch"], base=data["base"],
                   plan=data.get("plan", ""), origin=data.get("from", ""), high_risk=data.get("high_risk", False),
-                  stage=data["stage"], rulings=list(data.get("rulings", [])), units=units,
+                  visual=data.get("visual", False),
+                  stage=data["stage"], rulings=list(data.get("rulings", [])),
+                  launched=list(data.get("launched", [])), units=units,
                   crlf="\r\n" in text, bom=text.startswith(BOM))
 
 
@@ -408,18 +444,19 @@ def merge_base(root: Path, refs: list[str], default: str) -> str:
     return bases[0]
 
 
-def package(root: Path, ledger: Ledger) -> bytes:
-    """The review package: the commit list, the stat and the full diff from the base to HEAD,
-    each one plain git call, with the build folder itself left out of all three."""
+def _package_parts(root: Path, ledger: Ledger, diff: bool) -> bytes:
+    """The package's heading, commit list and stat, and with `diff` the full diff too, each
+    one plain git call, with the build folder itself left out of all of them."""
     prefix = phase._ask(root, "rev-parse", "--show-prefix")
     spec = ["--", ":(top)", f":(top,exclude,literal){prefix}{BUILD_DIR}"]
     base = review_base(root, ledger)
     span = f"{base}..HEAD"
+    steps = [("Commits", ["log", "--oneline", "--no-decorate", "--no-color", span]),
+             ("Stat", ["diff", "--stat", "--no-color", "--no-ext-diff", span])]
+    if diff:
+        steps.append(("Diff", ["diff", "-U10", "--no-color", "--no-ext-diff", span]))
     parts = []
-    for title, args in (
-            ("Commits", ["log", "--oneline", "--no-decorate", "--no-color", span]),
-            ("Stat", ["diff", "--stat", "--no-color", "--no-ext-diff", span]),
-            ("Diff", ["diff", "-U10", "--no-color", "--no-ext-diff", span])):
+    for title, args in steps:
         res = phase._run(root, *args, *spec)
         if res.returncode != 0:
             raise BuildError(f"git {args[0]} {span} failed: {phase._reason(res)} — no review "
@@ -429,6 +466,16 @@ def package(root: Path, ledger: Ledger) -> bytes:
     top = (f"# Review package: {ledger.phase} on {ledger.branch}, "
            f"{base[:12]}..{head[:12]}\n\n")
     return top.encode("utf-8") + b"\n".join(parts)
+
+
+def package(root: Path, ledger: Ledger) -> bytes:
+    """The review package: the commit list, the stat and the full diff from the base to HEAD."""
+    return _package_parts(root, ledger, True)
+
+
+def package_stat(root: Path, ledger: Ledger) -> bytes:
+    """The review package up to and including the stat, with no diff."""
+    return _package_parts(root, ledger, False)
 
 
 # ---------------------------------------------------------------------------- briefs
@@ -455,14 +502,20 @@ def unit_brief(ledger: Ledger, unit: dict, red: bool) -> str:
             + f"Produces: {_from_root(ledger, unit['id'], ledger.report(unit).name)}\n")
 
 
-def _material(root: Path, ledger: Ledger, folder: Path) -> str:
+def _material(root: Path, ledger: Ledger, folder: Path, diff: bool = True) -> str:
     """What a reviewer of the phase is handed: the plan, each unit's brief and report, and the
-    review package, each as a path from `folder`, the one the brief is in."""
+    review package (with `diff` False, its commit list and stat only), each as a path from
+    `folder`, the one the brief is in."""
     lines = [f"- Plan: {_rel(folder, root / ledger.plan)}"] if ledger.plan else []
     lines += [f"- Unit {u['id']}, {u['title']}: brief {_rel(folder, ledger.brief(u['id']))}, "
               f"report {_rel(folder, ledger.report(u))}" for u in ledger.units]
-    lines.append(f"- Review package (commit list, stat, full diff from the phase's base): "
-                 f"{_rel(folder, ledger.dir / 'review' / 'package.diff')}")
+    if diff:
+        lines.append(f"- Review package (commit list, stat, full diff from the phase's base): "
+                     f"{_rel(folder, ledger.dir / 'review' / 'package.diff')}")
+    else:
+        lines.append(f"- What changed (commit list and stat; open the files you probe, there "
+                     f"is no diff to read): "
+                     f"{_rel(folder, ledger.dir / 'review' / 'package-stat.txt')}")
     return "\n".join(lines) + "\n\n"
 
 
@@ -479,9 +532,19 @@ def qa_engineer_brief(root: Path, ledger: Ledger) -> str:
     return (f"# {ledger.phase} / review — qa-engineer\n\n"
             f"Verify the phase `{ledger.phase}` against its definition of done.\n\n"
             + _sections((DONE_SECTION,))
-            + _material(root, ledger, review)
+            + _material(root, ledger, review, diff=False)
             + f"Scratch files go only in {_rel(review, review / 'scratch')}.\n\n"
             + f"{REPORT_NOTE}\n{PATHS_NOTE}\nProduces: {_from_root(ledger, 'review', 'qa-engineer-report.md')}\n")
+
+
+def ux_reviewer_brief(root: Path, ledger: Ledger) -> str:
+    review = ledger.dir / "review"
+    return (f"# {ledger.phase} / review — ux-reviewer\n\n"
+            f"Launch the product as the phase `{ledger.phase}` leaves it and look at what it "
+            f"changed; the paths below are relative to the folder this brief is in.\n\n"
+            + _material(root, ledger, review)
+            + _sections(UX_SECTIONS)
+            + f"{REPORT_NOTE}\n{PATHS_NOTE}\nProduces: {_from_root(ledger, 'review', 'ux-reviewer-report.md')}\n")
 
 
 def fix_brief(ledger: Ledger, head: str, role: str, number: int) -> str:
@@ -490,9 +553,32 @@ def fix_brief(ledger: Ledger, head: str, role: str, number: int) -> str:
     suffix = f"-{number}" if number > 1 else ""
     return (f"# {ledger.phase} / fix — the fix pass{f' {number}' if number > 1 else ''}\n\n"
             f"Base commit: {head}\n\n"
-            + _sections(FIX_SECTIONS)
-            + f"{REPORT_NOTE}\n{PATHS_NOTE}\nProduces: "
+            + _sections(fix_sections(_from_root(ledger, "fix", f"red{suffix}")))
+            + f"{FIX_RUNNING_NOTE}\n\n{REPORT_NOTE}\n{PATHS_NOTE}\nProduces: "
             f"{_from_root(ledger, 'fix', f'{role}-report{suffix}.md')}\n")
+
+
+def _with_rulings(text: str, ledger: Ledger, markers) -> str:
+    """The close brief with its rulings section brought up to date; every other line is kept.
+    A heading inside a code fence or an HTML comment is text, never the section."""
+    block = [RULINGS_HEADING, ""] + [f"- {r}" for r in ledger.rulings] + [""]
+    lines = text.splitlines(keepends=True)
+    eol = "\r\n" if "\r\n" in text else "\n"
+    block = [line + eol for line in block]
+    live = mask_lines([line.rstrip("\r\n") for line in lines], markers)
+    starts = [i for i, line in enumerate(lines) if live[i] and line.rstrip("\r\n") == RULINGS_HEADING]
+    if starts:
+        end = next((i for i in range(starts[0] + 1, len(lines))
+                    if live[i] and lines[i].startswith("## ")), len(lines))
+        lines[starts[0]:end] = block
+    elif ledger.rulings:
+        heading = f"## {CLOSE_SECTION[0]}"
+        at_ = next((i for i, line in enumerate(lines)
+                    if live[i] and line.rstrip("\r\n") == heading), None)
+        if at_ is None:
+            return text
+        lines[at_:at_] = block
+    return "".join(lines)
 
 
 def close_brief(root: Path, ledger: Ledger) -> str:
@@ -506,10 +592,9 @@ def close_brief(root: Path, ledger: Ledger) -> str:
             + (f"Plan: {_rel(ledger.dir / 'close', root / ledger.plan)}\n\n"
                if ledger.plan else "")
             + ("## What landed\n\n" + landed + "\n" if landed else "")
-            + ("## Rulings the coordinator made without the owner\n\n" + rulings + "\n"
-               if rulings else "")
+            + (RULINGS_HEADING + "\n\n" + rulings + "\n" if rulings else "")
             + _sections((CLOSE_SECTION,))
-            + f"{REPORT_NOTE}\n{PATHS_NOTE}\nProduces: "
+            + f"{AS_BUILT_NOTE}\n\n{REPORT_NOTE}\n{PATHS_NOTE}\nProduces: "
             f"{_from_root(ledger, 'close', 'technical-writer-report.md')}\n")
 
 
@@ -572,13 +657,13 @@ def status_data(root: Path, ledger: Ledger | None, branch: str) -> dict:
     """What `build status --json` prints. The keys are a contract; with no build in flight
     they are all there, `phase` is null and the lists are empty."""
     if ledger is None:
-        return {"phase": None, "branch": branch, "base": None, "plan": None, "high_risk": False,
+        return {"phase": None, "branch": branch, "base": None, "plan": None, "high_risk": False, "visual": False,
                 "stage": None, "ledger": None, "rulings": [], "units": [], "done": 0,
                 "total": 0, "next": nothing_in_flight(branch)}
     units = [{**{k: u[k] for k in UNIT_KEYS}, "brief": _posix(root, ledger.brief(u["id"])),
               "report": _posix(root, ledger.report(u))} for u in ledger.units]
     return {"phase": ledger.phase, "branch": ledger.branch, "base": ledger.base,
-            "plan": ledger.plan or None, "high_risk": ledger.high_risk, "stage": ledger.stage,
+            "plan": ledger.plan or None, "high_risk": ledger.high_risk, "visual": ledger.visual, "stage": ledger.stage,
             "ledger": _posix(root, ledger.path), "rulings": list(ledger.rulings), "units": units,
             "done": sum(1 for u in ledger.units if u["status"] == "done"),
             "total": len(ledger.units), "next": next_action(ledger)}
@@ -602,6 +687,8 @@ def status_lines(ledger: Ledger) -> list[str]:
         facts.append(f"plan {ledger.plan}")
     if ledger.high_risk:
         facts.append("high-risk")
+    if ledger.visual:
+        facts.append("visual")
     lines = [f"Phase {ledger.phase} on {ledger.branch}: " + ", ".join(facts)]
     wide = {k: max([len(u[k]) for u in ledger.units], default=0) for k in ("id", "status", "role")}
     for u in ledger.units:
@@ -664,11 +751,24 @@ def _then(what: str, brief: str = "the brief") -> str:
     return f"fill in {brief}, commit it, then run `{roles.GOVERN} build launch {what}`"
 
 
-def start(ctx, name: str, plan: str | None, high_risk: bool, source: str | None = None) -> int:
+def _commits_since(root: Path, base: str) -> int:
+    """How many commits HEAD has past `base`; 0 when git cannot say."""
+    try:
+        res = phase._run(root, "rev-list", "--count", f"{base}..HEAD")
+    except phase.PhaseError:
+        return 0
+    text = phase._out(res)
+    return int(text) if res.returncode == 0 and text.isdigit() else 0
+
+
+def start(ctx, name: str, plan: str | None, high_risk: bool, source: str | None = None,
+          visual: bool = False) -> int:
     root = ctx.root
     if not SLUG.fullmatch(name):
         raise BuildError(f"{name!r} is not a phase name: lower-case letters, digits and "
                          f"hyphens, starting with a letter or a digit")
+    if visual:
+        _need_ux_reviewer(ctx)
     branch = checked_out(root)
     if not branch:
         raise BuildError("HEAD is detached: check out the phase branch first")
@@ -681,11 +781,13 @@ def start(ctx, name: str, plan: str | None, high_risk: bool, source: str | None 
     if phase._ask(root, "status", "--porcelain", "--untracked-files=no"):
         raise BuildError("uncommitted changes: commit or set them aside first")
     mine = current(root, branch)
-    if mine is not None:
+    # The same phase with no unit yet may be started again, to correct its base or origin.
+    again = mine is not None and mine.phase == name and not mine.units
+    if mine is not None and not again:
         raise BuildError(f"a build is already in flight on {branch}: {mine.phase} "
                          f"({_local(root, mine.path)})")
     path = build_dir(root) / name / LEDGER
-    if path.exists():
+    if path.exists() and not again:
         raise BuildError(f"the phase {name} already has a ledger, for the branch "
                          f"{load(path).branch} ({_local(root, path)}): pick another name")
     rel = ""
@@ -695,17 +797,26 @@ def start(ctx, name: str, plan: str | None, high_risk: bool, source: str | None 
             raise BuildError(f"--plan {plan}: no such file (a relative path is read from the "
                              f"project's root)")
         rel = _posix(root, file)
-    ledger = Ledger(path=path, phase=name, branch=branch,
-                    base=merge_base(root, refs, source or default),
-                    plan=rel, high_risk=high_risk, origin=source or default)
+    base = merge_base(root, refs, source or default)
+    behind = _commits_since(root, base)
+    if behind > FAR_BEHIND:
+        _say([f"the review will cover {behind} commits since {base[:12]}: if the phase branch "
+              f"was cut from another branch, start again with --from <branch>"])
+    if again:
+        ledger = replace(mine, base=base, plan=rel, high_risk=high_risk, visual=visual,
+                         origin=source or default)
+    else:
+        ledger = Ledger(path=path, phase=name, branch=branch, base=base, plan=rel,
+                        high_risk=high_risk, visual=visual, origin=source or default)
     ignore = build_dir(root) / ".gitignore"
     wrote_ignore = not ignore.exists()
     save(ledger, [(ignore, GITIGNORE.encode("utf-8"))] if wrote_ignore else [])
-    _keep_in_history(root, ledger, ignore if wrote_ignore else None)
-    lines = [f"started {name} on {branch}, from {ledger.origin} at {ledger.base[:12]}",
-             f"wrote {_local(root, path)}"]
+    if not again:
+        _keep_in_history(root, ledger, ignore if wrote_ignore else None)
+    lines = [f"{'restarted' if again else 'started'} {name} on {branch}, from {ledger.origin} "
+             f"at {ledger.base[:12]}", f"wrote {_local(root, path)}"]
     measure = ctx.cfg.checks.get("agent-measure")
-    if measure is not None and measure.level != "off":
+    if measure is not None and measure.level != "off" and not again:
         agent_runs.mark(ctx.home, root, name)
         lines.append(f"phase '{name}' started in {agent_runs.durable_path(ctx.home, root)}")
     _say(lines + [f"Next: {next_action(ledger)}"])
@@ -737,6 +848,14 @@ def _keep_in_history(root: Path, ledger: Ledger, wrote: Path | None) -> None:
         f"clone. Add the line `!{BUILD_DIR}/` after that rule in the file named, and run start "
         f"again (a `build/` pattern also works if it becomes `/build/`, which matches only the "
         f"top level); nothing was written")
+
+
+def _need_ux_reviewer(ctx) -> None:
+    """A visual phase goes to the `ux-reviewer`: refused when that role is not rendered."""
+    if "ux-reviewer" not in roles.rendered(ctx.cfg.checks[roles.CHECK].params):
+        raise BuildError("this phase is visual and `ux-reviewer` is not rendered: set "
+                         "`visual_paths` on `agent-roles`, run `" + roles.GOVERN
+                         + " agents render`, then try again")
 
 
 def _code_role(ctx, role: str | None) -> str:
@@ -774,6 +893,37 @@ def unit_add(ctx, uid: str, title: str, role: str | None, red: bool) -> int:
     ledger.units.append(unit)
     save(ledger, [(brief, unit_brief(ledger, unit, red).encode("utf-8"))])
     _say([f"added unit {uid} for {role}: {title}", f"wrote {_local(root, brief)}", _then(uid)])
+    return 0
+
+
+def unit_drop(ctx, uid: str) -> int:
+    """Remove a unit that is not done. Its folder goes too, unless git does not hold all of it (an
+    untracked, staged or edited file): that is the only copy."""
+    ledger = _need(ctx.root)
+    unit = ledger.unit(uid)
+    if unit is None:
+        known = ", ".join(u["id"] for u in ledger.units) or "it has none yet"
+        raise BuildError(f"the phase {ledger.phase} has no unit {uid} ({known})")
+    if unit["status"] not in DROPPABLE:
+        raise BuildError(f"{uid} is {unit['status']}: only a pending, blocked or failed unit "
+                         f"can be dropped")
+    ledger.units.remove(unit)
+    save(ledger)
+    folder = ledger.dir / uid
+    say = [f"dropped {uid}"]
+    if folder.exists():
+        rel = _local(ctx.root, folder)
+        try:
+            res = phase._run(ctx.root, "status", "--porcelain", "--untracked-files=all", "--",
+                             str(folder))
+            clean = res.returncode == 0 and not phase._out(res)
+        except phase.PhaseError:
+            clean = False
+        if clean:
+            profile.rmtree(folder)
+        else:
+            say.append(f"kept {rel}: it holds files git does not have")
+    _say(say)
     return 0
 
 
@@ -881,6 +1031,8 @@ def status(ctx, as_json: bool) -> int:
 def review(ctx) -> int:
     root = ctx.root
     ledger = _need(root)
+    if ledger.visual:
+        _need_ux_reviewer(ctx)
     if not ledger.units:
         raise BuildError(f"the phase {ledger.phase} has no units: there is nothing to review")
     waiting = [f"{u['id']} is {u['status']}" for u in ledger.units if u["status"] != "done"]
@@ -889,7 +1041,9 @@ def review(ctx) -> int:
     folder = ledger.dir / "review"
     ledger.stage = "review"
     reviewer, qa = folder / "code-reviewer-brief.md", folder / "qa-engineer-brief.md"
+    ux = folder / "ux-reviewer-brief.md"
     files = [(folder / "package.diff", package(root, ledger)),
+             (folder / "package-stat.txt", package_stat(root, ledger)),
              (reviewer, code_reviewer_brief(root, ledger).encode("utf-8"))]
     lines = [f"wrote {_local(root, path)}" for path, _ in files]
     if ledger.high_risk:
@@ -899,9 +1053,18 @@ def review(ctx) -> int:
         else:
             files.append((qa, qa_engineer_brief(root, ledger).encode("utf-8")))
             lines.append(f"wrote {_local(root, qa)}")
+    if ledger.visual:
+        if ux.exists():
+            lines.append(f"kept {_local(root, ux)} as it is (delete it to have it written "
+                         f"again)")
+        else:
+            files.append((ux, ux_reviewer_brief(root, ledger).encode("utf-8")))
+            lines.append(f"wrote {_local(root, ux)}")
     save(ledger, files)
     if ledger.high_risk:
         lines.append(f"fill in the definition of done in {_local(root, qa)}")
+    if ledger.visual:
+        lines.append(f"fill in what to launch and look at in {_local(root, ux)}")
     _say(lines + [_then("review", "the briefs that need it")])
     return 0
 
@@ -914,7 +1077,7 @@ def _filled(brief: Path) -> bool:
 def fix(ctx, role: str | None = None) -> int:
     root = ctx.root
     ledger = _need(root)
-    if ledger.stage not in ("review", "fix"):
+    if ledger.stage not in ("review", "fix", "closing"):
         raise BuildError(f"the phase {ledger.phase} is in stage {ledger.stage}: a fix pass "
                          f"follows its review, so run `{roles.GOVERN} build review` first")
     role = _code_role(ctx, role)
@@ -927,15 +1090,13 @@ def fix(ctx, role: str | None = None) -> int:
         if not brief.exists() or not _filled(brief):
             break
         number += 1
-    ledger.stage = "fix"
     if brief.exists():
-        save(ledger)
-        lines = [f"kept {_local(root, brief)} as it is (delete it to have it written again)"]
-    else:
-        head = phase._ask(root, "rev-parse", "HEAD")
-        save(ledger, [(brief, fix_brief(ledger, head, role, number).encode("utf-8"))])
-        lines = [f"wrote {_local(root, brief)}"]
-    _say(lines + [_then("fix", "its ranked list")])
+        raise BuildError(f"{_local(root, brief)} is not filled in yet: fill it in, or delete "
+                         "it, before asking for another fix brief")
+    ledger.stage = "fix"
+    head = phase._ask(root, "rev-parse", "HEAD")
+    save(ledger, [(brief, fix_brief(ledger, head, role, number).encode("utf-8"))])
+    _say([f"wrote {_local(root, brief)}", _then("fix", "its ranked list")])
     return 0
 
 
@@ -948,8 +1109,18 @@ def close(ctx) -> int:
     brief = ledger.dir / "close" / "brief.md"
     ledger.stage = "closing"
     if brief.exists():
-        save(ledger)
-        lines = [f"kept {_local(root, brief)} as it is (delete it to have it written again)"]
+        old = brief.read_bytes()
+        try:
+            text = old.decode("utf-8")
+        except UnicodeDecodeError:
+            text = None
+        new = _with_rulings(text, ledger, ctx.markers) if text is not None else None
+        if new is not None and new != text:
+            save(ledger, [(brief, new.encode("utf-8"))])
+            lines = [f"kept {_local(root, brief)}, with its rulings brought up to date"]
+        else:
+            save(ledger)
+            lines = [f"kept {_local(root, brief)} as it is (delete it to have it written again)"]
     else:
         save(ledger, [(brief, close_brief(root, ledger).encode("utf-8"))])
         lines = [f"wrote {_local(root, brief)}"]
@@ -961,6 +1132,19 @@ def close(ctx) -> int:
     return 0
 
 
+def _text(root: Path, brief: Path) -> str:
+    """A brief's text; a brief that is not UTF-8 is an error naming it, never a traceback."""
+    try:
+        return brief.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        raise BuildError(f"{_local(root, brief)} is not UTF-8") from None
+
+
+def _fix_briefs(ledger: Ledger) -> list[Path]:
+    """The fix briefs, in number order."""
+    return sorted((ledger.dir / "fix").glob("brief*.md"), key=lambda p: (len(p.name), p.name))
+
+
 def _covered(root: Path, ledger: Ledger, what: str) -> list[tuple[str, Path]]:
     """The (role, brief) pairs `build launch <what>` covers, each brief there."""
     govern = roles.GOVERN
@@ -969,15 +1153,17 @@ def _covered(root: Path, ledger: Ledger, what: str) -> list[tuple[str, Path]]:
         found = [("code-reviewer", ledger.dir / "review" / "code-reviewer-brief.md")]
         if ledger.high_risk:
             found.append(("qa-engineer", ledger.dir / "review" / "qa-engineer-brief.md"))
+        if ledger.visual:
+            found.append(("ux-reviewer", ledger.dir / "review" / "ux-reviewer-brief.md"))
         first = "review"
     elif what == "fix":
-        # The latest pass: an earlier one was launched when the next was written.
-        numbered = sorted((ledger.dir / "fix").glob("brief*.md"),
-                          key=lambda p: (len(p.name), p.name))
+        # Every pass not launched yet, in number order; when all were, the latest again.
+        numbered = _fix_briefs(ledger)
+        chosen = [p for p in numbered if p.name not in ledger.launched] or numbered[-1:]
         found = []
-        if numbered:
-            named = PRODUCES_ROLE.search(numbered[-1].read_text(encoding="utf-8"))
-            found = [(named.group(1) if named else "developer", numbered[-1])]
+        for path in chosen:
+            named = PRODUCES_ROLE.search(_text(root, path))
+            found.append((named.group(1) if named else "developer", path))
         first = "fix"
     elif what == "close":
         found = [("technical-writer", ledger.dir / "close" / "brief.md")]
@@ -996,6 +1182,9 @@ def _covered(root: Path, ledger: Ledger, what: str) -> list[tuple[str, Path]]:
     return found
 
 
+AGAIN = "every fix brief was launched before; this is the latest again:"
+
+
 def launch(ctx, what: str) -> int:
     """Check every brief `what` covers (filled in, committed at HEAD), mark a unit running, and
     print each launch prompt: the role, the brief's path from the repository root, and for a role
@@ -1005,7 +1194,7 @@ def launch(ctx, what: str) -> int:
     found = _covered(root, ledger, what)
     for _, brief in found:
         shown = _local(root, brief)
-        left = agent_runs.unfilled(brief.read_text(encoding="utf-8"))
+        left = agent_runs.unfilled(_text(root, brief))
         if left:
             raise BuildError(f"{shown}: the brief is not filled in ({', '.join(left)})")
         # Untracked, staged or changed since HEAD: anything but clean (--ignored, so that an
@@ -1015,6 +1204,9 @@ def launch(ctx, what: str) -> int:
     head = phase._ask(root, "rev-parse", "HEAD")
     prefix = phase._ask(root, "rev-parse", "--show-prefix")
     lines = []
+    again = what == "fix" and all(p.name in ledger.launched for p in _fix_briefs(ledger))
+    if again:
+        lines.append(AGAIN)
     for role, brief in found:
         lines += [f"launch {role} with the prompt:", launch_line(prefix + _posix(root, brief))]
         if role in WORKTREE_ROLES:
@@ -1023,6 +1215,9 @@ def launch(ctx, what: str) -> int:
     if unit is not None:
         unit["status"] = "running"
         unit["attempts"] += 1
+        save(ledger)
+    elif what == "fix" and not again:
+        ledger.launched += [brief.name for _, brief in found]
         save(ledger)
     _say(lines)
     return 0
@@ -1033,10 +1228,12 @@ def run(ctx, args) -> int:
     reason as `error:` on stderr and nothing changed."""
     try:
         if args.build_cmd == "start":
-            return start(ctx, args.phase, args.plan, args.high_risk, args.source)
+            return start(ctx, args.phase, args.plan, args.high_risk, args.source, args.visual)
         if args.build_cmd == "unit":
             if args.unit_cmd == "add":
                 return unit_add(ctx, args.id, args.title, args.role, args.red)
+            if args.unit_cmd == "drop":
+                return unit_drop(ctx, args.id)
             return unit_set(ctx, args.id, args.status, args.branch, args.commit, args.note,
                             args.role)
         if args.build_cmd == "launch":

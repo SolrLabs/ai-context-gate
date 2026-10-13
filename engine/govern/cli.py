@@ -777,6 +777,9 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
                                         "build rules, and remove the ones no longer configured")
     ar.add_argument("--check", action="store_true", dest="check_only",
                     help="write nothing; exit 1 when anything would change")
+    ar.add_argument("--untrack", action="store_true",
+                    help="when agent-roles is on in local.toml alone, stop git tracking the "
+                         "rendered files that were committed earlier (the files stay)")
     bd = sub.add_parser("build", help="the build ledger: the phase this branch has in flight, "
                                       "its units and briefs, and what to do next")
     bsub = bd.add_subparsers(dest="build_cmd", required=True)
@@ -785,6 +788,9 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     bs.add_argument("--plan", metavar="FILE", help="the phase's plan, from the project's root")
     bs.add_argument("--high-risk", action="store_true", dest="high_risk",
                     help="qa-engineer runs beside code-reviewer when the phase is reviewed")
+    bs.add_argument("--visual", action="store_true",
+                    help="ux-reviewer launches the product and looks at it when the phase is "
+                         "reviewed")
     bs.add_argument("--from", metavar="BRANCH", dest="source",
                     help="the branch the phase was cut from, which review measures against "
                          "(default: the default branch)")
@@ -796,6 +802,9 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     ba.add_argument("--role", help="a rendered role that writes code (default: developer)")
     ba.add_argument("--red", action="store_true",
                     help="the brief also names a folder for the failing test's output")
+    bx = busub.add_parser("drop", help="remove a unit that is not done (pending, blocked "
+                                       "or failed)")
+    bx.add_argument("id")
     be = busub.add_parser("set", help="update a unit; `running` adds one to its attempts")
     be.add_argument("id")
     be.add_argument("status", help="pending, running, done, blocked or failed")
@@ -897,7 +906,7 @@ def dispatch(ctx: Context, args) -> int:
         return cmd_runs(ctx, args)
     if args.cmd == "agents":
         from govern import roles
-        return roles.run(ctx, args.check_only)
+        return roles.run(ctx, args.check_only, untrack=args.untrack)
     if args.cmd == "build":
         from govern import build
         return build.run(ctx, args)

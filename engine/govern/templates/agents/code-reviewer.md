@@ -40,11 +40,11 @@ Report what you find, including anything the plan itself told the developer to d
 
 You are given earlier findings and a fix diff. Mark each finding ADDRESSED or NOT ADDRESSED with the line that shows it, and flag new breakage inside the fix diff only. Anything else is one line under "out of scope".
 
-## Before you hand back
+## Finish
 
 {{handback}}
 
-## Report
+**Your final message**
 
 Write your full findings to the file on the brief's `Produces:` line, with a shell heredoc (you have no Write tool), and return a summary of 200 words or fewer. Its first line is `Status: DONE` (or `BLOCKED` or `NEEDS_CONTEXT`, saying why). Its second line counts what you found, exactly in this shape:
 
