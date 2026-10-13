@@ -15,8 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from govern import text  # noqa: E402
 from govern.checks.memory import memory_index  # noqa: E402
-from test_base import Case  # noqa: E402
-from test_regressions import Workspace  # noqa: E402
+from base_support import Case  # noqa: E402
+from regressions_support import Workspace  # noqa: E402
 
 
 class Ctx:

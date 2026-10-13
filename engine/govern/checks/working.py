@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from fnmatch import fnmatch
 
-from govern.checks.docs import status_keyword
+from govern.checks.docs import all_ticked, status_keyword
 from govern.findings import Findings
 from govern.manifest import Param, check
 from govern.text import parse_frontmatter, read, word_count
@@ -47,6 +47,8 @@ def working_file_count(ctx, params, scope) -> Findings:
            "exempt": Param("list", ["HANDOFF.md", "traps*"],
                            "File names never treated as finished (glob patterns)",
                            looser="more"),
+           "ticked": Param("bool", True,
+                           "A working file whose every checkbox is ticked counts as finished"),
        })
 def finished_files(ctx, params, scope) -> Findings:
     f = Findings()
@@ -58,11 +60,14 @@ def finished_files(ctx, params, scope) -> Findings:
     for path in sorted(wf.glob("*.md")):
         if any(fnmatch(path.name, pat) for pat in params["exempt"]):
             continue
-        fm, _ = parse_frontmatter(read(path))
+        fm, body = parse_frontmatter(read(path))
         status = fm.get("status", "")
-        if status_keyword(status) not in params["finished_statuses"]:
-            continue
         where = f"{scope.name}/{ctx.rel(path)}"
+        if status_keyword(status) not in params["finished_statuses"]:
+            if params["ticked"] and all_ticked(body, ctx.markers):
+                f.warn(f"{where}: every box is ticked: delete it (git keeps it), or set its "
+                       f"status to complete")
+            continue
         if not ctx.committed(path):
             f.error(f"{where} is finished but was never committed — commit it once so git "
                     f"keeps it, then delete it")

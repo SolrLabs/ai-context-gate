@@ -41,10 +41,12 @@ and the plugin from the source when either is missing; nothing else ever fetches
 handled here, before any engine loads, so it works when the beta is broken or gone.
 """
 import errno
+import hashlib
 import json
 import os
 import re
 import sys
+import time
 import tomllib
 from pathlib import Path
 
@@ -106,9 +108,33 @@ def _local_engine(strict: bool = False) -> object:
     return _local_governance(strict).get("engine")
 
 
+BETA_NOTICE_SECONDS = 3600
+
+
+def _beta_notice_due(beta: str) -> bool:
+    """Whether the "running beta" line is due: this project's stamp for this beta is missing or
+    more than an hour old. It is touched when due; a stamp that cannot be read or touched means due."""
+    digest = hashlib.sha256(f"{ROOT}\n{beta}".encode("utf-8")).hexdigest()[:12]
+    stamp = HOME / ".local" / "state" / "context-gate" / f"beta-notice-{digest}"
+    try:
+        if time.time() - stamp.stat().st_mtime <= BETA_NOTICE_SECONDS:
+            return False
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return True
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.touch()
+    except OSError:
+        pass
+    return True
+
+
 def local_beta(pin: str) -> Path | None:
     """The beta engine local.toml names, when it can run here; else None, after one line saying
-    why. Never fatal: an unusable local.toml means the committed pin."""
+    why. Never fatal: an unusable local.toml means the committed pin. The "running beta" line
+    is said once an hour per project and beta."""
     if not LOCAL.is_file():
         return None
     off = f"running the committed pin {pin}; govern beta off to clear it"
@@ -124,7 +150,9 @@ def local_beta(pin: str) -> Path | None:
     if not (path / "govern" / "cli.py").is_file():
         note(f"beta {beta} is not installed, {off}")
         return None
-    note(f"running beta {beta} on this machine (committed pin {pin}); govern beta off to leave it")
+    if _beta_notice_due(beta):
+        note(f"running beta {beta} on this machine (committed pin {pin}); "
+             "govern beta off to leave it")
     return path
 
 

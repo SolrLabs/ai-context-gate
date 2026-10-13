@@ -43,9 +43,15 @@ from govern.text import read
            "high_risk_paths": Param("list", [],
                                     "Paths that make a phase high-risk, so qa-engineer runs "
                                     "beside code-reviewer"),
+           "visual_paths": Param("list", [],
+                                 "Paths whose change means someone must look at the running "
+                                 "product"),
            "escalate_after": Param("int", 2,
                                    "Failed or handed-back attempts by developer before a unit "
                                    "goes to senior-developer"),
+           "unit_gate": Param("str", "scoped",
+                              "What a unit runs before it hands back: `scoped` (its own tests; "
+                              "the coordinator runs the full gate after the merge) or `full`"),
            "housekeeping": Param("bool", True,
                                  "Whether the rules tell the coordinator to launch "
                                  "technical-writer and close the phase when a fix pass closes"),

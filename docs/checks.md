@@ -44,6 +44,7 @@ Each check has a level: `off`, `warn` or `error`. At `error`, a check reports wh
 | [`agent-measure`](#agent-measure) | `off` | Records what each subagent run cost (tokens summed over its requests, tool calls and time, largest results) and tells the coordinator in one line per run; `govern runs report` summarizes a phase. |
 | [`agent-roles`](#agent-roles) | `off` | The engine's agent roles and the coordinator's build rules are rendered into the project, and each rendered file matches what `agents render` would write. |
 | [`agent-references`](#agent-references) | `warn` | Every agent a governed doc, a skill, an agent definition or the build rules names has a definition in the agents directory. |
+| [`merged-branches`](#merged-branches) | `warn` | Local branches already merged into the default branch are named |
 
 ## Registry and checkouts
 
@@ -467,6 +468,7 @@ A working file whose status says it is finished should be deleted once it has sa
 | `max_days` | int | `7` | raised | Days a finished file may sit untouched |
 | `finished_statuses` | list | `["complete", "superseded"]` | a value is removed | Statuses that mean the file is finished |
 | `exempt` | list | `["HANDOFF.md", "traps*"]` | a value is added | File names never treated as finished (glob patterns) |
+| `ticked` | bool | `true` | — | A working file whose every checkbox is ticked counts as finished |
 
 ### `handoff-words`
 
@@ -750,11 +752,13 @@ The engine's agent roles and the coordinator's build rules are rendered into the
 | `authority` | str | `""` | — | What a brief answers to (a plan, a spec); empty renders "the plan or spec it names" |
 | `scoped_test` | str | `""` | — | The command that runs only the tests a unit touches |
 | `full_gate` | str | `""` | — | The command that runs the project's full gate |
-| `senior_triggers` | list | `["security: credentials, tokens, signing, authentication, access control, or input from outside the project (a download, an archive, pasted text)"]` | — | What sends a unit to senior-developer instead of developer |
+| `senior_triggers` | list | `["security: credentials, keys, tokens, signing, sign-in and sessions, the code that decides who may read or change protected data, or input from outside the project (a download, an archive, pasted text). A product rule about who may do what is not security."]` | — | What sends a unit to senior-developer instead of developer |
 | `operator_rules` | list | `[]` | — | Rules the operator gives every role, rendered above the project's own |
 | `handback_checks` | list | `[]` | — | Lines the operator adds to every role's hand-back checklist, each `Key: text` |
 | `high_risk_paths` | list | `[]` | — | Paths that make a phase high-risk, so qa-engineer runs beside code-reviewer |
+| `visual_paths` | list | `[]` | — | Paths whose change means someone must look at the running product |
 | `escalate_after` | int | `2` | — | Failed or handed-back attempts by developer before a unit goes to senior-developer |
+| `unit_gate` | str | `"scoped"` | — | What a unit runs before it hands back: `scoped` (its own tests; the coordinator runs the full gate after the merge) or `full` |
 | `housekeeping` | bool | `true` | — | Whether the rules tell the coordinator to launch technical-writer and close the phase when a fix pass closes |
 | `rules_file` | str | `".claude/rules/context-gate-build.md"` | — | Where the coordinator's build rules are rendered |
 
@@ -776,3 +780,22 @@ Every agent a governed doc, a skill, an agent definition or the build rules name
 | Parameter | Type | Default | Looser when | Meaning |
 |---|---|---|---|---|
 | `builtin` | list | `["general-purpose", "Explore", "Plan", "claude", "claude-code-guide", "statusline-setup"]` | a value is added | Agent names that need no definition here: the ones Claude Code provides |
+
+### `merged-branches`
+
+Local branches already merged into the default branch are named
+
+| | |
+|---|---|
+| Default level | `warn` |
+| Scope | Runs once for the governance root |
+| Ratchet | No |
+| Since | 0.7.0 |
+
+**Question:** Is a branch still here after its work was merged?
+
+**Why:** A merged branch holds nothing git lacks, and a pile of them hides the ones that matter.
+
+| Parameter | Type | Default | Looser when | Meaning |
+|---|---|---|---|---|
+| `keep` | list | `["main", "master", "development", "beta-*", "release-*"]` | a value is added | Branch names never reported |

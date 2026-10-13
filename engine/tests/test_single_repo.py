@@ -309,6 +309,28 @@ class RepoRelativeLabels(Base):
         self.assertNotIn("myproject/docs/HANDOFF.md", out)
 
 
+class FinishedFileNameInTheLimitMessage(Base):
+    def test_the_ratchet_message_names_the_file_by_its_repo_relative_path(self):
+        r = self.repo(extra="\n[checks.governed-doc-count]\nmax_docs = 0\n")
+        r.write("docs/old.md", fm("working", status="complete") + "Done.\n")
+
+        def git(*args):
+            subprocess.run(["git", "-C", str(r.root), "-c", "user.email=t@t",
+                            "-c", "user.name=t", "-c", "commit.gpgSign=false", *args],
+                           check=True, capture_output=True)
+
+        git("init", "-q")
+        git("add", "-A")
+        git("commit", "-qm", "work")
+        code, out, _ = r.run("check")
+        self.assertEqual(code, 1, out)
+        line = next(ln for ln in out.splitlines()
+                    if ln.startswith("  ERROR") and "governed_docs:" in ln)
+        self.assertTrue(line.endswith(
+            " baseline --allow-raise` Finished working files that could go: docs/old.md"), line)
+        self.assertNotIn("myproject/docs/old.md", line)
+
+
 class GeneratedBlockOwnership(Base):
     """A generated block configured under both `[blocks] workspace]` and `[blocks] project]`,
     pointed at the same file and id — single-repo mode's default shape stretched to blocks too:

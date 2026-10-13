@@ -1,5 +1,4 @@
-"""The Claude Code plugin: its session-start hook, the notice that points at its skill, and the
-rule that plugin and engine release as one version."""
+"""The plugin hooks: session start, usage, agents, a build in flight and the beta standing down."""
 from __future__ import annotations
 
 import json
@@ -13,16 +12,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-ENGINE = Path(__file__).resolve().parent.parent
-REPO = ENGINE.parent
-PLUGIN = REPO / "plugin"
-sys.path.insert(0, str(ENGINE))
-
-from govern import __version__, layout, notice  # noqa: E402
-
-BETA = "9.9.0-beta.1"
-BOTH = ("context-gate: both the beta and the stable plugin are enabled here, so every hook "
-        f"runs twice; govern beta on {BETA} re-applies the switch")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from plugin_support import *  # noqa: E402,F401,F403
 
 
 class Plugin(unittest.TestCase):
@@ -90,6 +81,16 @@ class Plugin(unittest.TestCase):
         text = (PLUGIN / "skills/plan/SKILL.md").read_text(encoding="utf-8")
         self.assertIn("holds only the work that sends it there", text)
 
+    def test_plan_skill_searches_what_exists_before_planning(self):
+        text = " ".join((PLUGIN / "skills/plan/SKILL.md").read_text(encoding="utf-8").split())
+        self.assertIn("search what exists", text)
+
+    def test_build_skill_carries_a_first_attempt_by_its_own_branch(self):
+        self.assertIn("by its own branch", self.build_text())
+
+    def test_build_skill_deletes_the_plan_file_after_the_last_checkpoint(self):
+        self.assertIn("delete the plan file", self.build_text())
+
     def test_options_skill_says_roles_need_a_new_session(self):
         text = (PLUGIN / "skills/options/SKILL.md").read_text(encoding="utf-8")
         self.assertIn("can be launched only from a new session", " ".join(text.split()))
@@ -104,6 +105,26 @@ class Plugin(unittest.TestCase):
     def build_text(self) -> str:
         text = (PLUGIN / "skills/build/SKILL.md").read_text(encoding="utf-8")
         return " ".join(text.split())     # a re-wrapped line must not fail a phrase
+
+    def test_build_skill_runs_the_full_gate_on_the_phase_branch_after_the_merge(self):
+        text = self.build_text()
+        self.assertIn("run the project's full gate on the phase branch", text)
+        self.assertNotIn("Run the project's gate on its branch", text)
+
+    def test_build_skill_says_what_a_red_gate_after_the_merge_means(self):
+        text = self.build_text()
+        self.assertIn('have no "After you merge a unit" line, the agent ran the full gate itself',
+                      text)
+        self.assertIn("Green: record it with `python3 .context-gate/bin/govern build unit set "
+                      "<id> done", text)
+        self.assertIn("Red: the unit you just merged is failed; leave the merge in place, launch "
+                      "nothing else from the phase branch until it is green again, and go to the "
+                      "failure bullet.", text)
+        self.assertIn("The gate is red after its merge, or the diff is not what the brief asked:",
+                      text)
+        self.assertNotIn("The gate is red on its branch", text)
+        self.assertIn("The fresh agent's brief says which tests fail and that the first attempt "
+                      "is already in its base.", text)
 
     def test_plan_skill_marks_owner_checkpoints(self):
         text = " ".join((PLUGIN / "skills/plan/SKILL.md").read_text(encoding="utf-8").split())
@@ -128,10 +149,55 @@ class Plugin(unittest.TestCase):
     def test_build_skill_never_briefs_a_beta_only_command(self):
         self.assertIn("runs the project's committed pin", self.build_text())
 
-    def test_build_skill_runs_the_gate_without_moving_the_shell(self):
+
+    def plan_text(self) -> str:
+        text = (PLUGIN / "skills/plan/SKILL.md").read_text(encoding="utf-8")
+        return " ".join(text.split())
+
+    def test_plan_skill_cuts_batches_not_small_phases(self):
+        text = self.plan_text()
+        self.assertNotIn("small phase of its own", text)
+        self.assertIn("A phase is everything up to the next owner checkpoint", text)
+        self.assertIn("Only a migration, or security work that later units build on", text)
+        self.assertIn("every phase pays for a review, a fix pass and a close", text)
+
+    def test_plan_skill_has_an_agents_table_the_owner_reviews(self):
+        text = self.plan_text()
+        self.assertLess(text.index("## Constraints"), text.index("## Agents"))
+        self.assertIn("| Step | Agent | Model | Effort | Why this one |", text)
+        self.assertIn('Reviewed: <who and when, or "(not yet)">', text)
+        self.assertIn("The owner reviews the `## Agents` table before any build", text)
+        self.assertIn("only on the owner's word", text)
+        self.assertIn("`python3 .context-gate/bin/govern check` before the plan is committed", text)
+
+    def test_build_skill_stops_on_an_unreviewed_agents_table(self):
         text = self.build_text()
-        self.assertIn("without moving your shell", text)
-        self.assertIn("Never `cd <worktree> && <gate>`", text)
+        self.assertIn("`Reviewed:` line is not filled in, stop and ask the owner", text)
+
+    def test_build_skill_times_a_slow_gate_twice(self):
+        self.assertIn("timed twice before anyone calls it slow", self.build_text())
+
+    def test_build_skill_starts_with_visual_and_from(self):
+        text = self.build_text()
+        self.assertIn("`--visual` when the phase touches a path the build rules list as visual", text)
+        self.assertIn("`--from <branch>` whenever the phase branch was not cut from the default branch", text)
+
+    def test_build_skill_checks_a_brief_against_itself(self):
+        text = self.build_text()
+        self.assertIn("check it against itself", text)
+        self.assertIn("carries one worked example", text)
+        self.assertIn("The existing tests the unit will change are named", text)
+        self.assertIn("points at no file under `.context-gate/build` that git ignores", text)
+        self.assertIn('only for a unit added with `--red`', text)
+
+    def test_build_skill_proves_a_running_system_fix_on_one(self):
+        self.assertIn("proved fixed on a running system, with the reviewer's own steps",
+                      self.build_text())
+
+    def test_build_skill_owner_changes_are_a_fix_pass(self):
+        text = self.build_text()
+        self.assertIn("Changes the owner asks for there are a fix pass", text)
+        self.assertIn("which works after `build close`", text)
 
     def test_build_skill_reports_before_phase_close(self):
         text = self.build_text()
@@ -250,8 +316,9 @@ class Plugin(unittest.TestCase):
         said = (f"context-gate: beta {newer} is installed (this project runs beta {BETA}): "
                 f"govern beta on {newer}")
         out = json.loads(self.hook(self.project))
-        self.assertEqual(out["systemMessage"], said)
-        self.assertEqual(out["hookSpecificOutput"]["additionalContext"], said)
+        # The same release, so the differing-beta line follows (its own test below).
+        self.assertEqual(out["systemMessage"].splitlines()[0], said)
+        self.assertEqual(out["hookSpecificOutput"]["additionalContext"].splitlines()[0], said)
         self.local(f'[governance]\nengine = "{newer}"\n')        # switched: nothing to say
         self.assertEqual(self.hook(self.project), "")
 
@@ -664,6 +731,53 @@ class AgentHooks(Plugin):
         self.start()
         self.assertTrue(self.resolved()["gates"])
 
+    NINE = "9.9.0-beta.9"
+
+    def test_hooks_follow_a_project_on_an_older_beta_of_the_same_release(self):
+        """The plugin is beta 9 and local.toml names beta 8: the options set there still resolve."""
+        self.beta_plugin(self.NINE)
+        self.pin(self.NINE)
+        self.local(f'[governance]\nengine = "9.9.0-beta.8"\n[checks.agent-measure]\n'
+                   f'level = "warn"\n')
+        self.start()
+        self.assertTrue(self.resolved()["measure"])
+
+    def test_hooks_do_not_follow_a_project_on_another_release(self):
+        self.beta_plugin(self.NINE)
+        self.pin(self.NINE)
+        self.local('[governance]\nengine = "9.10.0-beta.1"\n[checks.agent-measure]\n'
+                   'level = "warn"\n')
+        self.start()
+        self.assertIsNone(self.resolved())
+
+    def test_session_start_says_when_the_project_beta_differs(self):
+        self.beta_plugin(self.NINE)
+        self.pin(self.NINE)
+        said = ("context-gate: this project runs beta 9.9.0-beta.8; this machine's plugin is "
+                "beta 9.9.0-beta.9, and its hooks (usage alerts, agent gates, run measurement) "
+                "follow 9.9.0-beta.9.")
+        self.local('[governance]\nengine = "9.9.0-beta.8"\n')
+        self.assertIn(said, json.loads(self.start())["systemMessage"].splitlines())
+        self.local(f'[governance]\nengine = "{self.NINE}"\n')
+        self.assertNotIn("this machine's plugin is beta", self.start())
+
+    def test_session_start_says_when_the_settings_could_not_be_read(self):
+        said = ("context-gate: this project's settings could not be read by the plugin; usage "
+                "alerts, agent gates and run measurement are OFF for this session. Run python3 "
+                ".context-gate/bin/govern check.")
+        self.configure(self.GATES)
+        cfg = self.project / layout.CONFIG
+        cfg.write_text(cfg.read_text(encoding="utf-8").replace(
+            "schema = 1", 'schema = 1\nextensions = ["ext"]'), encoding="utf-8")
+        (self.project / "ext").mkdir()
+        (self.project / "ext" / "broken.py").write_text("raise RuntimeError('boom')\n",
+                                                        encoding="utf-8")
+        self.assertIn(said, json.loads(self.start())["systemMessage"].splitlines())
+
+    def test_nothing_is_said_when_the_option_is_simply_off(self):
+        self.configure(self.GATES.replace("error", "off"))
+        self.assertEqual(self.start(), "")
+
     def test_usage_set_only_in_local_toml_is_resolved(self):
         from govern import usage
         self.beta_plugin()
@@ -879,191 +993,6 @@ class BuildInFlight(Plugin):
         self.assertEqual(resolved["gates"]["briefed"], ["developer", "senior-developer"])
 
 
-class BetaSwitch(unittest.TestCase):
-    """The switch an old launcher writes (`context-gate@skills-dir`) is the name the beta plugin
-    had before it had one of its own: the beta engine corrects it, and the beta plugin's
-    session start removes the new key an old launcher's `beta off` leaves behind."""
-
-    OLD, NEW = layout.OLD_SKILLS_DIR_PLUGIN_ID, layout.SKILLS_DIR_PLUGIN_ID
-
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.tmp = Path(self._tmp.name)
-        self.addCleanup(self._tmp.cleanup)
-        self.home = self.tmp / "home"
-        self.home.mkdir()
-        self.project = self.tmp / "project"
-        (self.project / layout.GOV_DIR).mkdir(parents=True)
-        (self.project / layout.CONFIG).write_text(
-            f'[governance]\nengine = "{__version__}"\nschema = 1\n', encoding="utf-8")
-        (self.project / ".claude").mkdir()
-        self.settings = self.project / ".claude" / "settings.local.json"
-        # The plugin as a beta's install assembles it: named `context-gate-beta`.
-        self.built = self.tmp / "built"
-        shutil.copytree(PLUGIN, self.built)
-        shutil.copytree(ENGINE / "govern", self.built / "govern",
-                        ignore=shutil.ignore_patterns("__pycache__"))
-        manifest = self.built / ".claude-plugin" / "plugin.json"
-        data = json.loads(manifest.read_text(encoding="utf-8"))
-        manifest.write_text(json.dumps({**data, "name": layout.BETA_PLUGIN}), encoding="utf-8")
-
-    def put(self, data) -> bytes:
-        text = data if isinstance(data, str) else json.dumps(data, indent=2) + "\n"
-        self.settings.write_text(text, encoding="utf-8", newline="")
-        return self.settings.read_bytes()
-
-    def got(self) -> dict:
-        return json.loads(self.settings.read_text(encoding="utf-8"))
-
-    OTHERS = {"permissions": {"allow": ["Bash(ls)"]},
-              "enabledPlugins": {"a@b": True, "context-gate@skills-dir": True,
-                                 "context-gate@context-gate": False, "z@y": False},
-              "model": "opus"}
-
-    def test_the_old_ids_switch_becomes_the_new_ones_and_nothing_else_moves(self):
-        self.put(self.OTHERS)
-        line = notice.correct_old_launcher_switch(self.project)
-        self.assertEqual(len((line or "").splitlines()), 1)
-        self.assertIn("restart Claude Code to load it", line)
-        self.assertIn(self.NEW, line)
-        got = self.got()
-        self.assertEqual(list(got), ["permissions", "enabledPlugins", "model"])
-        self.assertEqual(got["permissions"], self.OTHERS["permissions"])
-        self.assertEqual(list(got["enabledPlugins"]),
-                         ["a@b", self.NEW, "context-gate@context-gate", "z@y"])
-        self.assertEqual(got["enabledPlugins"], {"a@b": True, self.NEW: True,
-                                                 "context-gate@context-gate": False, "z@y": False})
-        self.assertEqual(list(self.settings.parent.glob("*.tmp")), [])
-
-    def test_the_correction_is_idempotent(self):
-        self.put(self.OTHERS)
-        self.assertIsNotNone(notice.correct_old_launcher_switch(self.project))
-        once = self.settings.read_bytes()
-        self.assertIsNone(notice.correct_old_launcher_switch(self.project))
-        self.assertEqual(self.settings.read_bytes(), once)
-        self.assertNotIn(self.OLD, self.got()["enabledPlugins"])
-
-    def test_the_new_id_set_to_false_is_set_to_true(self):
-        self.put({"enabledPlugins": {self.OLD: True, self.NEW: False}})
-        self.assertIsNotNone(notice.correct_old_launcher_switch(self.project))
-        self.assertEqual(self.got(), {"enabledPlugins": {self.NEW: True}})
-
-    def test_every_other_state_changes_nothing(self):
-        cases = {
-            "old id off": {"enabledPlugins": {self.OLD: False}},
-            "old id absent": {"enabledPlugins": {"a@b": True}},
-            "new id on already": {"enabledPlugins": {self.NEW: True}},
-            "both on": {"enabledPlugins": {self.OLD: True, self.NEW: True}},
-            "no enabledPlugins": {"permissions": {}},
-            "enabledPlugins is a list": {"enabledPlugins": [self.OLD]},
-            "not an object": [self.OLD],
-            "old id is a string": {"enabledPlugins": {self.OLD: "true"}},
-            "malformed": "{not json",
-            "empty": "",
-        }
-        for name, data in cases.items():
-            with self.subTest(state=name):
-                before = self.put(data)
-                self.assertIsNone(notice.correct_old_launcher_switch(self.project))
-                self.assertEqual(self.settings.read_bytes(), before)
-        self.settings.write_bytes(b'{"enabledPlugins": {"x": \xff}}')
-        self.assertIsNone(notice.correct_old_launcher_switch(self.project))
-        self.settings.unlink()
-        self.assertIsNone(notice.correct_old_launcher_switch(self.project))
-        self.assertFalse(self.settings.exists())
-        shutil.rmtree(self.project / ".claude")
-        self.assertIsNone(notice.correct_old_launcher_switch(self.project))
-        self.assertFalse((self.project / ".claude").exists())
-
-    def test_a_file_that_cannot_be_written_is_left_as_it_was(self):
-        before = self.put(self.OTHERS)
-        with mock.patch.object(os, "replace", side_effect=PermissionError(13, "in use")):
-            self.assertIsNone(notice.correct_old_launcher_switch(self.project))
-        self.assertEqual(self.settings.read_bytes(), before)
-        self.assertEqual(list(self.settings.parent.iterdir()), [self.settings])
-
-    def test_the_files_own_bom_and_line_endings_are_kept(self):
-        text = json.dumps(self.OTHERS, indent=2).replace("\n", "\r\n") + "\r\n"
-        self.settings.write_bytes(b"\xef\xbb\xbf" + text.encode("utf-8"))
-        self.assertIsNotNone(notice.correct_old_launcher_switch(self.project))
-        raw = self.settings.read_bytes()
-        self.assertTrue(raw.startswith(b"\xef\xbb\xbf"))
-        self.assertEqual(raw.count(b"\r\n"), raw.count(b"\n"))
-        self.assertIn(self.NEW, self.got_bom(raw))
-
-    @staticmethod
-    def got_bom(raw: bytes) -> dict:
-        return json.loads(raw.decode("utf-8-sig"))["enabledPlugins"]
-
-    # The beta plugin's session start, after an old launcher's `beta off`.
-    def hook(self) -> str:
-        env = {**os.environ, "HOME": str(self.home), "CLAUDE_PROJECT_DIR": str(self.project),
-               "CONTEXT_GATE_NO_UPDATE_CHECK": "1"}
-        res = subprocess.run([sys.executable, str(self.built / "hooks" / "session_start.py")],
-                             input="{}", env=env, capture_output=True, text=True)
-        self.assertEqual((res.returncode, res.stderr), (0, ""))
-        return res.stdout
-
-    LEFT = {"permissions": {"deny": ["Bash(rm:*)"]},
-            "enabledPlugins": {"a@b": True, "context-gate-beta@skills-dir": True,
-                               "context-gate@context-gate": True},
-            "model": "opus"}
-    SAID = ("the beta is off in this project; removed context-gate-beta@skills-dir from "
-            ".claude/settings.local.json. Restart Claude Code to unload the beta plugin.")
-
-    def test_the_beta_plugin_removes_its_key_where_no_beta_is_on(self):
-        self.put(self.LEFT)
-        out = json.loads(self.hook())
-        self.assertIn(self.SAID, out["systemMessage"].splitlines())
-        self.assertIn(self.SAID, out["hookSpecificOutput"]["additionalContext"])
-        got = self.got()
-        self.assertEqual(list(got), ["permissions", "enabledPlugins", "model"])
-        self.assertEqual(got["enabledPlugins"], {"a@b": True, "context-gate@context-gate": True})
-        self.assertEqual(got["permissions"], self.LEFT["permissions"])
-        once = self.settings.read_bytes()
-        self.assertNotIn("the beta is off", self.hook())    # idempotent: nothing left to remove
-        self.assertEqual(self.settings.read_bytes(), once)
-
-    def test_the_beta_plugin_leaves_a_project_on_a_beta_alone(self):
-        before = self.put(self.LEFT)
-        (self.project / layout.LOCAL).write_text(
-            f'[governance]\nengine = "{BETA}"\n', encoding="utf-8")
-        self.assertNotIn("the beta is off", self.hook())
-        self.assertEqual(self.settings.read_bytes(), before)
-        # A local.toml that cannot be read says nothing about the beta: also left alone.
-        (self.project / layout.LOCAL).write_bytes(b"\xff[")
-        self.assertNotIn("the beta is off", self.hook())
-        self.assertEqual(self.settings.read_bytes(), before)
-
-    def test_the_stable_plugin_and_an_ungoverned_project_are_left_alone(self):
-        before = self.put(self.LEFT)
-        manifest = self.built / ".claude-plugin" / "plugin.json"
-        data = json.loads(manifest.read_text(encoding="utf-8"))
-        manifest.write_text(json.dumps({**data, "name": layout.PLUGIN}), encoding="utf-8")
-        self.assertNotIn("the beta is off", self.hook())
-        self.assertEqual(self.settings.read_bytes(), before)
-        manifest.write_text(json.dumps({**data, "name": layout.BETA_PLUGIN}), encoding="utf-8")
-        (self.project / layout.CONFIG).unlink()
-        self.assertEqual(self.hook(), "")
-        self.assertEqual(self.settings.read_bytes(), before)
-
-    def test_a_beta_plugin_session_without_the_key_or_the_file_says_nothing(self):
-        self.assertEqual(self.hook(), "")
-        self.put({"enabledPlugins": {"a@b": True}})
-        self.assertEqual(self.hook(), "")
-        self.put({"enabledPlugins": {self.NEW: False}})
-        self.assertEqual(self.hook(), "")
-        self.put("{not json")
-        self.assertEqual(self.hook(), "")
-        shutil.rmtree(self.project / ".claude")
-        self.assertEqual(self.hook(), "")
-        self.assertFalse((self.project / ".claude").exists())
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
 class BetaStandsDown(unittest.TestCase):
     """The beta copy of the plugin acts only in a project that is on a beta, so it and the
     released plugin never both act: `beta off` deletes local.toml."""
@@ -1122,3 +1051,7 @@ class BetaStandsDown(unittest.TestCase):
     def test_with_the_beta_off_the_usage_hook_says_nothing(self):
         out = self.run_hook("usage.py", {"session_id": "S", "hook_event_name": "SessionEnd"})
         self.assertEqual(out, "")
+
+
+if __name__ == "__main__":
+    unittest.main()

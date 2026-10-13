@@ -35,12 +35,16 @@ beta, that has `govern build`.
 3. Read the plan (`$ARGUMENTS`, or ask which). Pick the phase: the one named, else the first not
    done. Read that phase in full and the plan's constraints. If there is no plan and the work is
    one unit, say so and treat the request as a one-unit phase; for more, use this plugin's `plan` skill.
+   When the plan has an `## Agents` section whose `Reviewed:` line is not filled in, stop and ask
+   the owner to review it.
 4. Cut the phase branch from the up-to-date default branch: `git switch -c phase/<slug>`. Never
    build on the default branch.
 5. Run the project's full gate once on the fresh branch. If it is red before you start, stop and
-   say so: you cannot tell your breakage from what was already there.
+   say so: you cannot tell your breakage from what was already there. A gate that looks slow is
+   timed twice before anyone calls it slow.
 6. `python3 .context-gate/bin/govern build start <slug> --plan <file>` (add `--high-risk` when the
-   plan marks the phase so).
+   plan marks the phase so). Add `--visual` when the phase touches a path the build rules list as
+   visual. Add `--from <branch>` whenever the phase branch was not cut from the default branch.
 7. Scan the phase's units against each other: any two that change the same file or interface run
    in order, not side by side. Where the plan is silent or two units disagree, decide, and record
    it: `python3 .context-gate/bin/govern build ruling "<what you decided> - <why> - <what it costs
@@ -60,7 +64,13 @@ beta, that has `govern build`.
    to follow and confirm the function or test is there. An agent's worktree has no
    `.context-gate/local.toml`, so `govern` there runs the project's committed pin, not a beta:
    never brief an agent to run `govern agents render` or a command only the beta has. Leave the
-   last lines (`Produces:`, `Red:`) as the command wrote them.
+   last lines (`Produces:`, `Red:`) as the command wrote them. A brief asks for a test "written
+   first and seen failing" only for a unit added with `--red`.
+   Before the brief is committed, check it against itself. Each test it asks for is read against
+   the task line it proves. A rule with a sign, an order or a position carries one worked example.
+   The existing tests the unit will change are named, so the agent does not stop on them. It
+   points at no file under `.context-gate/build` that git ignores (a report is not in the next
+   agent's worktree: copy what it needs into the brief).
 3. Commit the ledger and the brief on the phase branch.
 4. `python3 .context-gate/bin/govern build launch <id>`. It checks the brief is filled in and
    committed, marks the unit running, and prints the launch prompt: a `Brief:` line and a `Base:`
@@ -74,22 +84,28 @@ beta, that has `govern build`.
      (`git diff <base>..<its branch>`, where the base is the `Base:` you launched it with, never
      `HEAD~1`). An agent in a worktree writes its report inside that worktree, beside its copy of
      the brief; the line you are shown when it finishes names the file.
-     Check it did what the brief says and nothing else. Run the project's gate on its branch without
-     moving your shell: `git -C <worktree>`, the tool's own directory option, or a subshell,
-     `(cd <worktree> && <gate>)`. Never `cd <worktree> && <gate>`: your shell stays there, and every
-     later command runs in the agent's tree. Then
-     merge its branch into the phase branch, and record it:
+     Check it did what the brief says and nothing else. Then merge its branch into the phase
+     branch. Then run the project's full gate on the phase branch (when the project's build
+     rules have no "After you merge a unit" line, the agent ran the full gate itself: read its
+     result and skip this run). Green: record it with
      `python3 .context-gate/bin/govern build unit set <id> done --branch <b> --commit <c>`.
      That also copies the unit's report and failing output out of the agent's worktree into
-     this checkout's build folder, where the reviewers will look for them.
+     this checkout's build folder, where the reviewers will look for them. Red: the unit you
+     just merged is failed; leave the merge in place, launch nothing else from the phase branch
+     until it is green again, and go to the failure bullet.
    - `BLOCKED` or `NEEDS_CONTEXT`: `... unit set <id> blocked --note "<why>"`. Decide what it
      needs. If the brief was wrong, fix the brief and launch a **fresh** agent. If it stopped on a
      `senior-developer` trigger, or the developer has now failed it as many times as the build
      rules allow, hand it up: `... unit set <id> pending --role senior-developer` (the brief then
      promises a report of its own, so the earlier one is kept), add the earlier report's file name
-     to the brief, and launch `senior-developer`. Never resume the old agent.
-   - The gate is red on its branch, or the diff is not what the brief asked: `... unit set <id>
+     to the brief, and launch `senior-developer`. Never resume the old agent. A first attempt's
+     work reaches the next agent by its own branch: have it committed there and name the branch
+     in the new brief. Never merge it into the phase branch while that would leave the phase
+     branch red: every unit launched after starts from it.
+   - The gate is red after its merge, or the diff is not what the brief asked: `... unit set <id>
      failed --note "<what>"`, then a fresh agent with a brief that says exactly what is wrong.
+     The fresh agent's brief says which tests fail and that the first attempt is already in its
+     base.
    - A line telling you a contract was not met means the report or the failing-test output the
      brief promised does not exist. Treat the unit as failed.
 6. Commit the ledger, and push the phase branch (`git push -u <remote> phase/<slug>` the first
@@ -128,15 +144,18 @@ If nothing stands, skip to 5.
    report into this checkout.
 3. The fix is not reviewed again. The gate and your own reading of the fix diff close it. The one
    exception: a fix that touched a high-risk path gets `qa-engineer`'s failed probes re-run, by a
-   brief that lists only those probes.
+   brief that lists only those probes. A finding made on a running system is proved fixed on a
+   running system, with the reviewer's own steps.
 
 ## 5. Close
 
 1. The owner's turn, when the plan's "Done when" has a line for them: launch an isolated copy of
    the build yourself if the project says how, confirm the change is really there, then tell the
    owner it is ready and what to look at, with what right and wrong look like. Do not hand them a
-   command to work out. Wait for their word before closing. With no such line, do not stop for the owner: tick the
-   lines on your own evidence and go on.
+   command to work out. Wait for their word before closing. Changes the owner asks for there are a fix pass: run
+   `python3 .context-gate/bin/govern build fix` again, which works after `build close`. With no such line, do not stop for the owner: tick the
+   lines on your own evidence and go on. When the owner passes the checkpoint of a plan's last
+   phase, delete the plan file, fix the pointers to it, and say so: git keeps it.
 2. Tick the plan's "Done when" lines against evidence you saw in this session, never against a
    report alone. A line you could not show stays open, marked `(unverified: needs <what>)`.
 3. `python3 .context-gate/bin/govern build close`. Fill in what its brief leaves for you (what

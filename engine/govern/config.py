@@ -106,6 +106,7 @@ class CheckSettings:
     reason: str | None = None
     source: dict[str, str] = field(default_factory=dict)   # key -> which layer set it
     ratchet: bool = True       # for a check whose breaches the ratchet tracks
+    level_before_local: str | None = None   # the level just before local.toml first set one
 
 
 @dataclass
@@ -195,9 +196,11 @@ def _load_toml(path: Path) -> dict:
 
 
 def _local_layer(root: Path) -> dict | None:
-    """local.toml, when this engine is the beta it names: the top layer, this machine only.
-    Any other engine never reads it (a stable engine must not trip on a beta's checks). Read as
-    the entry point reads it, so the two agree on which engine the file names."""
+    """local.toml, when this engine is a beta and the file names a beta of the same release
+    (major.minor.patch): the top layer, this machine only. The plugin holds one beta per machine,
+    so its hooks must follow a project still on an earlier or later beta of that release. Any
+    other engine, a stable one or another release, never reads it (a stable engine must not trip
+    on a beta's checks)."""
     if not versions.is_beta(__version__):
         return None
     try:
@@ -206,7 +209,11 @@ def _local_layer(root: Path) -> dict | None:
     except (OSError, ValueError):
         return None
     gov = data.get("governance", {})
-    if not isinstance(gov, dict) or gov.get("engine") != __version__:
+    if not isinstance(gov, dict):
+        return None
+    named = gov.get("engine")
+    if not isinstance(named, str) or not versions.is_beta(named) \
+            or versions.parse(named)[:3] != versions.parse(__version__)[:3]:
         return None
     extra = sorted(set(gov) - {"engine", "plugins_before"}) \
         + sorted(set(data) - {"governance", "checks"})
@@ -610,6 +617,8 @@ def _resolve_checks(layers: list[tuple[str, dict]], require_reasons: bool,
                             and manifest.LEVELS.index(value) < manifest.LEVELS.index(s.level) \
                             and not table.get("reason"):
                         overrides.append((cid, "level"))
+                    if layer == "local" and s.level_before_local is None:
+                        s.level_before_local = s.level
                     s.level = value
                 elif key == "reason":
                     _check_type(where, value, "str")

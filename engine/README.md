@@ -184,11 +184,11 @@ tools/ci/run-tests.sh --host                          # the same, plus the plugi
 tools/ci/run-tests.sh                                 # and again on Python 3.11 in Docker
 ```
 
-Run from the repo root. `engine/tests/test_regressions.py` holds the engine's behavioral tests,
+Run from the repo root. `engine/tests/test_regressions_*.py` hold the engine's behavioral tests,
 each named after the behavior it pins.
 
 `engine/tests/expected/` holds the output of `govern diff` for one fixture, as text and as JSON,
-compared byte for byte (`test_changes.py`). After a deliberate change to that output, regenerate
+compared byte for byte (`test_changes_report.py`). After a deliberate change to that output, regenerate
 both files and review the difference:
 
 ```sh

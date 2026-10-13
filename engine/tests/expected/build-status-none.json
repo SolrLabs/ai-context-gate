@@ -4,6 +4,7 @@
   "base": null,
   "plan": null,
   "high_risk": false,
+  "visual": false,
   "stage": null,
   "ledger": null,
   "rulings": [],
