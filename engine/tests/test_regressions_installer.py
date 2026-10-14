@@ -368,6 +368,74 @@ class Installer(Base):
         self.assertEqual(self.snapshot(root), before)
 
 
+class LocalOnlyRoles(Base):
+    """`uninstall` takes the lines `agents render` put in the repository's exclude file with it,
+    and says nothing of a file that holds none."""
+
+    def installed(self):
+        from govern import roles
+        w = self.ws()
+        cfg = self.tmp / "config.toml"
+        shutil.move(str(w.root / CFG), str(cfg))
+        (w.root / layout.GOV_DIR).rmdir()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(installer.main(["install", "--root", str(w.root),
+                                             "--config", str(cfg)]), 0)
+        res = subprocess.run(["git", "-C", str(w.root), "init", "-q"], capture_output=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return w.root, roles.exclude_file(w.root)
+
+    def uninstall(self, root):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = installer.main(["uninstall", "--root", str(root)])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_uninstall_removes_the_exclude_block(self):
+        from govern import roles
+        root, exclude = self.installed()
+        wtext(exclude, "*.log\n")
+        roles.set_block(exclude, ["/.claude/agents/developer.md"])
+        self.assertIn("developer.md", exclude.read_text(encoding="utf-8"))
+        wtext(root / roles.LOCAL_RECORD, "")
+        code, out, err = self.uninstall(root)
+        self.assertEqual(code, 0, err)
+        self.assertIn("  removed      the context-gate lines in .git/info/exclude\n", out)
+        self.assertEqual(exclude.read_text(encoding="utf-8"), "*.log\n")
+
+    def test_uninstall_without_a_local_record_leaves_the_block(self):
+        from govern import roles
+        root, exclude = self.installed()
+        roles.set_block(exclude, ["/.claude/agents/developer.md"])
+        before = exclude.read_bytes()
+        self.assertFalse((root / roles.LOCAL_RECORD).exists())
+        code, out, err = self.uninstall(root)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(exclude.read_bytes(), before)
+        self.assertNotIn("exclude", out)
+
+    def test_uninstall_says_when_git_cannot_answer(self):
+        from govern import roles
+        root, exclude = self.installed()
+        roles.set_block(exclude, ["/.claude/agents/developer.md"])
+        wtext(root / roles.LOCAL_RECORD, "")
+        before = exclude.read_bytes()
+        with mock.patch.object(roles, "_git", return_value=None):
+            code, out, err = self.uninstall(root)
+        self.assertEqual(code, 0, err)
+        self.assertRegex(out, r"(?m)^  left         the context-gate lines in the repository's "
+                              r"exclude file \(.+\)$")
+        self.assertEqual(exclude.read_bytes(), before)
+
+    def test_uninstall_with_no_block_says_nothing_of_it(self):
+        root, exclude = self.installed()
+        wtext(exclude, "*.log\n")
+        code, out, err = self.uninstall(root)
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("context-gate lines", out)
+        self.assertEqual(exclude.read_text(encoding="utf-8"), "*.log\n")
+
+
 class InstallBaselinesTodaysBreaches(Base):
     """Installing must not leave the gate red over a breach that predates the install, and must
     never raise an entry already in the baseline."""

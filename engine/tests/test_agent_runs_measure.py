@@ -907,5 +907,55 @@ class ChecklistUnitGate(unittest.TestCase):
         self.assertIn("the full gate's result line", self.texts(unit_gate="full")["developer"]["Gate"])
 
 
+class ReportCountsWhatHappened(HookCase):
+    def test_senior_suggestion_counts_its_own_runs(self):
+        tok = lambda n: {"requests": 1, "input_tokens": n, "cache_creation_input_tokens": 0,
+                         "cache_read_input_tokens": 0, "output_tokens": 0, "context_at_end": n}
+        runs = [row("s", "senior-developer", tokens=tok(1000))] + [
+            row(f"d{i}", "developer", tokens=tok(10)) for i in range(8)]
+        found = [s for s in agent_runs.suggestions(runs) if "senior_triggers" in s]
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("in 1 of 9 runs", found[0])
+
+    def second_run(self, message, to="a1", age=0):
+        self.launch("Run date.")
+        self.stop(transcript=self.transcript([("m1", USAGE, "done")]))
+        if message:
+            self.fire("PreToolUse", tool_name="SendMessage",
+                      tool_input={"to": to, "message": "more"})
+        if age:
+            marker = self.state / "resume-by-name.json"
+            agent_runs.write_json(marker, {**agent_runs.read_json(marker),
+                                           "t": time.time() - age})
+        self.fire("SubagentStart", agent_id="a1", agent_type="general-purpose")
+        self.stop(transcript=self.transcript([("m1", USAGE, "one"), ("m2", USAGE, "done")]))
+        return self.rows()[-1]
+
+    def test_wake_without_a_message_is_not_a_resume(self):
+        second = self.second_run(message=False)
+        self.assertEqual((second["resumed"], second["woke"]), (False, True))
+        self.assertEqual(second["tokens"]["requests"], 1)
+        self.assertEqual(second["tokens"]["cache_read_input_tokens"], 1000)
+
+    def test_resume_by_message_is_a_resume(self):
+        second = self.second_run(message=True)
+        self.assertEqual((second["resumed"], second["woke"]), (True, False))
+
+    def test_resume_by_name_is_a_resume(self):
+        second = self.second_run(message=True, to="the-developer")
+        self.assertEqual((second["resumed"], second["woke"]), (True, False))
+        self.assertFalse((self.state / "resume-by-name.json").exists())
+
+    def test_old_named_message_is_not_a_resume(self):
+        second = self.second_run(message=True, to="the-developer",
+                                 age=agent_runs.HELD_BRIEF_SECONDS + 5)
+        self.assertEqual((second["resumed"], second["woke"]), (False, True))
+        self.assertFalse((self.state / "resume-by-name.json").exists())
+
+    def test_woken_runs_bring_no_resumed_suggestion(self):
+        runs = [row(f"w{i}", resumed=False, woke=True) for i in range(4)]
+        self.assertEqual([s for s in agent_runs.suggestions(runs) if "were resumed" in s], [])
+
+
 if __name__ == "__main__":
     unittest.main()

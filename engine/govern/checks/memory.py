@@ -75,7 +75,8 @@ def memory_index(ctx, params) -> Findings:
             k = len([t for t in memory_links(line) if is_memory_file(t)])
             if k > 1:
                 f.warn(f"memory index: line {i} links {k} memories — one memory per line, "
-                       f"so the limit counts memories ({path})")
+                       f"so the limit counts memories ({path}); an engine before 0.7.0 counts "
+                       f"lines instead, so splitting a line can put it over max_lines there")
         if exempt_types and memory_kind(path, line) in exempt_types:
             exempt += 1
         else:

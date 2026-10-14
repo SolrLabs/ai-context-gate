@@ -333,3 +333,91 @@ class LocalOnlyRender(Base):
         self.assertEqual(code, 0, out + err)
         self.assertFalse((r.root / roles.LOCAL_RECORD).exists())
         self.assertNotIn(BLOCK_START, raw(self.exclude(r)))
+
+
+class WhyNotRendered(Base):
+    """A missing or stale role file says why, by where the roles are kept."""
+
+    project = LocalOnlyRender.project
+
+    def committed(self) -> SingleRepo:
+        (self.tmp / "committed").mkdir()
+        r = SingleRepo(self.tmp / "committed", extra=ON)
+        record_install(r.root)
+        code, out, err = r.run("agents", "render")
+        self.assertEqual(code, 0, out + err)
+        return r
+
+    def local(self) -> SingleRepo:
+        patch = mock.patch.object(config, "__version__", BETA)   # only a beta reads local.toml
+        patch.start()
+        self.addCleanup(patch.stop)
+        r = self.project()
+        code, out, err = r.run("agents", "render")
+        self.assertEqual(code, 0, out + err)
+        return r
+
+    def test_lost_local_file_says_a_checkout_removes_it(self):
+        r = self.local()
+        (r.root / AGENTS / "developer.md").unlink()
+        code, out, _ = r.run("check")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"({roles.LOST_NOTE})", out)
+        code, out, _ = r.run("agents", "render", "--check")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"  note        {roles.LOST_NOTE}\n  note        run {roles.RENDER}\n"
+                      f"[FAIL]", out)
+        self.assertNotIn(roles.BRANCH_NOTE, out)
+
+    def test_stale_committed_file_names_the_branch_fix(self):
+        r = self.committed()
+        path = r.root / AGENTS / "developer.md"
+        wtext(path, raw(path) + "\nan edit\n")
+        code, out, _ = r.run("check")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"({roles.BRANCH_NOTE})", out)
+        code, out, _ = r.run("agents", "render", "--check")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"  note        {roles.BRANCH_NOTE}\n  note        run {roles.RENDER}\n"
+                      f"[FAIL]", out)
+        self.assertNotIn(roles.LOST_NOTE, out)
+
+    def test_passing_check_prints_no_note(self):
+        r = self.committed()
+        code, out, _ = r.run("agents", "render", "--check")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("note", out)
+        r = self.local()
+        code, out, _ = r.run("agents", "render", "--check")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("note", out)
+
+    def test_other_cases_get_the_command_only(self):
+        r = self.committed()      # built first: `local` patches the version for the rest
+        (r.root / AGENTS / "developer.md").unlink()
+        code, out, _ = r.run("agents", "render", "--check")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"  note        run {roles.RENDER}\n", out)
+        code, out2, _ = r.run("check")
+        for text in (out, out2):
+            self.assertNotIn(roles.LOST_NOTE, text)
+            self.assertNotIn(roles.BRANCH_NOTE, text)
+        r = self.local()
+        path = r.root / AGENTS / "developer.md"
+        wtext(path, raw(path) + "\nan edit\n")
+        code, out, _ = r.run("agents", "render", "--check")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"  note        run {roles.RENDER}\n", out)
+        code, out2, _ = r.run("check")
+        for text in (out, out2):
+            self.assertNotIn(roles.LOST_NOTE, text)
+            self.assertNotIn(roles.BRANCH_NOTE, text)
+
+    def test_conflict_only_failure_gets_no_render_note(self):
+        r = self.committed()
+        wtext(r.root / AGENTS / "developer.md", "written by hand\n")
+        code, out, _ = r.run("agents", "render", "--check")
+        self.assertEqual(code, 1, out)
+        self.assertIn("  conflict    ", out)
+        self.assertIn("(0 file(s) would change, 1 conflict(s))", out)
+        self.assertNotIn("  note        ", out)

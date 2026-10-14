@@ -196,5 +196,63 @@ class BetaSwitch(unittest.TestCase):
         self.assertFalse((self.project / ".claude").exists())
 
 
+class BuildSkillGuidance(unittest.TestCase):
+    """Two lines the build skill needs, each found by a real build."""
+
+    def build_text(self) -> str:
+        text = (PLUGIN / "skills/build/SKILL.md").read_text(encoding="utf-8")
+        return " ".join(text.split())     # a re-wrapped line must not fail a phrase
+
+    def test_red_gate_outside_the_diff_has_a_line(self):
+        self.assertIn("red for a reason outside the unit's diff", self.build_text())
+
+    def test_data_removing_command_has_a_line(self):
+        self.assertIn("confirm which copy it points at", self.build_text())
+
+
+class ReportSkill(unittest.TestCase):
+    """The `report` skill, and the lines that point a coordinator at it."""
+
+    def squash(self, path: Path) -> str:
+        return " ".join(path.read_text(encoding="utf-8").split())
+
+    def skill(self) -> str:
+        return self.squash(PLUGIN / "skills/report/SKILL.md")
+
+    def test_frontmatter_parses_and_names_the_commands(self):
+        raw = (PLUGIN / "skills/report/SKILL.md").read_text(encoding="utf-8")
+        head = raw.split("---")[1]
+        fields = dict(line.split(": ", 1) for line in head.strip().splitlines())
+        self.assertEqual(fields["name"], "report")
+        self.assertIn("AskUserQuestion", fields["allowed-tools"])
+        self.assertIn("argument-hint", fields)
+        for command in ("govern report draft", "govern report check", "govern report send"):
+            self.assertIn(command, self.skill())
+
+    def test_send_comes_only_after_the_question(self):
+        text = self.skill()
+        self.assertLess(text.index("AskUserQuestion", text.index("# Report")),
+                        text.index("govern report send"))
+        self.assertIn("Only on \"open\"", text)
+
+    def test_no_other_route_and_no_subagent_send(self):
+        text = self.skill()
+        self.assertIn("Never submit it for them by another route", text)
+        self.assertIn("A subagent never runs `send`", text)
+
+    def test_build_rules_and_build_skill_hold_the_new_phrases(self):
+        rules = self.squash(ENGINE / "govern/templates/build-rules.md")
+        self.assertIn("written up with the plugin's `report` skill when the phase closes", rules)
+        build = self.squash(PLUGIN / "skills/build/SKILL.md")
+        self.assertIn("any fault in context-gate itself, with the draft the `report` skill made", build)
+        self.assertIn("start it with `--high-risk` all the same", build)
+
+    def test_adopt_and_options_point_at_each_other(self):
+        self.assertIn("use this plugin's `options` skill instead",
+                      self.squash(PLUGIN / "skills/adopt/SKILL.md"))
+        self.assertIn("is set up with the `adopt` skill",
+                      self.squash(PLUGIN / "skills/options/SKILL.md"))
+
+
 if __name__ == "__main__":
     unittest.main()

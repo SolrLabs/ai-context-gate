@@ -506,6 +506,11 @@ def on_pre_resume(home, sid, data) -> None:
     d = state_dir(home, sid)
     if (d / f"launch-{to}.json").is_file():
         write_json(d / f"resume-{to}.json", contract(inp.get("message") or "", data.get("cwd")))
+    else:
+        # Addressed by name, which no launch record holds: the next start of an agent that
+        # already has one claims it (see `on_start`).
+        write_json(d / "resume-by-name.json",
+                   {**contract(inp.get("message") or "", data.get("cwd")), "t": time.time()})
 
 
 def on_pre_bash(gates, data) -> dict | None:
@@ -538,9 +543,20 @@ def on_start(home, sid, data) -> None:
     earlier = read_json(path)
     if isinstance(earlier, dict):
         resume = d / f"resume-{data['agent_id']}.json"
+        # A resume is preceded by the coordinator's message (`on_pre_resume` wrote the file); a
+        # start without one is the agent waking after background work.
+        named = d / "resume-by-name.json"
+        if not resume.exists() and named.exists():
+            # A message addressed by name: this agent's, if it was sent just before this start.
+            fresh = now - ((read_json(named, {}) or {}).get("t") or 0) <= HELD_BRIEF_SECONDS
+            if fresh:
+                resume = named
+            else:
+                named.unlink(missing_ok=True)
+        by_message = resume.exists()
         earlier.update({"produces": [], "red": [], **read_json(resume, {}),
                         "t": time.time(), "blocks": 0, "paired": True, "resumed": True,
-                        "ended": None})
+                        "by_message": by_message, "ended": None})
         earlier.pop("blocked_on", None)
         resume.unlink(missing_ok=True)
         write_json(path, earlier)
@@ -858,8 +874,8 @@ def parse_final(final: str) -> dict:
 
 
 def _run_row(d, launch, agent_id, totals, tools, final, problems, produced, now) -> dict:
-    """One run's measured row. A resumed agent's transcript holds every earlier run too, so the
-    figures are the difference from what the last stop saw."""
+    """One run's measured row. A resumed or woken agent's transcript holds every earlier run too,
+    so the figures are the difference from what the last stop saw."""
     seen, run = launch.get("seen") or {}, {}
     if totals:
         for k in ("requests", "input_tokens", "cache_creation_input_tokens",
@@ -871,7 +887,8 @@ def _run_row(d, launch, agent_id, totals, tools, final, problems, produced, now)
         "t": now, "agent": agent_id, "type": launch.get("agent_type"),
         "model": read_json(d / f"model-{agent_id}.json"),
         "description": launch.get("description"),
-        "resumed": bool(launch.get("resumed")),
+        "resumed": bool(launch.get("resumed")) and launch.get("by_message") is not False,
+        "woke": bool(launch.get("resumed")) and launch.get("by_message") is False,
         "wall_s": round(now - (launch.get("t") or now), 1),
         "tokens": run or None, "tool_calls": len(mine),
         "tool_ms": sum(int(r.get("ms") or 0) for r in mine),
@@ -1128,8 +1145,9 @@ def suggestions(runs: list[dict]) -> list[str]:
     total = sum(_all_tokens(r) for r in runs)
     senior = sum(_all_tokens(r) for r in runs if r.get("type") == "senior-developer")
     if len(runs) >= SUGGEST_SENIOR_RUNS and total and senior / total > SUGGEST_SENIOR_SHARE:
-        out.append(f"senior-developer used {senior / total:.0%} of the tokens over {len(runs)} "
-                   "runs: review `senior_triggers`, so it is launched only where a trigger applies.")
+        n_senior = sum(1 for r in runs if r.get("type") == "senior-developer")
+        out.append(f"senior-developer used {senior / total:.0%} of the tokens in {n_senior} of "
+                   f"{len(runs)} runs: review `senior_triggers`, so it is launched only where a trigger applies.")
     resumed = [r for r in runs if r.get("resumed")]
     if len(resumed) >= 2:
         cached = sum(int((r.get("tokens") or {}).get("cache_read_input_tokens") or 0)

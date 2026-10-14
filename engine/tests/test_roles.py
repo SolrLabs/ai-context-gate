@@ -714,7 +714,7 @@ class Command(Base):
         self.assertEqual(code, 1, out)
         self.assertIn(f"  ERROR  {RULES}: differs from what the engine renders "
                       f"for `build-rules` (a setting, an insert or the engine changed, or the "
-                      f"file was edited) — run `{RENDER}`\n", out)
+                      f"file was edited) — run `{RENDER}` ({roles.BRANCH_NOTE})\n", out)
         self.assertNotIn(f"{AGENTS}/code-reviewer.md", out)     # it names no full gate
         self.assertNotIn(f"{AGENTS}/developer.md", out)         # a unit runs no full gate
         r.run("agents", "render")

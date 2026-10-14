@@ -67,14 +67,16 @@ def agent_roles(ctx, params) -> Findings:
         return f
     for msg in todo.problems:
         f.error(f"{msg} — nothing is rendered until this is fixed")
+    solo = roles.local_only(ctx)
     for t in todo.targets:
         rel = ctx.rel(t.path)
         if t.state == roles.MISSING:
-            f.error(f"{rel}: `{t.role}` is not rendered — run `{roles.RENDER}`")
+            f.error(f"{rel}: `{t.role}` is not rendered — run `{roles.RENDER}`"
+                    + (f" ({roles.LOST_NOTE})" if solo else ""))
         elif t.state == roles.STALE:
             f.error(f"{rel}: differs from what the engine renders for `{t.role}` (a setting, "
                     f"an insert or the engine changed, or the file was edited) — run "
-                    f"`{roles.RENDER}`")
+                    f"`{roles.RENDER}`" + ("" if solo else f" ({roles.BRANCH_NOTE})"))
         elif t.state == roles.CONFLICT:
             f.error(roles.conflict(ctx, t))
     for path, role in todo.orphans:

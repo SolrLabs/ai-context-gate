@@ -360,13 +360,14 @@ Files matching the configured globs contain none of the configured strings.
 
 **Question:** Is there copy with a house style you must enforce (drafts that go to another project, public docs)? Which files, and which words or characters are out?
 
-**Why:** A style guide is only a rule if something enforces it. The engine's own names (check ids, settings, registry facts) are never flagged where they are used as names: in the config, the profile and the registry file, and in Markdown code. A project cannot rename them, whichever spelling it enforces. Files under this tool's own directory, `.claude/` or an always-excluded directory are never checked, nor is a file git ignores unless `include_ignored` names it (drafts kept out of git). A spelling that must stay (an old name kept for back-compat) is kept by a marker on its line: `writing-rules: allow <text>`, in a comment.
+**Why:** A style guide is only a rule if something enforces it. The engine's own names (check ids, settings, registry facts) are never flagged where they are used as names: in the config, the profile and the registry file, and in Markdown code. A project cannot rename them, whichever spelling it enforces. Files under this tool's own directory or `.claude/` are never checked. Files under an always-excluded directory (`build/` and the rest) are not either, unless `include_excluded` names them; a file git ignores is not unless `include_ignored` names it (drafts kept out of git), and one that is both needs both. A spelling that must stay (an old name kept for back-compat) is kept by a marker on its line: `writing-rules: allow <text>`, in a comment.
 
 | Parameter | Type | Default | Looser when | Meaning |
 |---|---|---|---|---|
 | `files` | list | `[]` | — | Globs, relative to the governance root |
 | `exclude` | list | `[]` | a value is added | Globs, relative to the governance root, of files `files` matches that are not checked |
 | `include_ignored` | list | `[]` | — | Globs, relative to the governance root, of files `files` matches that are checked even though git ignores them |
+| `include_excluded` | list | `[]` | — | Files under an always-excluded folder (build/, dist/ and the rest) that are checked anyway (not the tool's own folder or .claude/; a gitignored one needs include_ignored too) |
 | `rules` | list of tables | `[]` | — | One per forbidden string. Keys: `text`, `use` (optional), `why` (optional), `level` (optional), `ignore_case` (optional). |
 
 ### `stale-references`

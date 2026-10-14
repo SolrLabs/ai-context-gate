@@ -282,12 +282,14 @@ def apply(root: Path, m: measure.Measurement, p: propose.Proposal,
             roles_plan = roles.plan(ctx)
             if not roles_plan.problems:
                 roles_done = roles.apply(roles_plan)
-                roles.record(root, roles_plan)
                 created.extend(roles_done.written)
+                if roles.settle(ctx, roles_plan) == roles.LOCAL_RECORD:
+                    created.append(root / roles.LOCAL_RECORD)
                 print(f"  roles        {len(roles_done.written)} file(s) rendered")
             for msg in roles_plan.problems:
                 print(f"  roles        not rendered: {msg}")
-        except (Unreadable, roles.UnknownSlot, roles.WriteFailed) as exc:
+        except (Unreadable, roles.UnknownSlot, roles.WriteFailed, roles.GitFailed,
+                OSError) as exc:
             _undo(root, created)
             return fail(f"the agent roles cannot be rendered ({exc}), so adopt was undone; "
                         f"nothing was changed")

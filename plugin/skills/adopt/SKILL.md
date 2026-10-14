@@ -12,6 +12,8 @@ is to show the proposal plainly, ask only the questions it returns, and leave th
 tree to review. Never write the config by hand, never reimplement what the engine does, and never
 commit.
 
+In a project that already has `.context-gate/`, use this plugin's `options` skill instead.
+
 Arguments: `$ARGUMENTS` (for example `--profile git@github.com:org/principles.git#v1`).
 
 `--source` is not needed: `[governance] source`, where a fresh clone or a CI runner fetches the
