@@ -306,8 +306,9 @@ class FixAndClose(Build):
         self.assertIn("ranked, five at most", text)
         self.assertIn("the test to write first and see fail", text)
         self.assertIn(f"Base commit: {self.head()}", text.splitlines())
-        self.assertEqual(text.splitlines()[-2:],
-                         [RELATIVE, f"Produces: {at('fix', 'developer-report.md')}"])
+        self.assertEqual(text.splitlines()[-3:],
+                         [RELATIVE, f"Red: {at('fix', 'red')}",
+                          f"Produces: {at('fix', 'developer-report.md')}"])
         self.assertEqual(out.splitlines()[-1], then("fix", "its ranked list"))
         self.assertNotIn("Brief:", out)
         self.assertEqual(self.ledger()["stage"], "fix")
@@ -360,7 +361,8 @@ class FixAndClose(Build):
         self.assertEqual(first.read_text(encoding="utf-8"), "1. the ranked list\n")
         text = second.read_text(encoding="utf-8")
         self.assertEqual(agent_runs.unfilled(text), ["Fixes", "Out of scope"])
-        self.assertEqual(text.splitlines()[-2:], [RELATIVE, f"Produces: {at('fix', 'developer-report-2.md')}"])
+        self.assertEqual(text.splitlines()[-3:], [RELATIVE, f"Red: {at('fix', 'red-2')}",
+                                                  f"Produces: {at('fix', 'developer-report-2.md')}"])
         self.assertIn(f"wrote {BUILD / 'p1' / 'fix' / 'brief-2.md'}", out)
         self.assertEqual(out.splitlines()[-1], then("fix", "its ranked list"))
         self.refused("is not filled in yet", "fix")
@@ -414,8 +416,7 @@ class FixAndClose(Build):
                 brief = self.dir() / "close" / "brief.md"
                 text = brief.read_text(encoding="utf-8")
                 self.assertIn("The phase `p1` on the branch `phase/p1` is closing.", text)
-                self.assertIn("- Unit u1, Unit u1 (commit 3f2a9c1): report "
-                              "../u1/developer-report.md\n", text)
+                self.assertIn("- Unit u1, Unit u1 (commit 3f2a9c1)\n", text)
                 self.assertIn("- kept the old flag; callers break if wrong\n", text)
                 self.assertNotIn("Delete", text)
                 self.assertEqual(agent_runs.unfilled(text), ["What landed and what was decided"])
@@ -816,6 +817,49 @@ class Briefs(Build):
         brief.write_text(text.replace(build._fill(build.UNIT_SECTIONS[-1][1]), "Nothing."),
                          encoding="utf-8")
         self.assertIsNone(launch())
+
+
+class BriefsSayWhatIsTrue(Build):
+    def reviewed(self) -> None:
+        self.started()
+        self.unit("u1", "done")
+        self.code()
+        self.ok("review")
+
+    def test_fix_brief_has_its_red_line(self):
+        self.reviewed()
+        self.ok("fix")
+        lines = (self.dir() / "fix" / "brief.md").read_text(encoding="utf-8").splitlines()
+        red = f"Red: {at('fix', 'red')}"
+        self.assertEqual(red, "Red: .context-gate/build/p1/fix/red")
+        self.assertEqual(lines[lines.index(red) + 1][:10], "Produces: ")
+
+    def test_second_fix_brief_has_its_own_red_folder(self):
+        self.reviewed()
+        self.ok("fix")
+        (self.dir() / "fix" / "brief.md").write_text("1. the ranked list\n", encoding="utf-8")
+        self.ok("fix")
+        lines = (self.dir() / "fix" / "brief-2.md").read_text(encoding="utf-8").splitlines()
+        self.assertIn("Red: .context-gate/build/p1/fix/red-2", lines)
+        self.assertNotIn("Red: .context-gate/build/p1/fix/red", lines)
+
+    def test_brief_reader_finds_the_fix_red_folder(self):
+        self.reviewed()
+        self.ok("fix")
+        brief = self.dir() / "fix" / "brief.md"
+        got = agent_runs.contract(f"Brief: {brief}")
+        self.assertEqual(len(got["red"]), 1)
+        self.assertTrue(Path(got["red"][0]).as_posix().endswith(at("fix", "red")))
+        self.assertEqual(len(got["in_brief"]["red"]), 1)
+
+    def test_close_brief_names_no_report(self):
+        self.reviewed()
+        self.ok("unit", "set", "u1", "done", "--commit", "3f2a9c1")
+        self.ok("close")
+        text = (self.dir() / "close" / "brief.md").read_text(encoding="utf-8")
+        landed = text.split("## What landed\n\n")[1].split("\n\n")[0]
+        self.assertEqual(landed, "- Unit u1, Unit u1 (commit 3f2a9c1)")
+        self.assertNotIn("u1/developer-report.md", text)
 
 
 if __name__ == "__main__":

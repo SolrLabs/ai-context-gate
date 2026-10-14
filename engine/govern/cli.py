@@ -344,9 +344,14 @@ def cmd_options(ctx: Context, global_: bool, as_json: bool, rec: list[str] | Non
 
 
 def cmd_phase(args) -> int:
-    from govern import phase
+    from govern import build, phase
+    good, errors = build.open_builds(Path(args.path))
+    if errors:
+        why = str(errors[0])
+        tail = "" if why.endswith("nothing was changed") else "; nothing was changed"
+        return fail(f"cannot tell which builds are open: {why}{tail}", 1)
     try:
-        p = phase.plan(Path(args.path), args.remote, args.keep)
+        p = phase.plan(Path(args.path), args.remote, args.keep, good)
     except phase.PhaseError as exc:
         return fail(str(exc), 1)
     if args.dry_run:
@@ -831,6 +836,20 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
                                      "a second pass gets a brief of its own")
     bf.add_argument("--role", help="a rendered role that writes code (default: developer)")
     bsub.add_parser("close", help="write technical-writer's closing brief")
+    fr = sub.add_parser("report", help="a field report on context-gate itself: draft it, check "
+                                       "it for private text, open it as an issue page")
+    frsub = fr.add_subparsers(dest="report_cmd", required=True)
+    frd = frsub.add_parser("draft", help="write a new draft in .context-gate/reports/ and "
+                                         "print its path")
+    frd.add_argument("--title", required=True)
+    frc = frsub.add_parser("check", help="name each piece of private text in a draft; exit 1 "
+                                         "on any")
+    frc.add_argument("file", help="the draft, from the project's root")
+    frs = frsub.add_parser("send", help="check the draft, then open the public repository's "
+                                        "new-issue page with it filled in, for you to submit")
+    frs.add_argument("file", help="the draft, from the project's root")
+    frs.add_argument("--print", action="store_true", dest="print_only",
+                     help="print the address instead of opening a browser")
     return ap
 
 
@@ -910,6 +929,9 @@ def dispatch(ctx: Context, args) -> int:
     if args.cmd == "build":
         from govern import build
         return build.run(ctx, args)
+    if args.cmd == "report":
+        from govern import field_report
+        return field_report.run(ctx, args)
     return cmd_check(ctx, getattr(args, "project", None), getattr(args, "path", None),
                      getattr(args, "history_from", None), getattr(args, "workspace_only", False),
                      getattr(args, "base", None))

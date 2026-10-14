@@ -43,7 +43,8 @@ beta, that has `govern build`.
    say so: you cannot tell your breakage from what was already there. A gate that looks slow is
    timed twice before anyone calls it slow.
 6. `python3 .context-gate/bin/govern build start <slug> --plan <file>` (add `--high-risk` when the
-   plan marks the phase so). Add `--visual` when the phase touches a path the build rules list as
+   plan marks the phase so). To have `qa-engineer` on a phase that touches no high-risk path, start it with
+   `--high-risk` all the same. Add `--visual` when the phase touches a path the build rules list as
    visual. Add `--from <branch>` whenever the phase branch was not cut from the default branch.
 7. Scan the phase's units against each other: any two that change the same file or interface run
    in order, not side by side. Where the plan is silent or two units disagree, decide, and record
@@ -105,7 +106,8 @@ beta, that has `govern build`.
    - The gate is red after its merge, or the diff is not what the brief asked: `... unit set <id>
      failed --note "<what>"`, then a fresh agent with a brief that says exactly what is wrong.
      The fresh agent's brief says which tests fail and that the first attempt is already in its
-     base.
+     base. A gate that is red for a reason outside the unit's diff and green when run again is
+     not the unit's failure: record it with `build ruling` and go on.
    - A line telling you a contract was not met means the report or the failing-test output the
      brief promised does not exist. Treat the unit as failed.
 6. Commit the ledger, and push the phase branch (`git push -u <remote> phase/<slug>` the first
@@ -150,7 +152,8 @@ If nothing stands, skip to 5.
 ## 5. Close
 
 1. The owner's turn, when the plan's "Done when" has a line for them: launch an isolated copy of
-   the build yourself if the project says how, confirm the change is really there, then tell the
+   the build yourself if the project says how. Before a command that removes data, confirm which
+   copy it points at; never run one from a worktree against the owner's own. Confirm the change is really there, then tell the
    owner it is ready and what to look at, with what right and wrong look like. Do not hand them a
    command to work out. Wait for their word before closing. Changes the owner asks for there are a fix pass: run
    `python3 .context-gate/bin/govern build fix` again, which works after `build close`. With no such line, do not stop for the owner: tick the
@@ -171,7 +174,8 @@ If nothing stands, skip to 5.
    and merges nothing into the default branch: that is the owner's, or the project's own rule.
 6. Report, short: what landed, the gate line, what is unverified and what it needs, each ruling
    with what it costs if wrong, what the owner owes (the exact command, link or decision), and
-   what the reviews found and what you did about each.
+   what the reviews found and what you did about each, and any fault in context-gate itself, with
+   the draft the `report` skill made.
 
 ## Carrying on
 

@@ -62,6 +62,11 @@ INSERTS = f"{layout.GOV_DIR}/agents"
 # The project's entry point, as its skills call it from the project's root.
 GOVERN = f"python3 {layout.ENTRYPOINT}"
 RENDER = f"{GOVERN} agents render"
+# Why a role file is missing or stale, by where the roles are kept.
+LOST_NOTE = ("these files are kept on this machine only, and git removes them when a checkout "
+             "crosses a commit that tracked them")
+BRANCH_NOTE = "on a branch cut before the roles last changed, merge the default branch, or " \
+              "render and commit"
 
 NO_AUTHORITY = "the plan or spec it names"
 HANDBACK_BINDING = ("**Every line of this checklist is part of the task you were given. Copy it into your report file and answer each line. A run that hands back with a line unanswered has not done what it was asked, and its unit is treated as failed, whatever else it did.** Answer a line as `Key: <your answer>`, on one line. When the brief has no `Produces:` line there is no report file: answer the checklist in your final message.")
@@ -640,6 +645,26 @@ def record(root: Path, plan: Plan, local: bool = False) -> str | None:
     return changed
 
 
+def exclude_lines(root: Path, plan: Plan) -> list[str]:
+    """The lines of the exclude block for a local-only project: each rendered path and
+    `LOCAL_RECORD`, from the top of the repository. Raises `GitFailed` when git cannot say."""
+    prefix = _prefix(root)
+    return [f"/{prefix}{r['path']}" for r in records(root, plan)] + [f"/{prefix}{LOCAL_RECORD}"]
+
+
+def settle(ctx, plan: Plan) -> str | None:
+    """Record the rendered files where `local_only` says, and for a local-only project keep them
+    out of git through the exclude file. Returns the file `record` changed. Raises `GitFailed`,
+    `Unreadable` and `OSError`; whatever `record` wrote by then stays."""
+    solo = local_only(ctx)
+    changed = record(ctx.root, plan, local=solo)
+    if solo:
+        where = exclude_file(ctx.root)
+        if where is not None:
+            set_block(where, exclude_lines(ctx.root, plan))
+    return changed
+
+
 # ---------------------------------------------------------------------------- one machine
 
 def local_only(ctx) -> bool:
@@ -883,8 +908,7 @@ def run(ctx, check_only: bool = False, untrack: bool = False) -> int:
         if solo:
             where = exclude_file(root)
         if where is not None:
-            prefix = _prefix(root)
-            lines = [f"/{prefix}{p}" for p in [*mine, LOCAL_RECORD]]
+            lines = exclude_lines(root, todo)
         block = where is not None and len(set(_block_text(where, lines))) > 1
         held = tracked(root, mine) if where is not None else []
     except (Unreadable, OSError) as exc:
@@ -904,6 +928,13 @@ def run(ctx, check_only: bool = False, untrack: bool = False) -> int:
         if held:
             print(_tracked_line(held))
         failed = bool(changes or todo.conflicts)
+        if failed:
+            if solo and any(t.state == MISSING for t in todo.writes):
+                print(f"  note        {LOST_NOTE}")
+            elif not solo and any(t.state == STALE for t in todo.writes):
+                print(f"  note        {BRANCH_NOTE}")
+            if changes:      # a conflict is left alone by the render
+                print(f"  note        run {RENDER}")
         print(f"[{'FAIL' if failed else 'OK'}] {label}  ({changes} file(s) would change"
               + (f", {len(todo.conflicts)} conflict(s)" if todo.conflicts else "") + ")")
         return 1 if failed else 0

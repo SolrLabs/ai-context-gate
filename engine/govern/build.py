@@ -337,6 +337,33 @@ def ledgers(root: Path) -> tuple[list[Ledger], list[BuildError]]:
     return good, bad
 
 
+def open_builds(path: Path) -> tuple[list[tuple[str, str]], list[BuildError]]:
+    """`(phase, branch)` for every tracked ledger anywhere in the repository `path` is in, and the
+    error for each that does not read. When git cannot name the top (no repository, or git cannot
+    run) it is `([], [])` and the caller's own check refuses. A git call that fails after that is
+    an error, never an empty answer."""
+    top = phase._git(path, "rev-parse", "--show-toplevel")
+    if top is None or top.returncode != 0:
+        return [], []     # no repository, or git cannot run: `phase.plan` refuses on its own check
+    root = Path(phase._out(top))
+    spec = f":(glob)**/{BUILD_DIR}/*/{LEDGER}"
+    res = phase._git(root, "ls-files", "-z", "--", spec)
+    if res is None or res.returncode != 0:
+        return [], [BuildError("git could not list the ledgers")]
+    good, bad = [], []
+    for name in res.stdout.decode("utf-8", errors="replace").split("\0"):
+        file = root / name
+        if not name or not file.is_file():
+            continue
+        try:
+            ledger = load(file)
+        except BuildError as exc:
+            bad.append(exc)
+        else:
+            good.append((ledger.phase, ledger.branch))
+    return good, bad
+
+
 def current(root: Path, branch: str) -> Ledger | None:
     """The ledger whose `branch` is `branch`, or None when no build is in flight on it. Raises
     `BuildError` when that cannot be told: two ledgers name the branch, or none does and one
@@ -554,8 +581,9 @@ def fix_brief(ledger: Ledger, head: str, role: str, number: int) -> str:
     return (f"# {ledger.phase} / fix — the fix pass{f' {number}' if number > 1 else ''}\n\n"
             f"Base commit: {head}\n\n"
             + _sections(fix_sections(_from_root(ledger, "fix", f"red{suffix}")))
-            + f"{FIX_RUNNING_NOTE}\n\n{REPORT_NOTE}\n{PATHS_NOTE}\nProduces: "
-            f"{_from_root(ledger, 'fix', f'{role}-report{suffix}.md')}\n")
+            + f"{FIX_RUNNING_NOTE}\n\n{REPORT_NOTE}\n{PATHS_NOTE}\n"
+            f"Red: {_from_root(ledger, 'fix', f'red{suffix}')}\n"
+            f"Produces: {_from_root(ledger, 'fix', f'{role}-report{suffix}.md')}\n")
 
 
 def _with_rulings(text: str, ledger: Ledger, markers) -> str:
@@ -585,7 +613,7 @@ def close_brief(root: Path, ledger: Ledger) -> str:
     landed = "".join(
         f"- Unit {u['id']}, {u['title']}"
         + (f" (commit {u['commit']})" if u["commit"] else "")
-        + f": report {_rel(ledger.dir / 'close', ledger.report(u))}\n" for u in ledger.units)
+        + "\n" for u in ledger.units)
     rulings = "".join(f"- {r}\n" for r in ledger.rulings)
     return (f"# {ledger.phase} / close — the phase is closing\n\n"
             f"The phase `{ledger.phase}` on the branch `{ledger.branch}` is closing.\n\n"

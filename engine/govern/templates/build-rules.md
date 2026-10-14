@@ -54,3 +54,4 @@ The model and effort are fixed in each definition. Launch by name and pass no mo
 - Carry on from one phase to the next without asking. Stop when the owner is needed (a checkpoint, or a decision that is theirs), when something is wrong (the build skill lists what), or when told to.
 - Each phase has a definition of done made of things a command can show.
 {{housekeeping_rule}}- When the project has `agent-measure` on, start each phase with `{{govern}} runs mark <label>`. Before you close it with `phase close`, run `{{govern}} runs report` and give the owner its suggestions; apply none of them yourself.
+- A fault in context-gate itself that cost the phase time is written up with the plugin's `report` skill when the phase closes; the owner decides whether it is sent.

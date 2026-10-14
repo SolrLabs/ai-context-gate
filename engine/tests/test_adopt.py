@@ -679,6 +679,47 @@ tier = "full"
 """
 
 
+class LocalOnlyRoles(Base):
+    """Roles rendered for this machine only (`roles.local_only`; adopt never meets a
+    `local.toml`, as an existing install is refused) are recorded and excluded as `agents
+    render` does, and a git that fails undoes the adoption."""
+
+    ANSWERS = SingleRepo.ANSWERS + '"option:agent-roles" = "on"\n'
+
+    def setUp(self) -> None:
+        super().setUp()
+        single_repo(self.root)
+        from govern import roles
+        self.roles = roles
+        patch = mock.patch.object(roles, "local_only", return_value=True)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_adopt_records_local_roles_locally(self):
+        code, out, err = self.adopt(self.ANSWERS, "--apply")
+        self.assertEqual(code, 0, out + err)
+        roles = self.roles
+        self.assertEqual(installer.read_manifest(self.root)["rendered"], [])
+        self.assertEqual(len(roles._rows(self.root / roles.LOCAL_RECORD)), 6)
+        exclude = (self.root / ".git/info/exclude").read_text(encoding="utf-8")
+        self.assertIn("/.claude/agents/developer.md\n", exclude)
+        self.assertIn(f"/{roles.LOCAL_RECORD}\n", exclude)
+        status = subprocess.run(["git", "-C", str(self.root), "status", "--short"],
+                                capture_output=True, text=True, encoding="utf-8").stdout
+        self.assertNotIn(".claude/agents/developer.md", status)
+        self.assertNotIn("rendered.local.toml", status)
+
+    def test_failing_git_undoes_the_adoption(self):
+        before = snapshot(self.root)
+        exclude = (self.root / ".git/info/exclude").read_bytes()
+        with mock.patch.object(self.roles, "_git", return_value=None):
+            code, out, err = self.adopt(self.ANSWERS, "--apply")
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("adopt was undone", err)
+        self.assertEqual(snapshot(self.root), before)
+        self.assertEqual((self.root / ".git/info/exclude").read_bytes(), exclude)
+
+
 class RegistrySkip(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()

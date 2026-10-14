@@ -8,7 +8,8 @@ allowed-tools: Bash(python3 .context-gate/bin/*), Read, Edit, AskUserQuestion
 # context-gate options
 
 An option is a check that is off until someone turns it on. Show what is on and what is worth
-turning on, change what the user picks, and prove each change is live.
+turning on, change what the user picks, and prove each change is live. A project with no
+`.context-gate/` yet is set up with the `adopt` skill.
 
 ## 1. Show
 

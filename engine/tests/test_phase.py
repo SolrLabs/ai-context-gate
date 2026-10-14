@@ -317,6 +317,127 @@ class DryRun(Phase):
             self.assertIn(f"removed {name}", done)
 
 
+class OpenBuildsKept(Phase):
+    """A phase built on a phase that is still open: the lower build's branches stay."""
+
+    def stacked(self) -> Tree:
+        """`phase/lower` with agent branches `low-a` and `low-b` merged in, and `phase/upper` cut
+        from it with `up-a` merged in; `phase/upper` is checked out."""
+        t = self.repo()
+        t.branch("phase/lower")
+        for name in ("low-a", "low-b"):
+            t.git("checkout", "-qb", name, "phase/lower")
+            self.commit(f"{name}.txt", name)
+            t.switch("phase/lower")
+            t.git("merge", "-q", "--no-ff", "-m", f"merge {name}", name)
+        t.branch("phase/upper")
+        t.git("checkout", "-qb", "up-a", "phase/upper")
+        self.commit("up-a.txt", "up-a")
+        t.switch("phase/upper")
+        t.git("merge", "-q", "--no-ff", "-m", "merge up-a", "up-a")
+        return t
+
+    def ledger(self, slug: str, branch: str, text: str | None = None,
+               at: Path | None = None) -> None:
+        """A tracked (committed) ledger in the project at `at`, else at the repository's top."""
+        folder = (at or self.t.root) / ".context-gate" / "build" / slug
+        folder.mkdir(parents=True)
+        (folder / "ledger.toml").write_text(text if text is not None else (
+            f'phase = "{slug}"\nbranch = "{branch}"\nbase = "{"0" * 40}"\nstage = "build"\n'),
+            encoding="utf-8")
+        self.t.git("add", "-f", str(folder / "ledger.toml"))
+        self.t.git("commit", "-qm", f"ledger {slug}")
+
+    def kept_lines(self, out: str) -> None:
+        for name in ("phase/lower", "low-a", "low-b"):
+            self.assertIn(f"would keep {name}:", out)
+            self.assertNotIn(f"would remove {name}", out)
+
+    def test_from_a_subdirectory_they_are_kept(self):
+        t = self.stacked()
+        self.ledger("lower", "phase/lower")
+        sub = t.root / "sub"
+        sub.mkdir()
+        code, out, err = t.run("phase", "close", "--dry-run", "--path", str(sub))
+        self.assertEqual(code, 0, err)
+        self.kept_lines(out)
+
+    def test_project_below_the_repository_top(self):
+        t = self.stacked()
+        proj = t.root / "proj"
+        proj.mkdir()
+        self.ledger("lower", "phase/lower", at=proj)
+        code, out, err = t.run("phase", "close", "--dry-run", "--path", str(t.root))
+        self.assertEqual(code, 0, err)
+        self.kept_lines(out)
+
+    def test_git_failing_on_an_open_build_stops_the_plan(self):
+        t = self.stacked()
+        real = phase._run
+
+        def fail_merge_base(repo, *args, **kw):
+            if args[0] == "merge-base":
+                return subprocess.CompletedProcess(args, 128, b"", b"fatal: unable to lock")
+            return real(repo, *args, **kw)
+
+        with mock.patch.object(phase, "_run", fail_merge_base):
+            with self.assertRaises(phase.PhaseError) as cm:
+                phase.plan(t.root, open_builds=[("lower", "phase/lower")])
+        self.assertIn("merge-base failed", str(cm.exception))
+
+    def test_lower_phase_branches_are_kept(self):
+        t = self.stacked()
+        p = phase.plan(t.root, open_builds=[("lower", "phase/lower")])
+        self.assertEqual([b for b, _ in p.removals], ["up-a"])
+        kept = dict(p.keeps)
+        self.assertEqual(kept["phase/lower"], "the branch of the build lower, which is not closed")
+        for name in ("low-a", "low-b"):
+            self.assertEqual(kept[name], "merged into phase/lower, whose build lower is not closed")
+
+    def test_without_the_ledger_they_are_removed_as_before(self):
+        t = self.stacked()
+        p = phase.plan(t.root)
+        self.assertEqual(sorted(b for b, _ in p.removals),
+                         ["low-a", "low-b", "phase/lower", "up-a"])
+
+    def test_the_closing_branch_own_build_keeps_nothing(self):
+        t = self.stacked()
+        before = phase.plan(t.root)
+        p = phase.plan(t.root, open_builds=[("upper", "phase/upper")])
+        self.assertEqual(p.removals, before.removals)
+        self.assertEqual(p.keeps, before.keeps)
+
+    def test_open_build_with_no_local_branch_is_skipped(self):
+        t = self.stacked()
+        before = phase.plan(t.root)
+        p = phase.plan(t.root, open_builds=[("gone", "phase/gone")])
+        self.assertEqual(p.removals, before.removals)
+        self.assertEqual(p.keeps, before.keeps)
+
+    def test_unreadable_ledger_stops_the_command(self):
+        self.stacked()
+        self.ledger("broken", "phase/broken", text="this is [not toml\n")
+        before = self.state()
+        code, out, err = self.close()
+        self.assertEqual(code, 1, err)
+        self.assertIn("cannot tell which builds are open", err)
+        self.assertEqual(err.count("nothing was changed"), 1, err)
+        self.assertEqual(self.state(), before)
+
+    def test_command_reads_the_ledgers(self):
+        self.stacked()
+        self.ledger("lower", "phase/lower")
+        code, out, err = self.close("--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertIn("would keep phase/lower: the branch of the build lower, which is not closed",
+                      out)
+        self.assertIn("would keep low-a: merged into phase/lower, whose build lower is not closed",
+                      out)
+        self.assertIn("would keep low-b: merged into phase/lower, whose build lower is not closed",
+                      out)
+        self.assertIn("would remove up-a", out)
+
+
 class NeverForced(Phase):
     FORCED = {"-D", "-f", "--force", "--force-with-lease", "--delete"}
 

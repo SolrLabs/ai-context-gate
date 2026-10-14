@@ -393,8 +393,10 @@ own code is flagged, and so is a code span that is not one of the engine's names
 finding is the matches left once those are skipped.
 
 A file under this tool's own directory (`.context-gate/`, whose reports quote the configured rules
-back), `.claude/` or an always-excluded directory (`build/`, `node_modules/` and the rest, at any
-depth and in any case) is never checked, whether a glob or an explicit path names it. Nor is a
+back) or `.claude/` is never checked, whether a glob or an explicit path names it. A file under an
+always-excluded directory (`build/`, `node_modules/` and the rest, at any depth and in any case)
+is left out the same way, unless `include_excluded` names it: list such files there to check them
+anyway. One that git also ignores needs `include_ignored` as well. Nor is a
 file git ignores (asked of the repository that holds it, a nested checkout's own included),
 unless `include_ignored` names it: list drafts kept out of git there to check them anyway. An
 entry that matched files but kept none of them is reported as a warning, with why. `exclude` lists

@@ -770,12 +770,18 @@ def upgrade(root: Path, with_report: bool = True) -> int:
     record = read_manifest(root)
     record["engine"] = __version__
     if roles_done is not None:
-        record["rendered"] = roles.records(root, roles_plan)
+        # Rows for roles that stay on this machine go to the local record, below.
+        record["rendered"] = [] if roles.local_only(ctx) else roles.records(root, roles_plan)
     write_manifest(root / layout.MANIFEST, record)
     ran = f"{old_pin} (ran {old_engine})" if old_engine and old_engine != old_pin else old_pin
     print(f"upgraded {layout.DISPLAY_NAME} {ran} -> {__version__} in {root / layout.GOV_DIR}")
     _refresh_blocks(blocks_new, index_lines)
     roles_left = _say_roles(ctx, roles_plan, roles_done)
+    if roles_done is not None:
+        try:
+            roles.settle(ctx, roles_plan)
+        except (roles.GitFailed, Unreadable, OSError) as exc:
+            print(f"  roles        not kept out of git ({exc}): run {roles.RENDER}")
     if with_report:
         notes = releases.between(old_engine, __version__)
         from govern import options as opts_mod
@@ -986,12 +992,22 @@ def uninstall(root: Path, force: bool = False) -> int:
         elif path.exists():
             path.unlink()
             print(f"  removed      {stub['path']}")
+    # The exclude block is one per repository, shared by every worktree and project in it: this
+    # project takes it only if it has its own record of local-only files, read before removing any.
+    local_only = (root / roles.LOCAL_RECORD).is_file()
     for rel in ours + edited:
         roles.remove(root, root / rel)
         print(f"  removed      {rel}")
     for rel in replaced:
         print(f"  left         {rel} (not rendered by {layout.DISPLAY_NAME})")
     _restore_settings(root, record, print)
+    try:
+        where = roles.exclude_file(root) if local_only else None
+        if where is not None and where.is_file() and roles.set_block(where, []):
+            print(f"  removed      the {layout.DISPLAY_NAME} lines in {roles._rel(root, where)}")
+    except (roles.GitFailed, Unreadable, OSError) as exc:
+        print(f"  left         the {layout.DISPLAY_NAME} lines in the repository's exclude file "
+              f"({exc})")
     shutil.rmtree(root / layout.GOV_DIR)
     print(f"uninstalled {layout.DISPLAY_NAME} from {root}")
     return 0

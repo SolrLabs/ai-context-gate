@@ -119,9 +119,33 @@ def _in_the_way(tree: str) -> str:
     return f" (in the way: {', '.join(paths)})" if paths else ""
 
 
-def plan(repo: Path, remote: str | None = None, keep=()) -> Plan:
-    """What `apply` would do. Only reads. Raises `PhaseError` with the reason when the command
-    must refuse."""
+def _yes(repo: Path, *args: str) -> bool:
+    """A question git answers 0 for yes and 1 for no; any other exit stops the command."""
+    res = _run(repo, *args)
+    if res.returncode not in (0, 1):
+        raise PhaseError(f"git {args[0]} failed: {_reason(res)}")
+    return res.returncode == 0
+
+
+def _open_build(repo: Path, name: str, closing: str, open_builds) -> str:
+    """Why `name` stays because another build is still open, or empty. An open build keeps its own
+    branch and what is merged into it; a build whose branch is the one closing, or that does not
+    exist here, keeps nothing."""
+    for slug, branch in open_builds:
+        if branch == closing or not _yes(repo, "rev-parse", "--verify", "--quiet",
+                                         f"refs/heads/{branch}"):
+            continue
+        if name == branch:
+            return f"the branch of the build {slug}, which is not closed"
+        if _yes(repo, "merge-base", "--is-ancestor", f"refs/heads/{name}", f"refs/heads/{branch}"):
+            return f"merged into {branch}, whose build {slug} is not closed"
+    return ""
+
+
+def plan(repo: Path, remote: str | None = None, keep=(), open_builds=()) -> Plan:
+    """What `apply` would do. Only reads. `open_builds` is `(slug, branch)` for each build still
+    in flight: its branch and what is merged into it are kept. Raises `PhaseError` with the
+    reason when the command must refuse."""
     if not _test(repo, "rev-parse", "--git-dir"):
         raise PhaseError("not inside a git repository")
     p = Plan(repo=repo)
@@ -174,6 +198,8 @@ def plan(repo: Path, remote: str | None = None, keep=()) -> Plan:
             p.keeps.append((name, f"the default branch of {p.remote}"))
         elif name in named:
             p.keeps.append((name, "named with --keep"))
+        elif held := _open_build(repo, name, p.branch, open_builds):
+            p.keeps.append((name, held))
         elif upstream:
             p.keeps.append((name, f"has an upstream of its own ({upstream.removeprefix('refs/')})"))
         elif _test(repo, "merge-base", "--is-ancestor", f"refs/heads/{name}", tip):

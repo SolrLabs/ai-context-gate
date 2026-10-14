@@ -379,8 +379,7 @@ rules = [{self.RULE}]
         self.assertIn("writing-rules: '*/draft.md' matched 1 file(s), all left out (gitignored) "
                       f"— {self.INCLUDE}", out)
         self.assertIn("writing-rules: 'build/**/*.md' matched 2 file(s), all left out "
-                      "(always excluded)", out)
-        self.assertNotIn("(always excluded) —", out)
+                      "(always excluded) — list it in include_excluded to check it anyway", out)
         self.assertNotIn("notes/*.md' matched", out)
         self.assertNotIn("none/*.md", out)
         self.assertEqual([line.strip() for line in out.splitlines() if " × " in line],

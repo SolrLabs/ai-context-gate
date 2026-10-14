@@ -166,7 +166,8 @@ class OneMemoryPerLine(MemoryIndex):
         self.assertEqual(f.errors, [])
         self.assertEqual(f.warnings, [
             f"memory index: line 3 links 2 memories — one memory per line, so the limit "
-            f"counts memories ({self.mem / 'MEMORY.md'})"])
+            f"counts memories ({self.mem / 'MEMORY.md'}); an engine before 0.7.0 counts lines "
+            f"instead, so splitting a line can put it over max_lines there"])
 
     def test_a_memory_link_and_a_url_is_one_memory(self):
         self.memory("a.md", "---\ntype: project\n---\n")

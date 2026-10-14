@@ -791,5 +791,95 @@ class Standard(Base):
         self.assertIn("registry: 'alpha' tier 'gold' is not one of", out)
 
 
+class LocalOnlyRoles(Base):
+    """`agent-roles` on in `local.toml` alone: an upgrade keeps the rendered roles on this
+    machine, as `govern agents render` does, and the project stays clean in git."""
+
+    LOCAL = ('[governance]\nengine = "0.7.0-beta.9"\n\n'
+             '[checks.agent-roles]\nlevel = "error"\n')
+    START = "# context-gate: rendered on this machine"
+
+    def git(self, root, *args):
+        res = subprocess.run(["git", "-C", str(root), "-c", "user.name=t",
+                              "-c", "user.email=t@e.x", "-c", "commit.gpgsign=false", *args],
+                             capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return res.stdout
+
+    def project(self, local=True):
+        """A committed git repository, installed at this engine; `local.toml` turns the roles on
+        for this machine only, and the engine is a beta, the only kind that reads it."""
+        w = self.ws(extra="" if local else ROLES_ON)
+        cfg = self.tmp / "config.toml"
+        shutil.move(str(w.root / CFG), str(cfg))
+        (w.root / layout.GOV_DIR).rmdir()
+        with contextlib.redirect_stdout(io.StringIO()):
+            installer.main(["install", "--root", str(w.root), "--config", str(cfg),
+                            "--no-report"])
+        self.git(w.root, "init", "-q")
+        if local:
+            w.write(layout.LOCAL, self.LOCAL)
+            with open(w.root / ".git/info/exclude", "a", encoding="utf-8", newline="") as fh:
+                fh.write(f"{layout.LOCAL}\n")
+        self.git(w.root, "add", "-A")
+        self.git(w.root, "commit", "-q", "-m", "start")
+        if local:
+            patch = mock.patch.object(config, "__version__", "0.7.0-beta.9")
+            patch.start()
+            self.addCleanup(patch.stop)
+        return w
+
+    def upgrade(self, w):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = installer.main(["upgrade", "--root", str(w.root), "--no-report"])
+        return code, out.getvalue(), err.getvalue()
+
+    def files(self, w):
+        return {p: p.read_bytes() for p in sorted(w.root.rglob("*"))
+                if p.is_file() and ".git/objects" not in p.as_posix()}
+
+    def test_upgrade_keeps_local_roles_local(self):
+        from govern import roles
+        w = self.project()
+        code, out, err = self.upgrade(w)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("  roles        6 file(s) rendered, 0 removed\n", out)
+        self.assertEqual(installer.read_manifest(w.root)["rendered"], [])
+        self.assertEqual(len(roles._rows(w.root / roles.LOCAL_RECORD)), 6)
+        block = (w.root / ".git/info/exclude").read_text(encoding="utf-8")
+        self.assertIn(f"{self.START}\n/.claude/agents/code-reviewer.md\n", block)
+        self.assertIn(f"/{roles.LOCAL_RECORD}\n# context-gate: end\n", block)
+        self.assertEqual(self.git(w.root, "status", "--short"), "")
+
+    def test_second_upgrade_changes_no_byte(self):
+        w = self.project()
+        self.assertEqual(self.upgrade(w)[0], 0)
+        before = self.files(w)
+        code, out, err = self.upgrade(w)
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.files(w), before)
+        self.assertEqual(self.git(w.root, "status", "--short"), "")
+
+    def test_committed_roles_are_recorded_as_before(self):
+        from govern import roles
+        w = self.project(local=False)
+        code, out, err = self.upgrade(w)
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(len(installer.read_manifest(w.root)["rendered"]), 6)
+        self.assertFalse((w.root / roles.LOCAL_RECORD).exists())
+        self.assertNotIn(self.START, (w.root / ".git/info/exclude").read_text(encoding="utf-8"))
+
+    def test_failing_git_is_said_and_the_upgrade_stands(self):
+        from govern import roles
+        w = self.project()
+        with mock.patch.object(roles, "_git", return_value=None):
+            code, out, err = self.upgrade(w)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("  roles        not kept out of git (", out)
+        self.assertIn(f"): run {roles.RENDER}\n", out)
+        self.assertTrue((w.root / ".claude/agents/developer.md").is_file())
+
+
 if __name__ == "__main__":
     unittest.main()
