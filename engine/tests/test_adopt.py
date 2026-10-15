@@ -151,8 +151,21 @@ class SingleRepo(Base):
         self.assertEqual(code, 0)
         data = json.loads(out)
         self.assertEqual(sorted(o["id"] for o in data["options"]),
-                         ["checkout-hygiene", "hooks-wired", "licenses", "usage", "writing-rules"])
+                         ["agent-gates", "agent-measure", "agent-roles", "checkout-hygiene",
+                          "hooks-wired", "licenses", "usage", "writing-rules"])
         self.assertTrue(all(o["new"] for o in data["options"]))
+
+    def test_agent_roles_answered_on_are_rendered_before_the_gate_and_end_green(self):
+        self.green(self.ANSWERS + '"option:agent-roles" = "on"\n')
+        for role in ("developer", "senior-developer", "code-reviewer", "qa-engineer",
+                     "technical-writer"):
+            self.assertTrue((self.root / f".claude/agents/{role}.md").is_file(), role)
+        self.assertTrue((self.root / ".claude/rules/context-gate-build.md").is_file())
+
+    def test_agent_roles_answered_off_render_nothing(self):
+        self.green(self.ANSWERS + '"option:agent-roles" = "off"\n')
+        self.assertFalse((self.root / ".claude/agents/developer.md").exists())
+        self.assertFalse((self.root / ".claude/rules/context-gate-build.md").exists())
 
     def test_an_option_answered_on_is_written_and_recorded(self):
         self.green(self.ANSWERS + '"option:writing-rules" = "on"\n'
@@ -348,6 +361,17 @@ def monorepo(root: Path) -> None:
     commit(root / "app")
     put(root / "lib/docs/notes.md", FM + "# Notes\n")
     commit(root / "lib")
+
+
+class UntypedDocsLeftOut(Base):
+    def test_leave_them_out_leaves_no_doc_frontmatter_finding(self):
+        put(self.root / "docs/a.md", "# A\n")
+        put(self.root / "docs/sub/b.md", "# B\n")
+        commit(self.root)
+        self.green('shape = "single"\n"docs-untyped:docs" = "leave them out"\n')
+        code, out = gate(self.root)
+        self.assertNotIn("doc-frontmatter", out)
+        self.assertEqual(code, 0, out)
 
 
 class NoRegistry(Base):
@@ -653,6 +677,47 @@ name = "b"
 dir = "b"
 tier = "full"
 """
+
+
+class LocalOnlyRoles(Base):
+    """Roles rendered for this machine only (`roles.local_only`; adopt never meets a
+    `local.toml`, as an existing install is refused) are recorded and excluded as `agents
+    render` does, and a git that fails undoes the adoption."""
+
+    ANSWERS = SingleRepo.ANSWERS + '"option:agent-roles" = "on"\n'
+
+    def setUp(self) -> None:
+        super().setUp()
+        single_repo(self.root)
+        from govern import roles
+        self.roles = roles
+        patch = mock.patch.object(roles, "local_only", return_value=True)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_adopt_records_local_roles_locally(self):
+        code, out, err = self.adopt(self.ANSWERS, "--apply")
+        self.assertEqual(code, 0, out + err)
+        roles = self.roles
+        self.assertEqual(installer.read_manifest(self.root)["rendered"], [])
+        self.assertEqual(len(roles._rows(self.root / roles.LOCAL_RECORD)), 6)
+        exclude = (self.root / ".git/info/exclude").read_text(encoding="utf-8")
+        self.assertIn("/.claude/agents/developer.md\n", exclude)
+        self.assertIn(f"/{roles.LOCAL_RECORD}\n", exclude)
+        status = subprocess.run(["git", "-C", str(self.root), "status", "--short"],
+                                capture_output=True, text=True, encoding="utf-8").stdout
+        self.assertNotIn(".claude/agents/developer.md", status)
+        self.assertNotIn("rendered.local.toml", status)
+
+    def test_failing_git_undoes_the_adoption(self):
+        before = snapshot(self.root)
+        exclude = (self.root / ".git/info/exclude").read_bytes()
+        with mock.patch.object(self.roles, "_git", return_value=None):
+            code, out, err = self.adopt(self.ANSWERS, "--apply")
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("adopt was undone", err)
+        self.assertEqual(snapshot(self.root), before)
+        self.assertEqual((self.root / ".git/info/exclude").read_bytes(), exclude)
 
 
 class RegistrySkip(unittest.TestCase):

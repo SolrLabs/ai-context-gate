@@ -17,6 +17,7 @@ Each check has a level: `off`, `warn` or `error`. At `error`, a check reports wh
 | [`decision-history`](#decision-history) | `warn` | A decision entry's body carries no history label — a rewritten entry states only today's rule. |
 | [`trap-ids`](#trap-ids) | `error` | A trap id is owned by exactly one of a project's trap files. |
 | [`trap-entries`](#trap-entries) | `warn` | Every trap entry says when it bites: the **Bites when:** line is what the trap index shows. |
+| [`decision-changes`](#decision-changes) | `error` | A locked decision changed in place without a dated Revised line, a decision removed, or an id another branch already took. Advisory (warnings) unless run with `--base`. |
 | [`doc-frontmatter`](#doc-frontmatter) | `error` | Every governed doc carries valid frontmatter, a current review date, and resolvable related links; working files carry a status and stay bounded. |
 | [`workspace-docs`](#workspace-docs) | `error` | The workspace's own docs exist and pass the same doc check as project docs. |
 | [`governed-doc-count`](#governed-doc-count) | `error` | Bounds how many governed docs a project carries. |
@@ -31,7 +32,7 @@ Each check has a level: `off`, `warn` or `error`. At `error`, a check reports wh
 | [`handoff-words`](#handoff-words) | `error` | Bounds a project's HANDOFF: a snapshot of where things stand, not a log. |
 | [`agents`](#agents) | `error` | Every agent definition pins its name, model, effort and whether it may read CLAUDE.md, an optional turn cap stays under the ceiling, and prose never contradicts the cap. |
 | [`skills`](#skills) | `error` | Every skill definition has frontmatter with a description. |
-| [`memory-index`](#memory-index) | `error` | Bounds the Claude Code memory index for this project. |
+| [`memory-index`](#memory-index) | `error` | Bounds the Claude Code memory index for this project, one memory per line. |
 | [`hooks-wired`](#hooks-wired) | `off` | Each configured hook script exists and is wired in .claude/settings.json on its event and matcher. |
 | [`usage`](#usage) | `off` | Tells the orchestrating agent its context, 5-hour and weekly usage as they rise, and injects the owner's prompts from usage-alerts.toml at break points. Needs `govern usage install` run once per machine to capture the data. |
 | [`ratchet`](#ratchet) | `error` | A size breach not recorded in the baseline, or one that grew past its record, is an error. |
@@ -39,6 +40,11 @@ Each check has a level: `off`, `warn` or `error`. At `error`, a check reports wh
 | [`git-repo`](#git-repo) | `warn` | The governance root is inside a git repository. |
 | [`tool-files`](#tool-files) | `warn` | Git ignores none of the files the gate needs committed: its config, baseline, install record and entry points. |
 | [`local-layer`](#local-layer) | `error` | Git does not track .context-gate/local.toml, the machine-local beta layer. |
+| [`agent-gates`](#agent-gates) | `off` | Refuses launching a briefed role without a brief file, ends a subagent's run only when the files its brief promised exist, and keeps subagents from running `git push`. |
+| [`agent-measure`](#agent-measure) | `off` | Records what each subagent run cost (tokens summed over its requests, tool calls and time, largest results) and tells the coordinator in one line per run; `govern runs report` summarizes a phase. |
+| [`agent-roles`](#agent-roles) | `off` | The engine's agent roles and the coordinator's build rules are rendered into the project, and each rendered file matches what `agents render` would write. |
+| [`agent-references`](#agent-references) | `warn` | Every agent a governed doc, a skill, an agent definition or the build rules names has a definition in the agents directory. |
+| [`merged-branches`](#merged-branches) | `warn` | Local branches already merged into the default branch are named |
 
 ## Registry and checkouts
 
@@ -145,7 +151,7 @@ Every registry entry declares a license, and each configured conflict (say, copy
 
 ## Decision logs and traps
 
-Numbered decision entries (`## P-12 - Title`) and trap entries (`## T-3 - Title`).
+Numbered decision entries (`## P-12 - Title`) and trap entries (`## T-3 - Title`), and what a change did to them.
 
 ### `decision-log`
 
@@ -221,6 +227,25 @@ Every trap entry says when it bites: the **Bites when:** line is what the trap i
 **Why:** An entry without one shows as a dash in the index, so nobody reading the index can tell whether it applies to them.
 
 No parameters: set its `level` only.
+
+### `decision-changes`
+
+A locked decision changed in place without a dated Revised line, a decision removed, or an id another branch already took. Advisory (warnings) unless run with `--base`.
+
+| | |
+|---|---|
+| Default level | `error` |
+| Scope | Runs once for the governance root; under `check --project X`, runs for that one project |
+| Ratchet | No |
+| Since | 0.7.0 |
+
+**Question:** Should a change to a settled decision have to say so?
+
+**Why:** A record that can be reworded silently is not a record; with more than one writer, the rewording is somebody else's decision.
+
+| Parameter | Type | Default | Looser when | Meaning |
+|---|---|---|---|---|
+| `locked_statuses` | list | `["locked"]` | — | Statuses whose entries may only change with a dated Revised line |
 
 ## Docs
 
@@ -335,13 +360,14 @@ Files matching the configured globs contain none of the configured strings.
 
 **Question:** Is there copy with a house style you must enforce (drafts that go to another project, public docs)? Which files, and which words or characters are out?
 
-**Why:** A style guide is only a rule if something enforces it. The engine's own names (check ids, settings, registry facts) are never flagged where they are used as names: in the config, the profile and the registry file, and in Markdown code. A project cannot rename them, whichever spelling it enforces. Files under this tool's own directory, `.claude/` or an always-excluded directory are never checked, nor is a file git ignores unless `include_ignored` names it (drafts kept out of git). A spelling that must stay (an old name kept for back-compat) is kept by a marker on its line: `writing-rules: allow <text>`, in a comment.
+**Why:** A style guide is only a rule if something enforces it. The engine's own names (check ids, settings, registry facts) are never flagged where they are used as names: in the config, the profile and the registry file, and in Markdown code. A project cannot rename them, whichever spelling it enforces. Files under this tool's own directory or `.claude/` are never checked. Files under an always-excluded directory (`build/` and the rest) are not either, unless `include_excluded` names them; a file git ignores is not unless `include_ignored` names it (drafts kept out of git), and one that is both needs both. A spelling that must stay (an old name kept for back-compat) is kept by a marker on its line: `writing-rules: allow <text>`, in a comment.
 
 | Parameter | Type | Default | Looser when | Meaning |
 |---|---|---|---|---|
 | `files` | list | `[]` | — | Globs, relative to the governance root |
 | `exclude` | list | `[]` | a value is added | Globs, relative to the governance root, of files `files` matches that are not checked |
 | `include_ignored` | list | `[]` | — | Globs, relative to the governance root, of files `files` matches that are checked even though git ignores them |
+| `include_excluded` | list | `[]` | — | Files under an always-excluded folder (build/, dist/ and the rest) that are checked anyway (not the tool's own folder or .claude/; a gitignored one needs include_ignored too) |
 | `rules` | list of tables | `[]` | — | One per forbidden string. Keys: `text`, `use` (optional), `why` (optional), `level` (optional), `ignore_case` (optional). |
 
 ### `stale-references`
@@ -443,6 +469,7 @@ A working file whose status says it is finished should be deleted once it has sa
 | `max_days` | int | `7` | raised | Days a finished file may sit untouched |
 | `finished_statuses` | list | `["complete", "superseded"]` | a value is removed | Statuses that mean the file is finished |
 | `exempt` | list | `["HANDOFF.md", "traps*"]` | a value is added | File names never treated as finished (glob patterns) |
+| `ticked` | bool | `true` | — | A working file whose every checkbox is ticked counts as finished |
 
 ### `handoff-words`
 
@@ -511,7 +538,7 @@ Every skill definition has frontmatter with a description.
 
 ### `memory-index`
 
-Bounds the Claude Code memory index for this project.
+Bounds the Claude Code memory index for this project, one memory per line.
 
 | | |
 |---|---|
@@ -522,11 +549,13 @@ Bounds the Claude Code memory index for this project.
 
 **Question:** How many lines may the memory index hold before it needs pruning?
 
-**Why:** The index is loaded into every session; measure what you want bounded.
+**Why:** The index is loaded into every session, so it counts memories, not lines, and leaves out the kinds that never go stale.
 
 | Parameter | Type | Default | Looser when | Meaning |
 |---|---|---|---|---|
-| `max_lines` | int | `40` | raised | Non-blank lines in MEMORY.md |
+| `max_lines` | int | `40` | raised | Counted non-blank lines in MEMORY.md |
+| `exempt_types` | list | `["feedback"]` | a value is added | Memory kinds whose lines are not counted |
+| `one_link_per_line` | bool | `true` | — | Warn when a line links more than one memory |
 
 ### `hooks-wired`
 
@@ -656,3 +685,118 @@ Git does not track .context-gate/local.toml, the machine-local beta layer.
 **Why:** A committed beta pin reaches CI and every clone, where the beta is not installed; govern beta keeps it out of git through info/exclude.
 
 No parameters: set its `level` only.
+
+### `agent-gates`
+
+Refuses launching a briefed role without a brief file, ends a subagent's run only when the files its brief promised exist, and keeps subagents from running `git push`.
+
+| | |
+|---|---|
+| Default level | `off` |
+| Scope | Runs once for the governance root |
+| Ratchet | No |
+| Since | 0.7.0 |
+
+**Question:** Should a subagent be held to its brief: launched only with a brief file, and stopped from finishing until the files it promised are written?
+
+**Why:** A coordinator drops contract lines when it retypes them into a prompt, and a subagent reports files it never wrote; a gate that refuses a few times, then lets go and says so, catches both without trapping the agent.
+
+| Parameter | Type | Default | Looser when | Meaning |
+|---|---|---|---|---|
+| `briefed` | list | `["developer", "senior-developer"]` | a value is removed | Agent types that may only be launched with a `Brief:` file |
+| `claims` | bool | `true` | — | Refuse a final message that points at a file that does not exist |
+| `checklist` | bool | `false` | — | Refuse a report that leaves a line of the role's hand-back checklist unanswered |
+| `deny_push` | bool | `true` | — | Deny a subagent's `git push` |
+| `max_refusals` | int | `2` | lowered | Refusals in one run before the agent is let go and the unmet items go to the coordinator |
+
+### `agent-measure`
+
+Records what each subagent run cost (tokens summed over its requests, tool calls and time, largest results) and tells the coordinator in one line per run; `govern runs report` summarizes a phase.
+
+| | |
+|---|---|
+| Default level | `off` |
+| Scope | Runs once for the governance root |
+| Ratchet | No |
+| Since | 0.7.0 |
+
+**Question:** Should each subagent run be measured, with one line per finished run for the coordinator and a report of where a phase's time and context went?
+
+**Why:** The token figure in a completion notice is one request's context, not the run's cost; real totals are the only way to see which roles and habits spend the most.
+
+| Parameter | Type | Default | Looser when | Meaning |
+|---|---|---|---|---|
+| `notice` | bool | `true` | — | Send the coordinator one line per finished run |
+
+### `agent-roles`
+
+The engine's agent roles and the coordinator's build rules are rendered into the project, and each rendered file matches what `agents render` would write.
+
+| | |
+|---|---|
+| Default level | `off` |
+| Scope | Runs once for the governance root |
+| Ratchet | No |
+| Since | 0.7.0 |
+
+**Question:** Should the engine render its standard agent roles (developer, senior developer, code reviewer, QA engineer, technical writer) and the coordinator's build rules into this project, with your models, commands and rules filled in?
+
+**Why:** A role copied by hand drifts from the standard the day after it is copied; one rendered from the engine changes with it, and a hand edit is caught.
+
+| Parameter | Type | Default | Looser when | Meaning |
+|---|---|---|---|---|
+| `extra_roles` | list | `[]` | — | Roles rendered beyond the five every project gets: ux-reviewer, architect |
+| `models` | table | `{}` | — | A role's model, over the engine's choice for it |
+| `efforts` | table | `{}` | — | A role's effort, over the engine's choice for it |
+| `max_turns` | table | `{}` | — | A role's turn cap; a role without one renders `maxTurns: false` |
+| `load_claude_md` | list | `[]` | — | Roles rendered with `omitClaudeMd: false` |
+| `authority` | str | `""` | — | What a brief answers to (a plan, a spec); empty renders "the plan or spec it names" |
+| `scoped_test` | str | `""` | — | The command that runs only the tests a unit touches |
+| `full_gate` | str | `""` | — | The command that runs the project's full gate |
+| `senior_triggers` | list | `["security: credentials, keys, tokens, signing, sign-in and sessions, the code that decides who may read or change protected data, or input from outside the project (a download, an archive, pasted text). A product rule about who may do what is not security."]` | — | What sends a unit to senior-developer instead of developer |
+| `operator_rules` | list | `[]` | — | Rules the operator gives every role, rendered above the project's own |
+| `handback_checks` | list | `[]` | — | Lines the operator adds to every role's hand-back checklist, each `Key: text` |
+| `high_risk_paths` | list | `[]` | — | Paths that make a phase high-risk, so qa-engineer runs beside code-reviewer |
+| `visual_paths` | list | `[]` | — | Paths whose change means someone must look at the running product |
+| `escalate_after` | int | `2` | — | Failed or handed-back attempts by developer before a unit goes to senior-developer |
+| `unit_gate` | str | `"scoped"` | — | What a unit runs before it hands back: `scoped` (its own tests; the coordinator runs the full gate after the merge) or `full` |
+| `housekeeping` | bool | `true` | — | Whether the rules tell the coordinator to launch technical-writer and close the phase when a fix pass closes |
+| `rules_file` | str | `".claude/rules/context-gate-build.md"` | — | Where the coordinator's build rules are rendered |
+
+### `agent-references`
+
+Every agent a governed doc, a skill, an agent definition or the build rules names has a definition in the agents directory.
+
+| | |
+|---|---|
+| Default level | `warn` |
+| Scope | Runs once for the governance root |
+| Ratchet | No |
+| Since | 0.7.0 |
+
+**Question:** Which agent names may your docs use that have no definition in this project (ones Claude Code or a plugin provides)?
+
+**Why:** A doc that launches an agent nobody defined gets a default agent or an error, at the moment the work was meant to start.
+
+| Parameter | Type | Default | Looser when | Meaning |
+|---|---|---|---|---|
+| `builtin` | list | `["general-purpose", "Explore", "Plan", "claude", "claude-code-guide", "statusline-setup"]` | a value is added | Agent names that need no definition here: the ones Claude Code provides |
+
+### `merged-branches`
+
+Local branches already merged into the default branch are named
+
+| | |
+|---|---|
+| Default level | `warn` |
+| Scope | Runs once for the governance root |
+| Ratchet | No |
+| Since | 0.7.0 |
+
+**Question:** Is a branch still here after its work was merged?
+
+**Why:** A merged branch holds nothing git lacks, and a pile of them hides the ones that matter.
+
+| Parameter | Type | Default | Looser when | Meaning |
+|---|---|---|---|---|
+| `keep` | list | `["main", "master", "development", "beta-*", "release-*"]` | a value is added | Branch names never reported |

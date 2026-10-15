@@ -19,8 +19,8 @@ sys.path.insert(0, str(ENGINE))
 
 from govern import __version__, config, tomlw  # noqa: E402
 from govern.measure import DecisionLog, Measurement, ScopeMeasure, TrapSet  # noqa: E402
-from govern.propose import (FRONTMATTER_ONLY, SINGLE, WHOLE_DIR, WORKSPACE,  # noqa: E402
-                            glob_matches, propose, validate)
+from govern.propose import (FRONTMATTER_ONLY, GOVERN_THEM, LEAVE_OUT, SINGLE,  # noqa: E402
+                            WHOLE_DIR, WORKSPACE, glob_matches, propose, validate)
 
 
 PRINCIPLES = '''
@@ -288,6 +288,96 @@ class SingleRepo(Base):
     def test_an_answer_to_no_question_is_noted(self):
         p = self.propose(self.m, None, None, {"nonsense": "x"})
         self.assertIn("answer 'nonsense' matches no question; ignored", p.notes)
+
+
+class UntypedDocs(Base):
+    """A markdown directory with no frontmatter: when no directory is typed, `[projects] docs` is
+    not written and the engine's `**/*.md` governs it, so the proposal asks what to do."""
+    base = {"shape": "single"}
+
+    def measured(self, doc_dirs):
+        m = single_repo(self.root("untyped"))
+        m.workspace.doc_dirs = doc_dirs
+        m.workspace.doc_files = {}
+        return m
+
+    def test_untyped_docs_dir_with_nothing_typed_asks_what_the_gate_should_do(self):
+        m = self.measured({"docs": (3, 0)})
+        p = self.propose(m, None, None, {})
+        q = [q for q in p.questions if q.key == "docs-untyped:docs"]
+        self.assertEqual(len(q), 1, p.questions)
+        self.assertEqual(q[0].options, [LEAVE_OUT, GOVERN_THEM])
+        self.assertIn("fail the 3 markdown file(s) under docs/", q[0].text)
+        self.assertIn("3", q[0].why)
+        self.assertFalse(any("left out of [projects] docs" in n for n in p.notes), p.notes)
+        self.assertNotIn("docs", p.config["projects"])
+
+    def test_untyped_docs_dir_left_out_goes_in_exclude(self):
+        m = self.measured({"docs": (3, 0)})
+        p = self.propose(m, None, None, {"docs-untyped:docs": LEAVE_OUT})
+        self.assertEqual([q.key for q in p.questions if q.key.startswith("docs-untyped")], [])
+        self.assertIn("docs/*.md", p.config["projects"]["exclude"])
+        self.assertEqual(self.loads(p, m), [])
+
+    def test_every_exclude_pattern_covers_files_at_any_depth(self):
+        from govern.context import doc_excluded
+        m = self.measured({"docs": (3, 0), "notes": (2, 0)})
+        p = self.propose(m, None, None, {"docs-untyped:docs": LEAVE_OUT,
+                                         "docs-untyped:notes": LEAVE_OUT})
+        patterns = p.config["projects"]["exclude"]
+        for d in ("docs", "notes"):
+            for rel in (f"{d}/a.md", f"{d}/sub/b.md"):
+                self.assertTrue(doc_excluded(rel, patterns), (rel, patterns))
+        self.assertTrue(any("docs/*.md is in [projects] exclude (every markdown file under "
+                            "docs/, at any depth); remove it to govern those files" in n
+                            for n in p.notes), p.notes)
+
+    def test_a_mixed_dir_unanswered_holds_back_the_untyped_question(self):
+        m = self.measured({"docs": (4, 2), "notes": (2, 0)})
+        p = self.propose(m, None, None, {})
+        self.assertEqual([q.key for q in p.questions if q.key.startswith("docs")], ["docs:docs"])
+
+    def test_untyped_docs_dir_governed_says_the_gate_will_fail_them(self):
+        m = self.measured({"docs": (3, 0)})
+        p = self.propose(m, None, None, {"docs-untyped:docs": GOVERN_THEM})
+        self.assertNotIn("docs/*.md", p.config["projects"].get("exclude", []))
+        self.assertTrue(any("docs/ has 3 markdown file(s) the gate will fail until each has "
+                            "frontmatter" in n for n in p.notes), p.notes)
+
+    def test_an_untyped_answer_that_is_no_option_asks_again(self):
+        m = self.measured({"docs": (3, 0)})
+        p = self.propose(m, None, None, {"docs-untyped:docs": "maybe"})
+        self.assertEqual([q.key for q in p.questions if q.key.startswith("docs-untyped")],
+                         ["docs-untyped:docs"])
+        self.assertTrue(any("is not one of" in n for n in p.notes), p.notes)
+
+    def test_untyped_dir_beside_a_typed_one_keeps_the_left_out_note_and_asks_nothing(self):
+        m = self.measured({"docs": (4, 4), "notes": (2, 0)})
+        p = self.propose(m, None, None, {})
+        self.assertEqual(p.config["projects"]["docs"], ["docs/**/*.md"])
+        self.assertFalse([q for q in p.questions if q.key.startswith("docs-untyped")])
+        self.assertTrue(any("notes/ has 2 markdown file(s), none with frontmatter; left out of "
+                            "[projects] docs" in n for n in p.notes), p.notes)
+
+
+class UntypedDocsInAWorkspace(Base):
+    base = {"shape": "workspace", "repos": "nova-app,nova-launcher,helper-bot"}
+
+    def test_one_question_per_directory_naming_each_repository(self):
+        m = example_workspace(self.root("untyped-workspace"))
+        for s, n in zip(m.scopes, (3, 5, 7)):
+            s.doc_dirs = {"docs": (n, 0)}
+            s.doc_files = {}
+        m.workspace.doc_dirs = {}
+        p = self.propose(m, None, str(self.profile), {})
+        q = [q for q in p.questions if q.key == "docs-untyped:docs"]
+        self.assertEqual(len(q), 1, p.questions)
+        for name, n in (("nova-app", 3), ("nova-launcher", 5), ("helper-bot", 7)):
+            self.assertIn(f"{name}: docs/ has {n} markdown", q[0].why)
+        p = self.propose(m, None, str(self.profile), {"docs-untyped:docs": LEAVE_OUT})
+        self.assertEqual(p.config["projects"]["exclude"], ["docs/*.md"])
+        self.assertEqual(len([n for n in p.notes if "is in [projects] exclude" in n]), 1,
+                         p.notes)
 
 
 class ExampleWorkspace(Base):

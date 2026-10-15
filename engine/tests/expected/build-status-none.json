@@ -1,0 +1,15 @@
+{
+  "phase": null,
+  "branch": "phase/p1",
+  "base": null,
+  "plan": null,
+  "high_risk": false,
+  "visual": false,
+  "stage": null,
+  "ledger": null,
+  "rulings": [],
+  "units": [],
+  "done": 0,
+  "total": 0,
+  "next": "No build is in flight on phase/p1: start one from a phase branch with `python3 .context-gate/bin/govern build start <phase>`."
+}

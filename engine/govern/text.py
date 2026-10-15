@@ -82,6 +82,17 @@ def write(path: Path, text: str) -> None:
         fh.write(text)
 
 
+# What a project's own words may not send to a terminal as they are: C0 control characters
+# and DEL.
+CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def shown(words: str) -> str:
+    """A project's own words (a decision's title, say) as a message or a report prints them:
+    each control character as `\\xNN`, so no title steers the terminal it is printed on."""
+    return CONTROL_RE.sub(lambda m: f"\\x{ord(m.group()):02x}", words)
+
+
 def eol(text: str) -> str:
     """The line ending a file uses, so an edit keeps it (git may check files out with CRLF)."""
     return "\r\n" if "\r\n" in text else "\n"

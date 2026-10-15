@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import re
 from datetime import date
+from fnmatch import fnmatch
 from pathlib import Path
 
+from govern.decisions import mask_lines
 from govern.findings import Findings
 from govern.manifest import Param, check
 from govern.text import Unreadable, parse_frontmatter, read, word_count
@@ -32,7 +34,15 @@ def check_doc(ctx, params: dict, path: Path, label: str, f: Findings) -> None:
         return
     fm, body = parse_frontmatter(raw)
     if not fm:
-        f.error(f"{label}: no frontmatter")
+        keys = params["required_keys"]
+        msg = f"{label}: no frontmatter"
+        if keys:
+            msg += f" \u2014 add {', '.join(keys)}"
+        if "doc_type" in keys:
+            msg += f"; doc_type is one of {', '.join(params['doc_types'])}"
+        if "audience" in keys:
+            msg += f"; audience is one of {', '.join(params['audiences'])}"
+        f.error(msg)
         return
     for key in params["required_keys"]:
         if not fm.get(key):
@@ -117,14 +127,74 @@ DOC_PARAMS = {
 def doc_frontmatter(ctx, params, scope) -> Findings:
     f = Findings()
     for rel, path in ctx.governed_docs(scope.gov):
-        # Single-repo mode's one scope *is* the governance root: `scope.name/rel`
-        # would prefix the repo-relative path with the root's own directory name a second
-        # time. `ctx.rel(path)` is already repo-relative — the same label `workspace_docs`
-        # uses below, so a finding on the same kind of file reads the same under either
-        # section.
-        label = ctx.rel(path) if ctx.registry.single else f"{scope.name}/{rel}"
-        check_doc(ctx, params, path, label, f)
+        check_doc(ctx, params, path, doc_label(ctx, scope, rel, path), f)
     return f
+
+
+def doc_label(ctx, scope, rel, path) -> str:
+    """How the doc checks name a governed doc. Single-repo mode's one scope *is* the governance
+    root: `scope.name/rel` would prefix the repo-relative path with the root's own directory name
+    a second time. `ctx.rel(path)` is already repo-relative — the same label `workspace_docs`
+    uses below, so a finding on the same kind of file reads the same under either section."""
+    return ctx.rel(path) if ctx.registry.single else f"{scope.name}/{rel}"
+
+
+TICKED_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)]) \[[xX]\](?: |$)")
+UNTICKED_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)]) \[ \](?: |$)")
+
+
+def all_ticked(text, markers) -> bool:
+    """True when the body has at least one ticked checkbox and no unticked one. A box in a code
+    fence or an HTML comment is an example, not a task, so it is not counted. (Defined here, not
+    in `working`, which imports this module.)"""
+    lines = text.splitlines()
+    live = mask_lines(lines, markers)
+    ticked = False
+    for line, on in zip(lines, live):
+        if not on:
+            continue
+        if UNTICKED_RE.match(line):
+            return False
+        if TICKED_RE.match(line):
+            ticked = True
+    return ticked
+
+
+def finished_docs(ctx, scope) -> list[str]:
+    """The labels of the scope's working files whose status says they are finished, or (with
+    `ticked` on) whose every checkbox is ticked, sorted. The statuses, the exempt names and
+    `ticked` are `finished-files`' own; empty when that check is off. An unreadable file is
+    skipped (the doc check reports it)."""
+    cfg = ctx.cfg.checks["finished-files"]
+    finished = cfg.params["finished_statuses"]
+    ticked = cfg.params["ticked"]
+    if cfg.level == "off" or not (finished or ticked):
+        return []
+    names = []
+    for rel, path in ctx.governed_docs(scope.gov):
+        if any(fnmatch(path.name, pat) for pat in cfg.params["exempt"]):
+            continue
+        if not ctx.committed(path):
+            continue   # deleting a file git does not hold loses it; `finished-files` says commit first
+        try:
+            fm, body = parse_frontmatter(read(path))
+        except Unreadable:
+            continue
+        if fm.get("doc_type") != "working":
+            continue
+        if (status_keyword(fm.get("status", "")) in finished
+                or (ticked and all_ticked(body, ctx.markers))):
+            names.append(doc_label(ctx, scope, rel, path))
+    return sorted(names)
+
+
+def could_go(names) -> str:
+    """The sentence that tells an owner over a document limit what to delete."""
+    if not names:
+        return ""
+    shown = ", ".join(names[:5])
+    more = f" and {len(names) - 5} more" if len(names) > 5 else ""
+    return f" Finished working files that could go: {shown}{more}"
 
 
 @check("workspace-docs", scope="workspace", since="0.4.0",
@@ -155,7 +225,8 @@ def governed_doc_count(ctx, params, scope) -> Findings:
     n = len(ctx.governed_docs(scope.gov))
     if n > params["max_docs"]:
         f.warn(f"{scope.name}: {n} governed docs exceeds governed-doc-count max_docs={params['max_docs']} "
-               f"— adding one should be a deliberate call; merge docs that duplicate each other")
+               f"— adding one should be a deliberate call; merge docs that duplicate each other"
+               + could_go(finished_docs(ctx, scope)))
     return f
 
 

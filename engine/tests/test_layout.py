@@ -127,9 +127,10 @@ class Prose(unittest.TestCase):
             with self.subTest(doc=name):
                 self.assertLessEqual(set(re.findall(r"/([\w-]+):(?:adopt|upgrade)\b", text)),
                                      {layout.PLUGIN})
-                self.assertLessEqual(set(re.findall(r"skills/([\w-]+)/", text)), {layout.PLUGIN})
+                self.assertLessEqual(set(re.findall(r"skills/([\w-]+)/", text)),
+                                     {layout.PLUGIN, layout.BETA_PLUGIN})
                 self.assertLessEqual(set(re.findall(r"([\w-]+)@skills-dir", text)),
-                                     {layout.PLUGIN})
+                                     {layout.PLUGIN, layout.BETA_PLUGIN})
                 self.assertLessEqual(set(re.findall(r"share/([\w-]+)/engines", text)),
                                      {layout.TOOL})
 

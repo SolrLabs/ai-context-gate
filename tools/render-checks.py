@@ -30,8 +30,9 @@ GROUPS = [
      "repositories they live in.",
      ("registry", "checkouts", "licenses")),
     ("Decision logs and traps",
-     "Numbered decision entries (`## P-12 - Title`) and trap entries (`## T-3 - Title`).",
-     ("decisions",)),
+     "Numbered decision entries (`## P-12 - Title`) and trap entries (`## T-3 - Title`), "
+     "and what a change did to them.",
+     ("decisions", "changes")),
     ("Docs",
      "The governed docs: their frontmatter, count, links, generated index blocks and wording.",
      ("docs", "links", "blocks", "references", "writing")),

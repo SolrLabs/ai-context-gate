@@ -274,6 +274,26 @@ def apply(root: Path, m: measure.Measurement, p: propose.Proposal,
         migrated = mp
 
     ctx = installer._load_context(root)
+    # The agent roles, where the option is on, as `installer.upgrade` renders them: the gate
+    # below reports every file it finds unrendered.
+    from govern import roles
+    if ctx.cfg.checks[roles.CHECK].level != "off":
+        try:
+            roles_plan = roles.plan(ctx)
+            if not roles_plan.problems:
+                roles_done = roles.apply(roles_plan)
+                created.extend(roles_done.written)
+                if roles.settle(ctx, roles_plan) == roles.LOCAL_RECORD:
+                    created.append(root / roles.LOCAL_RECORD)
+                print(f"  roles        {len(roles_done.written)} file(s) rendered")
+            for msg in roles_plan.problems:
+                print(f"  roles        not rendered: {msg}")
+        except (Unreadable, roles.UnknownSlot, roles.WriteFailed, roles.GitFailed,
+                OSError) as exc:
+            _undo(root, created)
+            return fail(f"the agent roles cannot be rendered ({exc}), so adopt was undone; "
+                        f"nothing was changed")
+    ctx = installer._load_context(root)
     _, index_out = _captured(cli.cmd_index, ctx)
     print(index_out, end="")
     ctx = installer._load_context(root)

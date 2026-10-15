@@ -39,7 +39,7 @@ def standard_overrides(ctx, params) -> Findings:
     for cid, key in ctx.cfg.profile_overrides:
         where = layout.LOCAL if ctx.cfg.checks[cid].source.get(key) == "local" else "config"
         f.warn(f"{where}: [checks.{cid}] {key} overrides the profile with no reason — follow the "
-               f"profile, or add a reason")
+               f"profile, or add reason = \"<why>\" under [checks.{cid}]")
     # Only under `require_reasons = false`: otherwise loading refuses a widened list.
     for layer, cid, key, added, removed in ctx.cfg.list_overrides:
         where = {"project": "config", "local": layout.LOCAL}.get(layer, "profile")

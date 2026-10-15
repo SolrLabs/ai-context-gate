@@ -86,7 +86,12 @@ LAYOUT = {
                  "trap_prefix": "str"},
     "blocks": {"workspace": "tables", "project": "tables", "registry_columns": "tables"},
     "checks": {"workspace_order": "list", "project_order": "list"},
+    # `auto_remove`: the verdicts the `housekeeping` skill may remove without asking; default none.
+    "sweep": {"auto_remove": "list"},
 }
+
+# The values `[sweep] auto_remove` accepts: the removable verdicts, in lower case.
+SWEEP_AUTO_REMOVE = ("merged", "pr-merged")
 
 # Keys an earlier engine accepted and this one no longer reads: named with what to do, rather than
 # reported as unknown, so a config written for the earlier engine says why it stopped loading.
@@ -106,6 +111,7 @@ class CheckSettings:
     reason: str | None = None
     source: dict[str, str] = field(default_factory=dict)   # key -> which layer set it
     ratchet: bool = True       # for a check whose breaches the ratchet tracks
+    level_before_local: str | None = None   # the level just before local.toml first set one
 
 
 @dataclass
@@ -195,9 +201,11 @@ def _load_toml(path: Path) -> dict:
 
 
 def _local_layer(root: Path) -> dict | None:
-    """local.toml, when this engine is the beta it names: the top layer, this machine only.
-    Any other engine never reads it (a stable engine must not trip on a beta's checks). Read as
-    the entry point reads it, so the two agree on which engine the file names."""
+    """local.toml, when this engine is a beta and the file names a beta of the same release
+    (major.minor.patch): the top layer, this machine only. The plugin holds one beta per machine,
+    so its hooks must follow a project still on an earlier or later beta of that release. Any
+    other engine, a stable one or another release, never reads it (a stable engine must not trip
+    on a beta's checks)."""
     if not versions.is_beta(__version__):
         return None
     try:
@@ -206,7 +214,11 @@ def _local_layer(root: Path) -> dict | None:
     except (OSError, ValueError):
         return None
     gov = data.get("governance", {})
-    if not isinstance(gov, dict) or gov.get("engine") != __version__:
+    if not isinstance(gov, dict):
+        return None
+    named = gov.get("engine")
+    if not isinstance(named, str) or not versions.is_beta(named) \
+            or versions.parse(named)[:3] != versions.parse(__version__)[:3]:
         return None
     extra = sorted(set(gov) - {"engine", "plugins_before"}) \
         + sorted(set(data) - {"governance", "checks"})
@@ -398,6 +410,10 @@ def _validate_layout(raw: dict, name: str) -> None:
             raise ConfigError(f"{name}: [registry.keys] '{key}' is not a key the engine reads "
                               f"({', '.join(REGISTRY_KEYS)})")
         _check_type(f"{name}: [registry.keys] {key}", value, "str")
+    for i, value in enumerate(raw.get("sweep", {}).get("auto_remove", [])):
+        if value not in SWEEP_AUTO_REMOVE:
+            raise ConfigError(f"{name}: [sweep] auto_remove[{i}] = {value!r} is not one of "
+                              f"{', '.join(SWEEP_AUTO_REMOVE)}")
     for i, skip in enumerate(raw.get("registry", {}).get("skip", [])):
         _check_type(f"{name}: [registry] skip[{i}]", skip, "str")
     _validate_tables(raw, name)
@@ -610,6 +626,8 @@ def _resolve_checks(layers: list[tuple[str, dict]], require_reasons: bool,
                             and manifest.LEVELS.index(value) < manifest.LEVELS.index(s.level) \
                             and not table.get("reason"):
                         overrides.append((cid, "level"))
+                    if layer == "local" and s.level_before_local is None:
+                        s.level_before_local = s.level
                     s.level = value
                 elif key == "reason":
                     _check_type(where, value, "str")

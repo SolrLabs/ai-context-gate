@@ -13,6 +13,16 @@ The logic lives in the context-gate engine; the policy lives in ../config.toml.
     python3 .context-gate/bin/govern find --project P PATTERN
     python3 .context-gate/bin/govern trap-add --project P --title T --bites B
     python3 .context-gate/bin/govern usage install | uninstall | resolve [--json]
+    python3 .context-gate/bin/govern phase close [--remote R] [--keep B ...] [--dry-run] [--path D]
+    python3 .context-gate/bin/govern runs mark LABEL | report [--all] [--json] | resolve --json
+    python3 .context-gate/bin/govern agents render [--check]
+    python3 .context-gate/bin/govern build start PHASE [--plan FILE] [--from BRANCH] [--high-risk]
+    python3 .context-gate/bin/govern build unit add ID --title T [--role R] [--red]
+    python3 .context-gate/bin/govern build unit set ID STATUS [--branch B] [--commit C] [--note N] [--role R]
+    python3 .context-gate/bin/govern build launch UNIT_ID | review | fix | close
+    python3 .context-gate/bin/govern build collect BRANCH
+    python3 .context-gate/bin/govern build ruling TEXT
+    python3 .context-gate/bin/govern build status [--json] | review | fix [--role R] | close
 
 Which engine runs: exactly the version config.toml pins, from
 ~/.local/share/context-gate/engines/<version>/. If it is not installed and config.toml
@@ -31,10 +41,12 @@ and the plugin from the source when either is missing; nothing else ever fetches
 handled here, before any engine loads, so it works when the beta is broken or gone.
 """
 import errno
+import hashlib
 import json
 import os
 import re
 import sys
+import time
 import tomllib
 from pathlib import Path
 
@@ -46,8 +58,12 @@ BETA_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)-beta\.([1-9]\d*)", re.ASCII)
 LOCAL = GOV_DIR / "local.toml"
 PLUGIN = "context-gate"
 STABLE_PLUGIN = f"{PLUGIN}@context-gate"
-BETA_PLUGIN = f"{PLUGIN}@skills-dir"
-PLUGIN_DIR = HOME / ".claude" / "skills" / PLUGIN
+# The beta's plugin has a name of its own, since Claude Code never loads a plugin under
+# ~/.claude/skills/ whose name an installed marketplace plugin has. Launchers older than that
+# (older launcher, in this file's words) wrote OLD_BETA_PLUGIN, which `beta on` now removes.
+BETA_PLUGIN = f"{PLUGIN}-beta@skills-dir"
+OLD_BETA_PLUGIN = f"{PLUGIN}@skills-dir"
+PLUGIN_DIR = HOME / ".claude" / "skills" / f"{PLUGIN}-beta"
 # Seconds a clone may take before it is given up: generous for one shallow tag over a slow link,
 # and short enough that a dead one ends a session start in a line instead of hanging it. A slower
 # link raises it with CONTEXT_GATE_FETCH_TIMEOUT.
@@ -92,9 +108,33 @@ def _local_engine(strict: bool = False) -> object:
     return _local_governance(strict).get("engine")
 
 
+BETA_NOTICE_SECONDS = 3600
+
+
+def _beta_notice_due(beta: str) -> bool:
+    """Whether the "running beta" line is due: this project's stamp for this beta is missing or
+    more than an hour old. It is touched when due; a stamp that cannot be read or touched means due."""
+    digest = hashlib.sha256(f"{ROOT}\n{beta}".encode("utf-8")).hexdigest()[:12]
+    stamp = HOME / ".local" / "state" / "context-gate" / f"beta-notice-{digest}"
+    try:
+        if time.time() - stamp.stat().st_mtime <= BETA_NOTICE_SECONDS:
+            return False
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return True
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.touch()
+    except OSError:
+        pass
+    return True
+
+
 def local_beta(pin: str) -> Path | None:
     """The beta engine local.toml names, when it can run here; else None, after one line saying
-    why. Never fatal: an unusable local.toml means the committed pin."""
+    why. Never fatal: an unusable local.toml means the committed pin. The "running beta" line
+    is said once an hour per project and beta."""
     if not LOCAL.is_file():
         return None
     off = f"running the committed pin {pin}; govern beta off to clear it"
@@ -110,7 +150,9 @@ def local_beta(pin: str) -> Path | None:
     if not (path / "govern" / "cli.py").is_file():
         note(f"beta {beta} is not installed, {off}")
         return None
-    note(f"running beta {beta} on this machine (committed pin {pin}); govern beta off to leave it")
+    if _beta_notice_due(beta):
+        note(f"running beta {beta} on this machine (committed pin {pin}); "
+             "govern beta off to leave it")
     return path
 
 
@@ -782,7 +824,8 @@ def _beta_on(version: str) -> int:
         die(f"{ROOT} has no .claude/ directory to enable the plugin in")
     data = _settings()
     plugins = data.setdefault("enabledPlugins", {})
-    before = {k: plugins[k] for k in (STABLE_PLUGIN, BETA_PLUGIN) if k in plugins}
+    before = {k: plugins[k] for k in (STABLE_PLUGIN, BETA_PLUGIN, OLD_BETA_PLUGIN)
+              if k in plugins}
     if not all(isinstance(v, bool) for v in before.values()):
         die(f"{SETTINGS_LOCAL} is not valid settings JSON (an enabledPlugins value for "
             "context-gate is not true or false); fix it, then run this again")
@@ -806,6 +849,10 @@ def _beta_on(version: str) -> int:
             _replace(LOCAL, swapped)
             if _local_engine() != version:    # the line found was not the one that is read
                 _put_back(saved, by_hand)
+        if OLD_BETA_PLUGIN in plugins:     # the id an older launcher wrote: this one replaces it
+            data["enabledPlugins"] = plugins = {
+                BETA_PLUGIN if k == OLD_BETA_PLUGIN else k: v for k, v in plugins.items()
+                if k != BETA_PLUGIN}
         plugins[BETA_PLUGIN] = True
         plugins[STABLE_PLUGIN] = False
         _write_settings(data)
@@ -888,8 +935,15 @@ def _beta_off() -> int:
     own = _own_settings(saved[LOCAL] or b"")
     changed = []
     try:
-        for k in (BETA_PLUGIN, STABLE_PLUGIN):
-            if k in before and isinstance(before[k], bool):
+        for k in (OLD_BETA_PLUGIN, BETA_PLUGIN, STABLE_PLUGIN):
+            if k == OLD_BETA_PLUGIN and k in before and isinstance(before[k], bool) \
+                    and BETA_PLUGIN not in before and BETA_PLUGIN in plugins:
+                # Where `beta on` put the beta's id in the old one's place, the old one goes back.
+                data["enabledPlugins"] = plugins = {
+                    OLD_BETA_PLUGIN if x == BETA_PLUGIN else x: before[k] if x == BETA_PLUGIN else v
+                    for x, v in plugins.items()}
+                changed.append(k)
+            elif k in before and isinstance(before[k], bool):
                 if plugins.get(k) != before[k]:
                     plugins[k] = before[k]
                     changed.append(k)
@@ -966,11 +1020,28 @@ def beta(argv: list[str]) -> int:
     die("usage: govern beta [on [X.Y.Z-beta.N] | off]")
 
 
+def _args_or_exit(usage: str, ok) -> None:
+    """Read the arguments before anything runs: `-h`/`--help` prints the usage; any argument
+    `ok` does not accept prints it to stderr and exits 2."""
+    args = sys.argv[1:]
+    if args in (["-h"], ["--help"]):
+        print(usage)
+        raise SystemExit(0)
+    if not ok(args):
+        print(usage, file=sys.stderr)
+        raise SystemExit(2)
+
+
 if Path(__file__).name == "upgrade":
+    _args_or_exit("usage: upgrade [--to X.Y.Z]",
+                  lambda a: not a or (len(a) == 2 and a[0] == "--to" and a[1] != ""))
     raise SystemExit(upgrade(sys.argv[1:]))
 
 if Path(__file__).name not in ("upgrade", "uninstall") and sys.argv[1:2] == ["beta"]:
     raise SystemExit(beta(sys.argv[2:]))
+
+if Path(__file__).name == "uninstall":
+    _args_or_exit("usage: uninstall [--force]", lambda a: a in ([], ["--force"]))
 
 sys.path.insert(0, str(engine_path()))
 

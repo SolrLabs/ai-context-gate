@@ -3,7 +3,7 @@ doc_type: reference
 purpose: Every table and key .context-gate/config.toml accepts, with types, defaults and examples.
 audience: human
 load_when: writing or changing a project's config.toml or a profile's principles.toml
-last_reviewed: 2026-09-25
+last_reviewed: 2026-10-14
 ---
 
 # Configuration reference
@@ -159,6 +159,11 @@ skip = ["docs-site"]
 [registry.keys]
 handoff = "profile.handoff"
 ```
+
+To run `govern build` in one member, pass `--project <name>` to each `build` subcommand: the
+ledger, the phase branch and the review package are the member's. This needs members that are
+repositories of their own; a member that is a folder of the root's repository is built without
+the flag.
 
 ## `[workspace]`
 
@@ -393,8 +398,10 @@ own code is flagged, and so is a code span that is not one of the engine's names
 finding is the matches left once those are skipped.
 
 A file under this tool's own directory (`.context-gate/`, whose reports quote the configured rules
-back), `.claude/` or an always-excluded directory (`build/`, `node_modules/` and the rest, at any
-depth and in any case) is never checked, whether a glob or an explicit path names it. Nor is a
+back) or `.claude/` is never checked, whether a glob or an explicit path names it. A file under an
+always-excluded directory (`build/`, `node_modules/` and the rest, at any depth and in any case)
+is left out the same way, unless `include_excluded` names it: list such files there to check them
+anyway. One that git also ignores needs `include_ignored` as well. Nor is a
 file git ignores (asked of the repository that holds it, a nested checkout's own included),
 unless `include_ignored` names it: list drafts kept out of git there to check them anyway. An
 entry that matched files but kept none of them is reported as a warning, with why. `exclude` lists
@@ -435,6 +442,34 @@ RENAMED = {"licence": "license"}  # writing-rules: allow licence
 ```markdown
 The old `Licence` heading stays for inbound links. <!-- writing-rules: allow licence -->
 ```
+
+`decision-changes` compares the decision logs with git, and how strict it is depends on how the
+gate is run, not on a setting. Plain `check` compares uncommitted work with the last commit and
+reports what it finds as warnings. `check --base <ref>` compares the branch with the commit where
+it left `<ref>` and reports errors; run it on a pull request, on a full clone, as
+`python3 .context-gate/bin/govern check --base origin/main`. A locked decision may change in
+place only with a dated line in the entry, `**Revised:** YYYY-MM-DD (what changed)`.
+`locked_statuses` lists the statuses that count as locked, so a project with its own statuses
+names its own:
+
+```toml
+[governance]
+engine = "0.7.0"
+
+[checks.decision-log]
+statuses = ["accepted", "proposed", "deferred"]
+reasons = { statuses = "The team's own words for a decision's state." }
+
+[checks.decision-changes]
+locked_statuses = ["accepted"]
+```
+
+`level = "warn"` turns the `--base` errors into warnings as well, and like any lowered level it
+needs a `reason`. An explicit `level = "error"` does not make plain `check` fail: without
+`--base` the check only warns, whatever its level. A project that wants the errors locally runs
+`python3 .context-gate/bin/govern check --base HEAD`, which holds uncommitted work to the gate's
+rules. [How it works](how-it-works.md#changes-to-settled-decisions) lists what counts as a
+change.
 
 ### Loosening needs a reason
 
@@ -478,6 +513,41 @@ The same check warns when a project changes a setting its profile set without a 
 `[governance] require_reasons = false` removes the requirement for a `reason` and for a
 `reasons` entry; the `standard-overrides` check warns instead, a widened list included.
 
+## Finished working files
+
+`doc-frontmatter` has two settings that say when a document is due for attention: `stale_days`
+(120) and `stale_types` (`control`, `reference`) warn when a review is older than that.
+When a scope is over `governed-doc-count`'s `max_docs`, the warning and the ratchet's message
+name up to five finished working files that could go. `finished-files` is the check that reports
+a finished working file, and its `finished_statuses` and `exempt` settings decide which are named. With `ticked` on (the default), a working file whose every
+checkbox is ticked also counts: `finished-files` warns about it whatever its status, and the
+limit message names it.
+
+## Merged branches
+
+`merged-branches` warns once per workspace, naming up to ten local branches already merged into
+the default branch (and counting the rest). It never deletes one. It leaves out the default
+branch, the branch checked out here, any branch another worktree has checked out, and every name
+that matches its `keep` setting, a list of `fnmatch` patterns (default `main`, `master`,
+`development`, `beta-*`, `release-*`). When git cannot answer, or the default branch cannot be
+told, it warns that merged branches were not checked.
+
+## Sweep
+
+`govern sweep` reports every worktree and local branch with a verdict saying whether it can go,
+and removes nothing without `--apply --only`. The `[sweep]` table has one key, `auto_remove`,
+which names the verdicts the `housekeeping` skill may remove without asking. An engine older than
+0.7.0 refuses the table, so set it in `.context-gate/local.toml` while the committed pin
+is older. A branch the `merged-branches` check's `keep` list names is never offered for removal.
+
+```toml
+# fragment: local.toml, not config.toml
+[sweep]
+auto_remove = ["merged", "pr-merged"]
+```
+
+- `auto_remove`: a list of `"merged"` and `"pr-merged"`. Default `[]`: ask before every removal.
+
 ## Running a beta locally
 
 You can run a locally installed prerelease in one project, on one machine, without touching the
@@ -496,6 +566,8 @@ level = "error"
 - `[governance] engine` names the beta to run. It must be a beta version (`X.Y.Z-beta.N`).
 - `[governance] plugins_before` records the plugin settings `govern beta on` found, so
   `govern beta off` can put them back. `govern beta on` writes it; do not write it by hand.
+- An option the pinned release does not have is turned on here too, by the options skill, because
+  the pinned engine, CI and other clones refuse a check they do not know.
 - `[checks.*]` tables hold the beta's own settings. They merge above the project's config under the
   same rules: a loosening needs its reason, and an unknown check or setting is an error. Layout
   tables (`[projects]`, `[registry]`, and so on) are a load error here.
@@ -511,8 +583,19 @@ not already ignore them.
 
 A beta comes from a `vX.Y.Z-beta.N` tag. `govern beta on` installs its engine and its plugin from
 the project's `[governance] source` when either is missing on this machine. The beta plugin is the
-local install, `context-gate@skills-dir`; the stable plugin is the marketplace one,
+local install, `context-gate-beta@skills-dir`, in `~/.claude/skills/context-gate-beta/`, and its
+skills are `/context-gate-beta:<skill>`; the stable plugin is the marketplace one,
 `context-gate@context-gate`.
+
+The beta plugin has a name of its own because Claude Code does not load a local plugin whose name
+an installed plugin already has, whatever a project's settings enable. Under the released plugin's
+name the beta plugin would never load where the release is installed. Launchers from 0.6.1 or
+earlier look for the beta in `~/.claude/skills/context-gate/govern/RELEASE`, so the beta install
+also leaves that marker folder, holding only `govern/RELEASE` and a README. Claude Code does not
+take it for a plugin. After `govern beta on` from a launcher that old, which enables the old id,
+run any `govern` command once in the project: the beta engine corrects the setting and says so.
+Then restart Claude Code. Where no beta is on (no `.context-gate/local.toml`), every hook of the
+beta plugin does nothing, so the released plugin and the beta copy never both act.
 
 Betas are published as prereleases of the repository, tagged `vX.Y.Z-beta.N`. No project is ever
 offered one: an upgrade, the marketplace plugin and the upgrade notice only ever name a release.
@@ -588,6 +671,57 @@ one line saying why, and does not fail. Run `govern beta off` to clear the file.
 Run `govern beta off` before `bin/uninstall`. Uninstall does not know about `local.toml`, and
 the beta plugin keys would stay in `.claude/settings.local.json`.
 
+## On a pull request
+
+`govern ci github` prints a GitHub Actions workflow that runs `check --base` and `diff` on every
+pull request ([how-it-works.md](how-it-works.md#on-a-pull-request)). The file is the project's
+to edit. Two additions:
+
+**Posting the report as a comment.** The workflow appends `govern diff` to the run's summary,
+which needs no token and no extra permission. To post it on the pull request too, give the
+workflow the permission:
+
+```yaml
+permissions:
+  contents: read
+  pull-requests: write
+```
+
+and add a step after the others:
+
+```yaml
+      - name: Comment with what this pull request changes
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ github.base_ref }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          python3 .context-gate/bin/govern diff --base "origin/$BASE_REF" > "$RUNNER_TEMP/governance.md"
+          gh pr comment "$PR_URL" --body-file "$RUNNER_TEMP/governance.md"
+```
+
+The branch name and the pull request's address reach the script as environment variables, as
+in the workflow itself: a `${{ ... }}` written inside `run:` is pasted into the script before
+a shell reads it. Each run adds one comment. A pull request from a fork runs with a read-only token, so the step
+cannot comment there; `continue-on-error` keeps that from failing the job, and the summary is
+still written.
+
+**Running a beta.** A committed `[governance] engine` pin is always a release, so CI runs a beta
+only when the workflow turns it on. Add one step before the check:
+
+```yaml
+      - name: Run the beta
+        run: python3 .context-gate/bin/govern beta on X.Y.Z-beta.N
+```
+
+`beta on` needs on the runner what it needs on any machine: a `[governance] source` to fetch the
+beta from, and a `.claude/` directory in the checkout (see
+[Running a beta locally](#running-a-beta-locally)). `check --base` and `diff` arrived in 0.7.0,
+so a project whose pin is older reaches them in CI only through this step. Remove it when the
+pin reaches the release.
+
 ## Renamed names
 
 Engine 0.5.0 spells its own names in American English: the check `licences` is now `licenses`
@@ -604,7 +738,7 @@ registry file other tools read too can keep `licence` with no warning by mapping
 ## Options
 
 An **option** is a check that ships `default = "off"` — today, `writing-rules`, `hooks-wired`,
-`checkout-hygiene`, `licenses` and `usage`. Run `python3 .context-gate/bin/govern options` to see
+`checkout-hygiene`, `licenses`, `usage`, `agent-roles`, `agent-gates` and `agent-measure`. Run `python3 .context-gate/bin/govern options` to see
 every option's state, or `/context-gate:options` in Claude Code to change them.
 
 | State | Project (`config.toml`) | Profile (`principles.toml`) |
@@ -746,6 +880,199 @@ effect. An edit that makes the file invalid keeps the alerts already loaded, and
 once (`usage: .context-gate/usage-alerts.toml has an error (...); keeping the previous alerts`);
 deleting the file keeps them too. Which file wins (project or profile) is settled at session start,
 and turning the `usage` option on or off needs a new session.
+
+## Agent roles
+
+With `agent-roles` on, the engine writes the project's agent definitions and the coordinator's
+build rules, so they are never copied by hand. Five roles are always rendered: `developer`,
+`senior-developer`, `code-reviewer`, `qa-engineer` and `technical-writer`. `extra_roles` adds
+`ux-reviewer` and `architect`. Each definition comes from an engine template, the check's params
+and the project's own text. The rules go to `.claude/rules/context-gate-build.md`.
+
+```toml
+[governance]
+engine = "0.4.0"
+
+[checks.agent-roles]
+level = "error"
+extra_roles = ["architect"]
+scoped_test = "python3 -m unittest -k"
+full_gate = "python3 -m unittest discover"
+high_risk_paths = ["engine/govern/installer.py"]
+visual_paths = ["web/"]
+
+[checks.agent-roles.models]
+developer = "sonnet"
+
+[checks.agent-roles.max_turns]
+developer = 60
+```
+
+A role's model, effort and turn cap default to the engine's choice; `models`, `efforts` and
+`max_turns` override one role at a time, and a role without a cap renders `maxTurns: false`, an
+explicit "no cap" that the `agents` check's `require_max_turns` accepts. A profile can set the
+same params for all its projects.
+
+The project's own rules go in `.context-gate/agents/all.md` (every role) and
+`.context-gate/agents/<role>.md`, each optional and copied in unchanged. The engine never writes
+those files.
+
+`handback_checks` adds lines to every role's hand-back checklist, for example
+`handback_checks = ["Licenses: each new dependency's license"]`.
+
+```
+python3 .context-gate/bin/govern agents render [--check]
+```
+
+Render prints one line per file (`  created`, `  updated`, `  unchanged`, or `  orphaned` for a
+file of a role no longer rendered, which it removes), then `[OK] ...`. `--check` writes nothing
+and exits 1 when anything would change. A file in the agents folder that does not start with the
+`context-gate:rendered` note is never written over: render names it and exits 1, and the fix is
+to move it or drop the role. Upgrade re-renders, uninstall removes what was rendered, and
+`agent-references` warns when a doc names an agent that has no definition.
+
+When `agent-roles` is on in `config.toml`, the rendered files are committed and listed in
+`installed.toml`, as above. When it is on only in the git-ignored `.context-gate/local.toml`,
+the files stay on that machine: they are recorded in `.context-gate/rendered.local.toml`, kept
+out of git through the repository's own `info/exclude`, and `render` names any of them git still
+tracks (`--untrack` stops that, leaving the files). A param that `local.toml` sets while
+`config.toml` has the check on is refused, because it would be rendered into committed files.
+
+## Agent gates
+
+With `agent-gates` on, and the plugin installed, a hook holds a role agent to its brief. A brief
+is a file. Its contract is `Produces:` and `Red:` lines at the start of a line:
+
+```
+Brief text...
+Produces: /work/briefs/unit-3/developer-report.md
+Red: /work/briefs/unit-3/red
+```
+
+The launch prompt is one line, `Brief: <absolute path>`; the path may be quoted or contain
+spaces. A relative `Produces:` or `Red:` path resolves against the brief file's folder.
+
+```toml
+[governance]
+engine = "0.4.0"
+
+[checks.agent-gates]
+level = "error"
+briefed = ["developer", "senior-developer"]
+max_refusals = 2
+```
+
+| Gate | What is refused |
+|---|---|
+| Launch | A role in `briefed` launched with no `Brief:` line, or one naming a missing file |
+| Produces | A stop while a promised file is missing, empty or older than the run |
+| Claims | With `claims` on: a stop whose final message says `report`, `written to`, `saved to` or `wrote`, then an absolute path that does not exist |
+| Red | A bug fix's stop with no failing test output in the `Red:` folder saved before its last edit |
+| Push | With `deny_push` on: a subagent's `git push` |
+| Checklist | With `checklist` on: a stop whose report leaves a hand-back checklist line unanswered |
+
+A refusal names every unmet item. A stop is refused at most `max_refusals` times in one run; then
+the agent is let go and the coordinator is told what was unmet. A gate never traps an agent, and
+nothing in the main session is refused except a briefed role launched without a brief.
+
+Claude Code's Write tool refuses a subagent a file named `report.md`, `findings.md`, `summary.md`
+or `analysis.md`, and no hook sees the attempt. A brief names its report `<role>-report.md`, and a
+refusal tells the agent to write it with a shell heredoc.
+
+## Agent measurement
+
+With `agent-measure` on, and the plugin installed, every tool call inside a subagent is logged
+with its time and result size, and each finished run is totalled from its transcript: tokens
+summed over its requests, calls, time in tools and the largest results. The token figure in a
+completion notice is only the context size at the last request, so it is not the run's cost.
+
+```toml
+[governance]
+engine = "0.4.0"
+
+[checks.agent-measure]
+level = "error"
+notice = true
+```
+
+With `notice` on, the coordinator gets one line per finished run, and subagents never see it.
+Per-session state under `~/.local/state/context-gate/agents/` is swept after 30 days; the
+per-project run log under `agents/runs/` is kept.
+
+```
+python3 .context-gate/bin/govern runs mark "phase 3"
+python3 .context-gate/bin/govern runs report [--all] [--json]
+```
+
+`mark` prints `phase 'phase 3' started in <log path>`. `report` prints `N agent runs (since mark
+'phase 3').`, one line per run, then totals by role and model, by tool, the largest results, and
+`Suggestion:` lines. The suggestions are fixed rules, each printed only when its pattern is
+present, and none is applied. `--all` reports every run, and `--json` prints the same data as one
+object. `govern runs resolve [--json]` shows the settings both agent options resolve to.
+
+## Closing a phase
+
+```
+python3 .context-gate/bin/govern phase close [--remote R] [--keep BRANCH] [--dry-run] [--path DIR]
+```
+
+Run it in the repository when no agent is still working. It refuses a detached HEAD, the
+remote's default branch, uncommitted changes, and a branch whose upstream is the remote's
+default branch. It pushes the current branch (to `--remote`, or the only remote, when it has no
+upstream), checks that the remote holds the same commit, and only then removes the local branches
+and worktrees already contained in it. It keeps a branch of its own upstream, the default branch
+and anything named by `--keep`. It prints `pushed <branch> to <remote>/<branch> at <commit>`,
+`removed <branch>` (with `and its worktree`) and `kept <branch>: <reason>` lines. Where the push
+fails or the remote does not show the commit, it prints why and deletes nothing. It opens no pull
+request, merges nothing upward and never forces a deletion. `--dry-run` prints `would push`,
+`would remove` and `would keep` lines and changes nothing.
+
+## The build loop
+
+`/context-gate:plan` and `/context-gate:build` run a phase with the rendered roles. Their state is
+`govern build`'s ledger, `.context-gate/build/<phase>/ledger.toml`, written only by the commands
+and committed on the phase branch with the briefs. Reports, diffs and failing-test output under
+`.context-gate/build/` are ignored by git. One phase is in flight per branch.
+
+```toml
+# fragment: a build ledger, ledger.toml
+phase = "p1-login"
+branch = "phase/p1-login"
+from = "development"
+base = "3f2a9c1"
+visual = false              # set by `build start --visual`
+launched = []               # fix briefs already launched
+stage = "build"             # build | review | fix | closing
+rulings = []
+
+[[unit]]
+id = "u1"
+title = "Session token store"
+role = "developer"
+status = "pending"          # pending | running | done | blocked | failed
+attempts = 0
+```
+
+| Command | Does |
+|---|---|
+| `build start <phase> [--plan FILE] [--from BRANCH] [--high-risk] [--visual]` | Writes the ledger; `--visual` marks the phase visual, so `build review` writes a third brief for `ux-reviewer`, and is refused unless `visual_paths` renders that role. Refuses on the default branch, a dirty tree, an existing ledger, or when git ignores the ledger (it prints the line to add to `.gitignore`) |
+| `build unit add <id> --title T [--role R] [--red]` | Adds a unit and writes its `brief.md` |
+| `build unit set <id> <status> [--role R] [--branch B] [--commit C] [--note N]` | Updates a unit |
+| `build launch <unit, review, fix or close>` | Refuses an unfilled or uncommitted brief; prints the launch prompt |
+| `build collect <branch>` | Copies what the agent on that branch produced (reports, failing output) from its worktree into this checkout's build folder |
+| `build ruling <text>` | Records a decision made without the owner: what, why, cost if wrong |
+| `build status [--json]` | The phase, a line per unit, and what is next |
+| `build review` | Writes the review package and the reviewers' briefs |
+| `build fix [--role R]` | Writes a ranked fix brief |
+| `build close` | Writes the technical writer's brief and prints the `phase close` command |
+
+The brief contract: the launch prompt carries `Brief:`, a path from the repository root (or an
+absolute one), and, for a role that works in a worktree, `Base:`, the commit the agent
+fast-forwards to first. `Produces:` and `Red:` are paths from the repository root, written and
+checked in the agent's own working tree; `build unit set <id> done --branch <branch>` and
+`build collect <branch>` copy what an agent produced into the coordinator's checkout. A brief still
+holding a `<!-- fill:` line is refused at launch by `agent-gates`. SessionStart tells the
+coordinator when a build is in flight.
 
 ## Profiles
 

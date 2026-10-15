@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from govern import ratchet
+from govern.checks.docs import could_go, finished_docs
 from govern.findings import Findings
 from govern.manifest import check
 
@@ -32,6 +33,14 @@ def check_ratchet(ctx, params, scope=None) -> Findings:
         baseline = {k: v for k, v in baseline.items()
                     if not any(ratchet.owns(ctx, s, k) for s in ctx.registry.scopes)}
     name = ctx.baseline_path.name
+
+    def could_go_for(key: str) -> str:
+        """What a `governed_docs:<scope>` breach can delete; nothing for any other key."""
+        kind, _, label = key.partition(":")
+        if kind != "governed_docs":
+            return ""
+        return could_go(next((finished_docs(ctx, s) for s in ctx.registry.scopes
+                              if s.name == label and s.governed), []))
     for key, val in current.items():
         base = baseline.get(key)
         # A new or grown breach is tagged with its key, so the limit's own warning about the
@@ -48,12 +57,12 @@ def check_ratchet(ctx, params, scope=None) -> Findings:
             else:
                 f.error(f"ratchet: '{key}' is a new breach at {val}, not in {name} — "
                         f"fix it, or if it is accepted for now run "
-                        f"`{ctx.prog} baseline --allow-raise`", breach=key)
+                        f"`{ctx.prog} baseline --allow-raise`{could_go_for(key)}", breach=key)
         elif val > base:
             grew = f"{val} {unit} ({held_by}, baseline {base})" if setting \
                 else f"{val} (baseline {base})"
             f.error(f"ratchet: '{key}' grew to {grew} — fix it, or "
-                    f"`{ctx.prog} baseline --allow-raise` to accept the new size", breach=key)
+                    f"`{ctx.prog} baseline --allow-raise` to accept the new size{could_go_for(key)}", breach=key)
         elif val < base:
             f.warn(f"ratchet: '{key}' shrank to {val} (baseline {base}) — "
                    f"run `{ctx.prog} baseline` to lower it")
