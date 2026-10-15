@@ -82,6 +82,16 @@ class Sweep(Build):
         self.assertEqual((code, err), (0, ""), out)
         return out.splitlines()
 
+    def develop(self) -> None:
+        """Make `development` the default branch, and keep a local `main` that is its ancestor."""
+        bare = self.tmp / "remote.git"
+        self.w.git("branch", "-m", "main", "development")
+        self.w.git("push", "-q", "origin", "development")
+        self.w.git("symbolic-ref", "HEAD", "refs/heads/development", at=bare)
+        self.w.git("push", "-q", "origin", "--delete", "main")
+        self.w.git("remote", "set-head", "origin", "development")
+        self.w.git("branch", "main")
+
     def worktree(self, branch: str, name: str | None = None) -> Path:
         folder = self.tmp / (name or "wt-" + branch.replace("/", "-"))
         self.w.git("worktree", "add", "-q", str(folder), branch)
@@ -180,6 +190,55 @@ class Verdicts(Sweep):
         self.ok("start", "p1")
         self.w.commit("ledger", at=self.w.top, index=False)
         self.assertIn("build     p1 in flight on phase/p1", self.lines())
+
+
+class Protected(Sweep):
+    NOTE = "(a protected branch (merged-branches keep))"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.develop()
+
+    def keep(self, patterns: str) -> None:
+        cfg = Path(self.w.root) / ".context-gate" / "config.toml"
+        cfg.write_text(cfg.read_text(encoding="utf-8")
+                       + f"\n[checks.merged-branches]\nkeep = {patterns}\n"
+                       + '[checks.merged-branches.reasons]\nkeep = "a test"\n', encoding="utf-8")
+
+    def test_a_main_behind_the_default_branch_is_in_use_not_merged(self):
+        got = self.lines()
+        self.assertIn("branch    IN-USE  development  (the default branch)", got)
+        self.assertIn(f"branch    IN-USE  main  {self.NOTE}", got)
+
+    def test_a_merged_release_branch_is_in_use(self):
+        self.w.git("branch", "release-1")
+        self.assertIn(f"branch    IN-USE  release-1  {self.NOTE}", self.lines())
+
+    def test_a_work_branch_merged_into_the_default_is_still_merged(self):
+        self.w.git("branch", "old")
+        self.assertIn("branch    MERGED  old", self.lines())
+
+    def test_a_custom_keep_protects_its_names_and_no_longer_main(self):
+        self.keep('["keepme"]')
+        self.w.git("branch", "keepme")
+        got = self.lines()
+        self.assertIn(f"branch    IN-USE  keepme  {self.NOTE}", got)
+        self.assertIn("branch    MERGED  main", got)
+
+    def test_a_worktree_on_a_protected_branch_is_in_use(self):
+        folder = self.worktree("main")
+        got = self.lines()
+        where = os.path.relpath(os.path.realpath(folder), os.path.realpath(self.w.top))
+        self.assertIn(f"worktree  IN-USE  main  {where}  {self.NOTE}", got)
+
+    def test_a_dirty_worktree_on_a_protected_branch_stays_dirty(self):
+        folder = self.worktree("main")
+        (folder / "scratch.txt").write_text("x\n", encoding="utf-8")
+        where = os.path.relpath(os.path.realpath(folder), os.path.realpath(self.w.top))
+        self.assertIn(f"worktree  DIRTY  main  {where}  (1 uncommitted change(s))", self.lines())
+
+    def test_a_protected_branch_with_no_upstream_is_listed_as_unpushed(self):
+        self.assertIn("unpushed  main  no upstream", self.lines())
 
 
 class Worktrees(Sweep):

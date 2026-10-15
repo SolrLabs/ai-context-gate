@@ -538,7 +538,7 @@ told, it warns that merged branches were not checked.
 and removes nothing without `--apply --only`. The `[sweep]` table has one key, `auto_remove`,
 which names the verdicts the `housekeeping` skill may remove without asking. An engine older than
 0.7.0-beta.16 refuses the table, so set it in `.context-gate/local.toml` while the committed pin
-is older.
+is older. A branch the `merged-branches` check's `keep` list names is never offered for removal.
 
 ```toml
 # fragment: local.toml, not config.toml
