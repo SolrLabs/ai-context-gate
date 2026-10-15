@@ -8,7 +8,8 @@ Verdicts:
   PR-MERGED   its pull request into the default branch merged at this exact tip (a squash merge
               defeats the ancestry test)
   IN-USE      the default branch, the primary checkout's branch, the branch of a build in flight,
-              or a worktree a process works in
+              a branch the `merged-branches` check's `keep` list names, or a worktree a process
+              works in
   DIRTY       the worktree has uncommitted changes
   REVIEW      anything else a person should decide: an open pull request, a closed one, one merged
               into another base, commits beyond it, none at all, a worktree that is locked,
@@ -30,9 +31,10 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import date
+from fnmatch import fnmatchcase
 from pathlib import Path
 
-from govern import build, phase
+from govern import build, manifest, phase
 
 MERGED, PR_MERGED, IN_USE, DIRTY, REVIEW = "MERGED", "PR-MERGED", "IN-USE", "DIRTY", "REVIEW"
 VERDICTS = (MERGED, PR_MERGED, IN_USE, DIRTY, REVIEW)
@@ -200,7 +202,19 @@ def _worktree_verdict(fields: dict[str, str], branch: str, judged: tuple[str, st
     return verdict, note
 
 
-def _survey(section: Section, cwds: set[str] | None, here: str) -> None:
+PROTECTED_NOTE = "a protected branch (merged-branches keep)"
+
+
+def _keep(ctx) -> list[str]:
+    """The `merged-branches` check's `keep` patterns, whatever its level."""
+    settings = ctx.cfg.checks.get("merged-branches")
+    if settings is None or "keep" not in settings.params:
+        return [str(p) for p in manifest.CHECKS["merged-branches"].params["keep"].default]
+    return [str(p) for p in settings.params["keep"]]
+
+
+def _survey(section: Section, cwds: set[str] | None, here: str,
+            keep: list[str] | None = None) -> None:
     repo = section.repo
     blocks = _blocks(repo)
     primary = blocks[0].get("branch", "").removeprefix("refs/heads/") if blocks else ""
@@ -218,6 +232,9 @@ def _survey(section: Section, cwds: set[str] | None, here: str) -> None:
         claimed.setdefault(branch, f"the branch of the build {slug}")
 
     branches = _branches(repo)
+    for name, _, _ in branches:
+        if any(fnmatchcase(name, p) for p in keep or ()):
+            claimed.setdefault(name, PROTECTED_NOTE)
     upstreams = {name: up for name, _, up in branches}
     judged: dict[str, tuple[str, str]] = {}
 
@@ -313,11 +330,12 @@ def survey(ctx, project: str | None = None) -> list[Section]:
     sections = _sections(ctx, project)
     cwds = process_cwds()
     here = os.path.realpath(os.getcwd())
+    keep = _keep(ctx)
     for sec in sections:
         if sec.error:
             continue
         try:
-            _survey(sec, cwds, here)
+            _survey(sec, cwds, here, keep)
         except (build.BuildError, phase.PhaseError) as exc:
             sec.items, sec.unpushed, sec.builds, sec.error = [], [], [], str(exc)
     _finished(ctx, sections)

@@ -45,6 +45,7 @@ project's internal detail.
 - Items whose verdict `auto-remove` names go without asking, once step 2 has cleared them.
 - Present every `REVIEW` and `DIRTY` item with its evidence and your recommendation, and wait.
   For a branch, check `git cherry` against the default branch and the PR's state first.
+- Protected branches (the `merged-branches` `keep` list) come out `IN-USE` and are never on the list.
 - Warn that removing a worktree deletes its ignored files, such as build output and local
   settings. The backup keeps commits, not those files.
 - Act on nothing the owner has not approved. A `DIRTY` worktree needs `--force`, which this skill

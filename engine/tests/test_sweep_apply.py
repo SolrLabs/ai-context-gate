@@ -45,6 +45,14 @@ class Apply(Sweep):
         self.assertEqual(self.branches(), ["main", "spare"])
         self.assertFalse(folder.exists())
 
+    def test_a_protected_branch_is_skipped_and_stays(self):
+        self.develop()
+        code, out = self.apply("main")
+        self.assertEqual(code, 0, out)
+        self.assertIn("skipped  main  (IN-USE: a protected branch (merged-branches keep))",
+                      out.splitlines())
+        self.assertIn("main", self.branches())
+
     def test_one_bundle_per_repository_under_the_git_directory_and_it_verifies(self):
         self.branch_at("old")
         self.branch_at("older")
