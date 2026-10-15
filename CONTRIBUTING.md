@@ -37,12 +37,12 @@ The plugin is `plugin/` plus the engine at the same tag. `install-plugin.py` ass
 tag, never from the working tree:
 
 ```sh
-python3 tools/release/install-plugin.py vX.Y.Z              # into ~/.claude/skills/context-gate/
-claude plugin enable context-gate@skills-dir --scope project   # in each project that opts in
+python3 tools/release/install-plugin.py vX.Y.Z              # into ~/.claude/skills/context-gate/ (a beta: context-gate-beta/)
+claude plugin enable context-gate@skills-dir --scope project   # in each project that opts in (a beta: context-gate-beta@skills-dir)
 python3 tools/release/install-plugin.py vX.Y.Z --out DIR    # assemble only; then claude --plugin-dir DIR
 ```
 
-A plugin under `~/.claude/skills/` loads as `context-gate@skills-dir`, with no marketplace. A
+A plugin under `~/.claude/skills/` loads as `<name>@skills-dir`, with no marketplace. A beta's plugin is named `context-gate-beta`: Claude Code does not load a local plugin that shares an installed plugin's name. A
 `.claude-plugin/marketplace.json` in a checkout must be named `context-gate-dev`, so installing from
 a checkout never collides with the released `context-gate@context-gate`.
 `python3 tools/release/install-engine.py vX.Y.Z` installs the engine at a tag where governed

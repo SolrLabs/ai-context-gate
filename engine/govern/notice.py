@@ -138,20 +138,100 @@ def both_plugins_warning(root: Path, home: Path) -> str | None:
     return None
 
 
+def _rewrite_switch(root: Path, edit) -> bool:
+    """Rewrite `<root>/.claude/settings.local.json`'s enabledPlugins with `edit`, which gets the
+    key/value pairs and returns the new ones, or None to leave the file alone. The file's own BOM
+    and line endings are kept, every other key stays where it was, and the write is atomic.
+    False, with nothing changed, for any other state: no file, a file that cannot be read or is
+    not a JSON object, or a write that fails."""
+    path = root / ".claude" / "settings.local.json"
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        raw = path.read_bytes()
+        data = json.loads(raw.decode("utf-8-sig"))
+        if not isinstance(data, dict) or not isinstance(data.get("enabledPlugins"), dict):
+            return False
+        changed = edit(data["enabledPlugins"])
+        if changed is None:
+            return False
+        data["enabledPlugins"] = changed
+        text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+        if b"\r\n" in raw:
+            text = text.replace("\n", "\r\n")
+        try:
+            with tmp.open("w", encoding="utf-8-sig" if raw.startswith(b"\xef\xbb\xbf") else "utf-8",
+                          newline="") as fh:
+                fh.write(text)
+            os.replace(tmp, path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+    except (OSError, ValueError, RecursionError):
+        return False
+    return True
+
+
+def correct_old_launcher_switch(root: Path) -> str | None:
+    """An older launcher enables `context-gate@skills-dir`, which no plugin has now. When the project's settings.local.json has that id true and not the beta
+    plugin's, set the second in the first's place and say so in the line returned; None, and
+    nothing changed, in any other state. The caller prints the line and goes on, whatever
+    happens here."""
+    old, new = layout.OLD_SKILLS_DIR_PLUGIN_ID, layout.SKILLS_DIR_PLUGIN_ID
+
+    def edit(enabled: dict) -> dict | None:
+        if enabled.get(old) is not True or enabled.get(new) is True:
+            return None
+        # The new id where the old one was, so the old one is gone in the same write; a new id
+        # that was there as false is set by that.
+        out: dict = {}
+        for key, value in enabled.items():
+            if key == old:
+                out[new] = True
+            elif key != new:
+                out[key] = value
+        return out
+
+    if not _rewrite_switch(root, edit):
+        return None
+    return (f"{layout.DISPLAY_NAME}: .claude/settings.local.json enabled {old}, the name the beta "
+            f"plugin had before it had one of its own; it now enables {new}; restart Claude Code "
+            "to load it")
+
+
+def remove_beta_switch(root: Path) -> bool:
+    """Remove the beta plugin's id from settings.local.json when it is true there: what an old
+    launcher's `beta off` leaves behind. Whether the project is off the beta is the caller's to
+    know. False, with nothing changed, when the id is not true or the file cannot be rewritten."""
+    new = layout.SKILLS_DIR_PLUGIN_ID
+
+    def edit(enabled: dict) -> dict | None:
+        if enabled.get(new) is not True:
+            return None
+        return {k: v for k, v in enabled.items() if k != new}
+
+    return _rewrite_switch(root, edit)
+
+
 def plugin_available(root: Path, home: Path) -> bool:
     """Whether the Claude Code plugin is present for this project: enabled in the settings
     Claude Code merges for it, or installed as a local plugin that is on by default (an install
     with `defaultEnabled: false` loads only where the settings turn it on)."""
     enabled = enabled_plugins(root, home)
-    if any(k.split("@")[0] == PLUGIN and v for k, v in enabled.items()):
+    if any(k.split("@")[0] in (PLUGIN, layout.BETA_PLUGIN) and v for k, v in enabled.items()):
         return True
-    local = home / ".claude" / "skills" / PLUGIN / ".claude-plugin" / "plugin.json"
-    if not local.is_file() or enabled.get(layout.SKILLS_DIR_PLUGIN_ID) is False:
-        return False
-    try:
-        return json.loads(local.read_text(encoding="utf-8-sig")).get("defaultEnabled") is not False
-    except (OSError, ValueError, AttributeError):
-        return True
+    # The beta's own folder, and the release's: a plugin is available from the one whose
+    # manifest is there, unless the project's settings turn its id off.
+    for folder, plugin_id in ((layout.BETA_PLUGIN, layout.SKILLS_DIR_PLUGIN_ID),
+                              (PLUGIN, layout.OLD_SKILLS_DIR_PLUGIN_ID)):
+        local = home / ".claude" / "skills" / folder / ".claude-plugin" / "plugin.json"
+        if not local.is_file() or enabled.get(plugin_id) is False:
+            continue
+        try:
+            if json.loads(local.read_text(encoding="utf-8-sig")).get("defaultEnabled") is not False:
+                return True
+        except (OSError, ValueError, AttributeError):
+            return True
+    return False
 
 
 def upgrade_command(root: Path, home: Path) -> str:

@@ -12,6 +12,8 @@ is to show the proposal plainly, ask only the questions it returns, and leave th
 tree to review. Never write the config by hand, never reimplement what the engine does, and never
 commit.
 
+In a project that already has `.context-gate/`, use this plugin's `options` skill instead.
+
 Arguments: `$ARGUMENTS` (for example `--profile git@github.com:org/principles.git#v1`).
 
 `--source` is not needed: `[governance] source`, where a fresh clone or a CI runner fetches the
@@ -119,6 +121,13 @@ Read `.context-gate/adopt-report.md` and tell the user, briefly:
   per machine (now that `.context-gate/` exists) and tell the user their statusline is wrapped
   and how to undo it (`python3 .context-gate/bin/govern usage uninstall`), matching the options
   skill's step
+- if the answer for `agent-roles` was On, run `python3 .context-gate/bin/govern agents render`
+  (now that `.context-gate/` exists), then `python3 .context-gate/bin/govern check`, and give
+  that result as the gate's: the apply ran its gate before the roles were rendered, so its
+  report lists each role as not rendered. The command writes the engine's role definitions
+  into `.claude/agents/` and the coordinator's build rules into `.claude/rules/`. A file of
+  that name the project wrote itself is left alone and named as a conflict: show the user both
+  ways out it prints and let them choose
 - the files to review and commit (`git status --short`)
 - once the settings are committed, each teammate installs the plugin once, in Claude Code:
   `/plugin marketplace add SolrLabs/ai-context-gate` (or the `--marketplace` fork), then

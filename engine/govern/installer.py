@@ -30,16 +30,20 @@ reverses exactly that before deleting the directory:
   `context-gate@context-gate`) through `enabledPlugins` in `.claude/settings.json`, the
   line a teammate's Claude Code reads. For a marketplace plugin, the marketplace goes in
   `extraKnownMarketplaces` beside it (the public repository, or `--marketplace OWNER/REPO` on
-  `adopt` and `enable-plugin`); `context-gate@skills-dir`, how development loads the plugin
+  `adopt` and `enable-plugin`); `context-gate-beta@skills-dir`, how development loads the plugin
   from ~/.claude/skills/, writes no marketplace. Uninstall restores each setting as it was.
   `enable-plugin` does the same for an existing install.
+- Rendered agent roles (`govern agents render`, with the `agent-roles` option on): each file
+  written is recorded with the sha256 of its text. Uninstall removes one still as rendered, and
+  one carrying the rendered note that no record names; one edited since is a conflict.
 
 Install writes `install-report.md`: a previous gate's findings (run from an `--entrypoint` before it
 is replaced) against the new gate's, grouped by the check that raised each new one, plus the
 settings that differ from the engine's defaults. Upgrade writes `upgrade-report.md` the same way,
 old engine against new, after pinning the project to the new engine, refreshing the tool's
 own files and regenerating every generated block with the new engine (as `index` does), so a
-block the old engine rendered never reads as stale: an upgrade never turns a project red.
+block the old engine rendered never reads as stale: an upgrade never turns a project red. Where
+the `agent-roles` option is on, the agent roles are rendered again the same way.
 
 Install also baselines: every current ratchet breach not already in the baseline (moved in by
 `--migrate-baseline`, or empty otherwise) is recorded, so the project starts green — never
@@ -144,13 +148,17 @@ def write_manifest(path: Path, data: dict) -> None:
                   f"backup = {toml_str(item['backup'])}",
                   f"created_dir = {'true' if item['created_dir'] else 'false'}",
                   f"sha256 = {toml_str(item['sha256'])}"]
+    for item in data.get("rendered", []):
+        lines += ["", "[[rendered]]", f"path = {toml_str(item['path'])}",
+                  f"sha256 = {toml_str(item['sha256'])}"]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def read_manifest(root: Path) -> dict:
     with (root / layout.MANIFEST).open("rb") as fh:
         data = tomllib.load(fh)
-    for key in ("entrypoint", "moved", "retired", "plugin", "marketplace", "settings"):
+    for key in ("entrypoint", "moved", "retired", "plugin", "marketplace", "settings",
+                "rendered"):
         data.setdefault(key, [])
     if "options_answered" in data:
         # An option recorded under an old name (`config.RENAMED`) is written back under its
@@ -721,9 +729,37 @@ def upgrade(root: Path, with_report: bool = True) -> int:
         cfg_path.write_bytes(original)
         return fail(f"upgrade rolled back: {ctx.rel(exc.path)}: {exc.reason}, so its generated "
                     f"blocks cannot be refreshed — nothing was changed")
+    # The agent roles, where the option is on: planned with the new engine before anything is
+    # written, like the blocks, then written all or none. A target the engine did not render is
+    # left alone and named below; the upgrade goes on.
+    from govern import roles
+    roles_plan = roles_done = None
+    if ctx.cfg.checks[roles.CHECK].level != "off":
+        try:
+            roles_plan = roles.plan(ctx)
+        except Unreadable as exc:
+            cfg_path.write_bytes(original)
+            return fail(f"upgrade rolled back: {ctx.rel(exc.path)}: {exc.reason}, so the agent "
+                        f"roles cannot be rendered — nothing was changed")
+        except roles.UnknownSlot as exc:
+            cfg_path.write_bytes(original)
+            return fail(f"upgrade rolled back: {exc} — nothing was changed")
+        if not roles_plan.problems:
+            try:
+                roles_done = roles.apply(roles_plan)
+            except roles.WriteFailed as exc:
+                cfg_path.write_bytes(original)
+                where = f"{exc.error.filename}: " if exc.error.filename else ""
+                left = ", ".join(ctx.rel(p) for p in exc.unrestored)
+                return fail(f"upgrade rolled back: {where}{exc.error.strerror or exc.error}, so "
+                            f"the agent roles cannot be rendered — "
+                            + (f"the pin is as it was, but {left} could not be put back"
+                               if left else "nothing was changed"))
     stuck = _refresh_tool_files(root / layout.GOV_DIR)
     if stuck is not None:
         exc, unrestored = stuck
+        if roles_done is not None:
+            unrestored = unrestored + [ctx.rel(p) for p in roles_done.undo()]
         cfg_path.write_bytes(original)
         where = f"{exc.filename}: " if exc.filename else ""
         return fail(f"upgrade rolled back: {where}{exc.strerror or exc} — "
@@ -733,10 +769,19 @@ def upgrade(root: Path, with_report: bool = True) -> int:
                        f"once the file can be written"))
     record = read_manifest(root)
     record["engine"] = __version__
+    if roles_done is not None:
+        # Rows for roles that stay on this machine go to the local record, below.
+        record["rendered"] = [] if roles.local_only(ctx) else roles.records(root, roles_plan)
     write_manifest(root / layout.MANIFEST, record)
     ran = f"{old_pin} (ran {old_engine})" if old_engine and old_engine != old_pin else old_pin
     print(f"upgraded {layout.DISPLAY_NAME} {ran} -> {__version__} in {root / layout.GOV_DIR}")
     _refresh_blocks(blocks_new, index_lines)
+    roles_left = _say_roles(ctx, roles_plan, roles_done)
+    if roles_done is not None:
+        try:
+            roles.settle(ctx, roles_plan)
+        except (roles.GitFailed, Unreadable, OSError) as exc:
+            print(f"  roles        not kept out of git ({exc}): run {roles.RENDER}")
     if with_report:
         notes = releases.between(old_engine, __version__)
         from govern import options as opts_mod
@@ -744,6 +789,7 @@ def upgrade(root: Path, with_report: bool = True) -> int:
                 if o.new or o.state == "inert"]
         _report(ctx, root / layout.GOV_DIR / "upgrade-report.md",
                 f"Upgrade report: {ran} to {__version__}", old, notes, options=opts)
+        _report_roles(root / layout.GOV_DIR / "upgrade-report.md", roles_left)
         if notes:
             print(f"  notes        {len(notes)} release(s) in the report: "
                   f"{', '.join(v for v, _ in notes)}")
@@ -794,12 +840,96 @@ def _refresh_blocks(pending: dict[Path, str], lines: list[str]) -> None:
             print(line)
 
 
+def _say_roles(ctx: Context, plan, done) -> list[str]:
+    """Say what the upgrade did with the agent roles (nothing at all where the option is off),
+    and return what it left for a person: each target it did not render and so left alone,
+    and each setting that keeps anything from being rendered."""
+    from govern import roles
+    if plan is None:
+        return []
+    refused = [f"{msg} — nothing was rendered" for msg in plan.problems]
+    alone = [roles.conflict(ctx, t) for t in plan.conflicts]
+    if done is not None:
+        print(f"  roles        {len(done.written)} file(s) rendered, {len(done.removed)} removed")
+    for msg in refused:
+        print(f"  roles        not rendered: {msg}")
+    for msg in alone:
+        print(f"  roles        left alone: {msg}")
+    return refused + alone
+
+
+def _report_roles(path: Path, left: list[str]) -> None:
+    """Name, at the end of the upgrade report, what `_say_roles` returned: the report's own
+    findings list a finding only when it is new, and a file left alone before this upgrade
+    too would otherwise go unnamed."""
+    if not left:
+        return
+    lines = ["## Agent roles left for a person", "",
+             "The upgrade renders the agent roles again. It left these as they were:", "",
+             *[f"- {msg}" for msg in left]]
+    text = path.read_text(encoding="utf-8").rstrip("\n")
+    path.write_text(text + "\n\n" + "\n".join(lines) + "\n", encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------- uninstall
+
+def _roles_layout(root: Path) -> tuple[str, str]:
+    """(agents directory, rules file) as the project's own config.toml names them, else the
+    defaults. Read as TOML, never loaded as policy: an uninstall has to work on a config that
+    no longer loads."""
+    from govern import roles
+    try:
+        with (root / layout.CONFIG).open("rb") as fh:
+            raw = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError):
+        raw = {}
+    def named(*keys: str):
+        value = raw
+        for key in keys:
+            value = value.get(key) if isinstance(value, dict) else None
+        return value if isinstance(value, str) and roles.inside(value) else None
+    return (named("workspace", "agents_dir") or ".claude/agents",
+            named("checks", roles.CHECK, "rules_file") or roles.RULES_FILE)
+
+
+def _rendered(root: Path) -> tuple[list[str], list[str], list[str]]:
+    """The rendered agent roles an uninstall has to deal with, as paths from the root:
+
+    - ours: recorded and still as rendered, or carrying the rendered note with no record at
+      all (an older engine rewriting `installed.toml` drops the table it does not know);
+    - edited: recorded, changed since, still carrying the note;
+    - replaced: recorded, and now a file without the note, which is not the tool's to remove.
+    """
+    from govern import roles
+    ours, edited, replaced = [], [], []
+    seen = set()
+    for item in roles.recorded(root):
+        rel = Path(item["path"]).as_posix()
+        if rel in seen or not (root / rel).is_file():
+            continue
+        seen.add(rel)
+        if roles.file_digest(root / rel) == item.get("sha256"):
+            ours.append(rel)
+        elif roles.carries_note(root / rel):
+            edited.append(rel)
+        else:
+            replaced.append(rel)
+    adir, rules = _roles_layout(root)
+    loose = sorted((root / adir).glob("*.md")) if (root / adir).is_dir() else []
+    for path in [*loose, root / rules]:
+        rel = path.relative_to(root).as_posix()
+        if rel not in seen and path.is_file() and roles.ours(path, {root / rules}):
+            seen.add(rel)
+            ours.append(rel)
+    return ours, edited, replaced
+
 
 def uninstall(root: Path, force: bool = False) -> int:
     """Reverse an install. Every conflict is found before anything changes: if one exists (an
-    entry-point stub edited since install, a path to restore that is occupied), nothing is
-    touched unless --force, which restores the originals over them."""
+    entry-point stub edited since install, a path to restore that is occupied, a rendered agent
+    role edited since it was rendered), nothing is touched unless --force, which restores the
+    originals over them. A rendered role's path that now holds a file the tool did not render is
+    a conflict too, and stays in place even under --force."""
     if not (root / layout.MANIFEST).is_file():
         return fail(f"no {layout.MANIFEST} — nothing installed here, or installed by hand")
     record = read_manifest(root)
@@ -827,6 +957,12 @@ def uninstall(root: Path, force: bool = False) -> int:
         except ValueError as exc:
             conflicts.append(f"{SETTINGS} cannot be read ({exc}), so the plugin lines cannot be "
                              f"removed")
+    from govern import roles
+    ours, edited, replaced = _rendered(root)
+    conflicts += [f"{rel} was edited after it was rendered (--force removes it)"
+                  for rel in edited]
+    conflicts += [f"{rel} is no longer the file {layout.DISPLAY_NAME} rendered (--force leaves "
+                  f"it in place)" for rel in replaced]
     if conflicts and not force:
         for c in conflicts:
             print(f"  conflict     {c}", file=sys.stderr)
@@ -856,7 +992,22 @@ def uninstall(root: Path, force: bool = False) -> int:
         elif path.exists():
             path.unlink()
             print(f"  removed      {stub['path']}")
+    # The exclude block is one per repository, shared by every worktree and project in it: this
+    # project takes it only if it has its own record of local-only files, read before removing any.
+    local_only = (root / roles.LOCAL_RECORD).is_file()
+    for rel in ours + edited:
+        roles.remove(root, root / rel)
+        print(f"  removed      {rel}")
+    for rel in replaced:
+        print(f"  left         {rel} (not rendered by {layout.DISPLAY_NAME})")
     _restore_settings(root, record, print)
+    try:
+        where = roles.exclude_file(root) if local_only else None
+        if where is not None and where.is_file() and roles.set_block(where, []):
+            print(f"  removed      the {layout.DISPLAY_NAME} lines in {roles._rel(root, where)}")
+    except (roles.GitFailed, Unreadable, OSError) as exc:
+        print(f"  left         the {layout.DISPLAY_NAME} lines in the repository's exclude file "
+              f"({exc})")
     shutil.rmtree(root / layout.GOV_DIR)
     print(f"uninstalled {layout.DISPLAY_NAME} from {root}")
     return 0

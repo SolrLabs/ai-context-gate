@@ -23,6 +23,11 @@ REPO_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY"
             "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_PREFIX")
 
 
+# How long a git call made through `git()` or `govern.base` may take before it counts as a
+# failure.
+GIT_TIMEOUT = 20
+
+
 def git_env() -> dict[str, str]:
     """The caller's environment minus `REPO_ENV`, for every git call the engine makes about a
     repo on disk, so `-C <repo>` always means that repo."""
@@ -37,7 +42,7 @@ def git(repo: Path, *args: str) -> str | None:
     disagree on never raises. Run with `git_env()`, so a hook's `GIT_DIR` never redirects it."""
     try:
         res = subprocess.run(["git", "-C", str(repo), *args],
-                             capture_output=True, timeout=20, env=git_env())
+                             capture_output=True, timeout=GIT_TIMEOUT, env=git_env())
     except (OSError, subprocess.SubprocessError):
         return None
     if res.returncode != 0:
@@ -127,6 +132,10 @@ class Context:
     # that is present anyway can still be looked at by a check that works across the tree (the
     # workspace pass of `agent-worktrees`, a `writing-rules` glob that reaches into it).
     workspace_only: bool = False
+    # `check --base <ref>`: the ref, as given. A change-aware check then compares the tree with
+    # the commit the branch left that ref at, in each repository (`govern.base`), and is a gate.
+    # None on an ordinary run, where it compares uncommitted work with `HEAD` and only advises.
+    base: str | None = None
     # Which of `governed_docs`'s candidate files git says are ignored, cached across the whole
     # run: one `git check-ignore --stdin` call per repo per batch of files not already answered,
     # not one per file and not one per call site.

@@ -115,7 +115,8 @@ out in sections 7 and 8 of the [license](LICENSE).
 ## Feedback
 
 This is an alpha. Open an issue for bugs, confusing output, or a check that fires on something
-that's fine; include the `govern check` output and your `.context-gate/config.toml`.
+that's fine; include the `govern check` output and your `.context-gate/config.toml`. From inside a
+project, `/context-gate:report` drafts one and checks it for private text before you send it.
 
 ## License
 

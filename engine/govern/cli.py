@@ -3,11 +3,13 @@ and scripts already call, installed from `engine/govern/templates/entrypoint.py`
 usage and in messages is whatever the engine was invoked as.
 
 Exit codes: 0 clean, 1 a finding or an unresolved problem, 2 usage or configuration error.
+`diff` is a report: it exits 0 whatever changed, and 2 only on a usage or configuration error.
 """
 from __future__ import annotations
 
 import argparse
 import dataclasses
+import functools
 import json
 import os
 import re
@@ -16,6 +18,7 @@ from pathlib import Path
 
 import govern.checks  # noqa: F401  (registers the built-in checks)
 from govern import __version__, blocks, config, layout, manifest, notice, ratchet, registry
+from govern import versions
 from govern.context import Context
 from govern.decisions import heading_sep
 from govern.findings import REPORTERS, Findings, one_per_breach, report_per_scope
@@ -121,7 +124,8 @@ def collect(ctx: Context, targets: list, workspace: bool) -> list[tuple[str, Fin
 
 
 def cmd_check(ctx: Context, project: str | None, path: str | None = None,
-             history_from: str | None = None, workspace_only: bool = False) -> int:
+             history_from: str | None = None, workspace_only: bool = False,
+             base: str | None = None) -> int:
     """`--path` checks a scope's files from a directory swapped in for the one the registry
     names — a git pre-commit hook's staged-tree snapshot, say — instead of the checkout on disk.
     `--history-from` then answers every git question a project-scope check asks about those
@@ -133,7 +137,16 @@ def cmd_check(ctx: Context, project: str | None, path: str | None = None,
     Every project scope is skipped, with its blocks, docs, the links into it and its ratchet
     entries, and the output names each project it skipped. A checkout that is present anyway
     can still be looked at by a check that works across the tree (the workspace pass of
-    `agent-worktrees`, a `writing-rules` glob that reaches into it)."""
+    `agent-worktrees`, a `writing-rules` glob that reaches into it).
+
+    `--base REF` makes a change-aware check (`decision-changes`) compare the tree with the
+    commit the branch left `REF` at, per repository, and report what it finds as errors: the
+    gate a pull request runs. Without it such a check compares uncommitted work with `HEAD`
+    and only warns. It combines with every other flag; under `--path` the base is read from
+    `--history-from`'s checkout."""
+    if base is not None and not base.strip():
+        return fail("--base needs a ref, e.g. --base origin/main")
+    ctx.base = base
     if workspace_only and (project or path is not None):
         return fail("--workspace-only checks no project: drop --project and --path")
     if workspace_only and ctx.registry.single:
@@ -178,6 +191,80 @@ def cmd_check(ctx: Context, project: str | None, path: str | None = None,
         total.extend(found)
     label = f"project:{project}" if project else ctx.workspace_label
     return 0 if REPORTERS["aggregate"](label, total) else 1
+
+
+# ---------------------------------------------------------------------------- diff
+
+def _emit(text: str) -> None:
+    """Write a whole report to stdout, and stop quietly when its reader has gone (`govern diff
+    | head -1`): a closed pipe is the reader's choice, not an error, so the command still
+    exits 0. It is flushed here, where the failure can be caught; left to the interpreter's
+    exit it would be a traceback."""
+    try:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # What is still buffered has nowhere to go: point stdout at nothing, so the flush
+        # the interpreter makes on its way out does not fail in turn.
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+            os.close(devnull)
+        except (OSError, ValueError):
+            pass
+
+
+def _say(text: str) -> None:
+    """Print text that holds a project's own words (a title, a path) on a console that may not
+    be able to encode them: a Windows console, or a pipe with a legacy encoding. What it cannot
+    encode is escaped, never a traceback."""
+    codec = sys.stdout.encoding or "utf-8"
+    try:
+        text = text.encode(codec, "backslashreplace").decode(codec, "replace")
+    except LookupError:
+        pass
+    _emit(text)
+
+
+def cmd_diff(ctx: Context, base: str | None, as_json: bool, project: str | None = None) -> int:
+    """What this branch did to the decision logs, the trap files and the ratchet baseline
+    (`govern.changes`): a report, never a gate. It exits 0 whether or not anything changed or
+    could be compared, so CI can always post it.
+
+    With no `--base` the base is `HEAD`, each repository's own: uncommitted work. `--base REF`
+    compares with the commit the branch left `REF` at, as `check --base` does. `--project`
+    limits the report to one project."""
+    from govern import changes
+    if base is not None and not base.strip():
+        return fail("--base needs a ref, e.g. --base origin/main")
+    scope = None
+    if project:
+        scope = ctx.registry.find(project)
+        if scope is None:
+            return fail(f"no project '{project}' in {ctx.registry.path.name}")
+    ctx.base = base
+    report = changes.build(ctx, scope)
+    _say(changes.as_json(report) if as_json else changes.text(report))
+    return 0
+
+
+# ---------------------------------------------------------------------------- ci
+
+# The workflow each provider's CI runs, shipped beside the entry point's template.
+CI_TEMPLATES = {"github": Path(__file__).resolve().parent / "templates" / "ci-github.yml"}
+
+
+def cmd_ci(provider: str | None, prog: str) -> int:
+    """Print the workflow that runs the gate and the report on a pull request. It writes
+    nothing: the project redirects it to where its provider reads workflows, and owns the
+    file from then on."""
+    template = CI_TEMPLATES.get(provider or "")
+    if template is None:
+        known = ", ".join(sorted(CI_TEMPLATES))
+        named = f"no workflow for '{provider}'" if provider else "name a provider"
+        return fail(f"ci: {named} — the one shipped is {known}: `{prog} ci {known}`")
+    _emit(template.read_text(encoding="utf-8"))
+    return 0
 
 
 # ---------------------------------------------------------------------------- explain
@@ -257,6 +344,28 @@ def cmd_options(ctx: Context, global_: bool, as_json: bool, rec: list[str] | Non
     return 0
 
 
+def cmd_phase(args) -> int:
+    from govern import build, phase
+    good, errors = build.open_builds(Path(args.path))
+    if errors:
+        why = str(errors[0])
+        tail = "" if why.endswith("nothing was changed") else "; nothing was changed"
+        return fail(f"cannot tell which builds are open: {why}{tail}", 1)
+    try:
+        p = phase.plan(Path(args.path), args.remote, args.keep, good)
+    except phase.PhaseError as exc:
+        return fail(str(exc), 1)
+    if args.dry_run:
+        print("\n".join(phase.describe(p)))
+        return 0
+    res = phase.apply(p)
+    if res.lines:
+        print("\n".join(res.lines))
+    if res.error:
+        return fail(res.error, res.code)
+    return res.code
+
+
 def cmd_usage(ctx: Context, as_json: bool) -> int:
     from govern import usage_setup
     r = usage_setup.resolve(ctx.cfg, ctx.root)
@@ -269,6 +378,32 @@ def cmd_usage(ctx: Context, as_json: bool) -> int:
         print(f"  {a['signal']} at {a['at']}%")
     if r["error"]:
         print(f"error: {r['error']} (data lines only)")
+    return 0
+
+
+def cmd_runs(ctx: Context, args) -> int:
+    from govern import agent_runs
+    home = layout.home()
+    if args.runs_cmd == "mark":
+        agent_runs.mark(home, ctx.root, args.label)
+        print(f"phase '{args.label}' started in {agent_runs.durable_path(home, ctx.root)}")
+        return 0
+    if args.runs_cmd == "resolve":
+        r = agent_runs.resolve(ctx.cfg, ctx.root)
+        if args.as_json:
+            print(json.dumps(r, indent=2, ensure_ascii=False))
+            return 0
+        for name in ("gates", "measure"):
+            print(f"agent-{name}: {'on' if r[name] is not None else 'off'}")
+            for k, v in (r[name] or {}).items():
+                print(f"  {k} = {json.dumps(v)}")
+        return 0
+    runs, name = agent_runs.load_runs(home, ctx.root, args.all)
+    report = agent_runs.build_report(runs)
+    if args.as_json:
+        print(json.dumps({"since": name, **report}, indent=2, ensure_ascii=False))
+    else:
+        print(agent_runs.render_report(report, name, args.all))
     return 0
 
 
@@ -565,6 +700,20 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     c.add_argument("--workspace-only", dest="workspace_only", action="store_true",
                    help="check the workspace alone, skipping every project (an orchestrator's "
                         "CI without its projects' checkouts)")
+    c.add_argument("--base", default=None, metavar="REF",
+                   help="compare with the commit this branch left REF at (origin/main, say) and "
+                        "fail on what changed: the gate a pull request runs")
+    df = sub.add_parser("diff", help="what this branch did to the decision logs, traps and "
+                                     "baseline: a report, never a gate (always exits 0)")
+    df.add_argument("--base", default=None, metavar="REF",
+                    help="compare with the commit this branch left REF at (origin/main, say); "
+                         "without it, uncommitted work against HEAD")
+    df.add_argument("--json", action="store_true", dest="as_json")
+    df.add_argument("--project", "--repo", dest="project", default=None,
+                    help="report on this project alone")
+    ci = sub.add_parser("ci", help="print a CI workflow that runs the gate and the report on "
+                                   "a pull request; it writes nothing")
+    ci.add_argument("provider", nargs="?", help="github")
     sub.add_parser("index", help="regenerate generated blocks")
     bl = sub.add_parser("baseline", help="rewrite the ratchet baseline (lower/remove only)")
     bl.add_argument("--allow-raise", action="store_true",
@@ -608,6 +757,119 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     usub.add_parser("uninstall", help="remove it and put your statusLine back")
     ur = usub.add_parser("resolve", help="the effective option and alerts for this project")
     ur.add_argument("--json", action="store_true", dest="as_json")
+    ph = sub.add_parser("phase", help="close a phase: push this branch, then remove the local "
+                                      "branches and worktrees it contains")
+    psub = ph.add_subparsers(dest="phase_cmd", required=True)
+    pc = psub.add_parser("close", help="push, verify the remote holds the commit, then clean up")
+    pc.add_argument("--remote", help="where to push a branch with no upstream")
+    pc.add_argument("--keep", action="append", default=[], metavar="BRANCH",
+                    help="a branch to keep whatever it contains (repeatable)")
+    pc.add_argument("--dry-run", action="store_true", dest="dry_run",
+                    help="print the plan and change nothing")
+    pc.add_argument("--path", default=".", help="the repository (default: the working directory)")
+    sw = sub.add_parser("sweep", help="end-of-session housekeeping report: every worktree and "
+                                      "local branch with a verdict, and what is left over "
+                                      "(read only)")
+    sw.add_argument("--project", metavar="NAME",
+                    help="in a workspace, sweep only this project's repository")
+    sw.add_argument("--apply", action="store_true",
+                    help="remove the named worktrees and branches that are MERGED or PR-MERGED, "
+                         "after a verified backup bundle; needs --only")
+    sw.add_argument("--only", nargs="+", metavar="NAME",
+                    help="with --apply, the items to remove: `branch` or `project:branch`")
+    rp = sub.add_parser("runs", help="agent runs: start a phase, report on it, or resolve this "
+                                     "project's agent-gates and agent-measure settings")
+    rsub = rp.add_subparsers(dest="runs_cmd", required=True)
+    rm = rsub.add_parser("mark", help="start a phase in the project's durable run log")
+    rm.add_argument("label")
+    rr = rsub.add_parser("report", help="the runs since the last mark, and suggestions")
+    rr.add_argument("--all", action="store_true", help="every run, not only since the last mark")
+    rr.add_argument("--json", action="store_true", dest="as_json")
+    rv = rsub.add_parser("resolve", help="the effective agent-gates and agent-measure settings")
+    rv.add_argument("--json", action="store_true", dest="as_json")
+    ag = sub.add_parser("agents", help="the agent roles the engine renders into this project")
+    asub = ag.add_subparsers(dest="agents_cmd", required=True)
+    ar = asub.add_parser("render", help="write each configured role and the coordinator's "
+                                        "build rules, and remove the ones no longer configured")
+    ar.add_argument("--check", action="store_true", dest="check_only",
+                    help="write nothing; exit 1 when anything would change")
+    ar.add_argument("--untrack", action="store_true",
+                    help="when agent-roles is on in local.toml alone, stop git tracking the "
+                         "rendered files that were committed earlier (the files stay)")
+    # Given before the subcommand or after it; SUPPRESS keeps a subparser's own default from
+    # overwriting a value given earlier.
+    bproj = argparse.ArgumentParser(add_help=False)
+    bproj.add_argument("--project", metavar="NAME", default=argparse.SUPPRESS,
+                       help="in a workspace, the project whose repository the build works in "
+                            "(`start` needs it; other commands find the one build in flight)")
+    bd = sub.add_parser("build", parents=[bproj],
+                        help="the build ledger: the phase this branch has in flight, "
+                             "its units and briefs, and what to do next")
+    bsub = bd.add_subparsers(dest="build_cmd", required=True)
+    badd = functools.partial(bsub.add_parser, parents=[bproj])
+    bs = badd("start", help="start a phase on the checked-out branch")
+    bs.add_argument("phase", help="a slug: lower-case letters, digits and hyphens")
+    bs.add_argument("--plan", metavar="FILE", help="the phase's plan, from the project's root")
+    bs.add_argument("--high-risk", action="store_true", dest="high_risk",
+                    help="qa-engineer runs beside code-reviewer when the phase is reviewed")
+    bs.add_argument("--visual", action="store_true",
+                    help="ux-reviewer launches the product and looks at it when the phase is "
+                         "reviewed")
+    bs.add_argument("--from", metavar="BRANCH", dest="source",
+                    help="the branch the phase was cut from, which review measures against "
+                         "(default: the default branch)")
+    bu = badd("unit", help="add a unit and write its brief, or update one")
+    busub = bu.add_subparsers(dest="unit_cmd", required=True)
+    buadd = functools.partial(busub.add_parser, parents=[bproj])
+    ba = buadd("add", help="add a unit and write its brief")
+    ba.add_argument("id")
+    ba.add_argument("--title", required=True)
+    ba.add_argument("--role", help="a rendered role that writes code (default: developer)")
+    ba.add_argument("--red", action="store_true",
+                    help="the brief also names a folder for the failing test's output")
+    bx = buadd("drop", help="remove a unit that is not done (pending, blocked "
+                            "or failed)")
+    bx.add_argument("id")
+    be = buadd("set", help="update a unit; `running` adds one to its attempts")
+    be.add_argument("id")
+    be.add_argument("status", help="pending, running, done, blocked or failed")
+    be.add_argument("--branch")
+    be.add_argument("--commit")
+    be.add_argument("--note")
+    be.add_argument("--role", help="hand the unit to another role that writes code; its report "
+                                   "then has that role's name")
+    bl = badd("launch", help="check the brief or briefs of a unit, `review`, `fix` or "
+                             "`close`, mark a unit running and print the launch "
+                             "prompt of each")
+    bl.add_argument("what", metavar="{unit id|review|fix|close}")
+    bc = badd("collect", help="copy the files git ignores under this phase's folder "
+                              "from the worktree that has BRANCH checked out into "
+                              "this checkout, for an agent that is not a unit")
+    bc.add_argument("branch")
+    bg = badd("ruling", help="record a decision the coordinator made without the "
+                             "owner: what, why, and what it costs if wrong")
+    bg.add_argument("text", nargs="+")
+    bt = badd("status", help="the phase, a line per unit, and the next action")
+    bt.add_argument("--json", action="store_true", dest="as_json")
+    badd("review", help="write the review package and the reviewers' briefs")
+    bf = badd("fix", help="write the fix pass's brief, for the coordinator to fill; "
+                          "a second pass gets a brief of its own")
+    bf.add_argument("--role", help="a rendered role that writes code (default: developer)")
+    badd("close", help="write technical-writer's closing brief")
+    fr = sub.add_parser("report", help="a field report on context-gate itself: draft it, check "
+                                       "it for private text, open it as an issue page")
+    frsub = fr.add_subparsers(dest="report_cmd", required=True)
+    frd = frsub.add_parser("draft", help="write a new draft in .context-gate/reports/ and "
+                                         "print its path")
+    frd.add_argument("--title", required=True)
+    frc = frsub.add_parser("check", help="name each piece of private text in a draft; exit 1 "
+                                         "on any")
+    frc.add_argument("file", help="the draft, from the project's root")
+    frs = frsub.add_parser("send", help="check the draft, then open the public repository's "
+                                        "new-issue page with it filled in, for you to submit")
+    frs.add_argument("file", help="the draft, from the project's root")
+    frs.add_argument("--print", action="store_true", dest="print_only",
+                     help="print the address instead of opening a browser")
     return ap
 
 
@@ -629,6 +891,10 @@ def main(argv: list[str] | None = None, root: Path | None = None,
         except (ValueError, OSError) as exc:
             return fail(f"~/.claude/settings.json: {exc} — settings.json was not changed")
         return 0
+    if args.cmd == "phase":
+        return cmd_phase(args)      # any git repository: it reads no project
+    if args.cmd == "ci":
+        return cmd_ci(args.provider, prog)    # a template: it reads nothing of the project's
     try:
         ctx = load_context(root, prog)
     except config.ConfigError as exc:
@@ -637,6 +903,13 @@ def main(argv: list[str] | None = None, root: Path | None = None,
         return fail(f"{exc} not found")
     for warning in ctx.cfg.warnings:
         print(f"warning: {warning}", file=sys.stderr)
+    if versions.is_beta(__version__):
+        try:       # a launcher older than the beta plugin's name wrote the old id: correct it
+            line = notice.correct_old_launcher_switch(ctx.root)
+            if line:
+                print(line, file=sys.stderr)
+        except Exception:
+            pass   # never the command's business
     try:
         return dispatch(ctx, args)
     except Unreadable as exc:
@@ -648,6 +921,8 @@ def main(argv: list[str] | None = None, root: Path | None = None,
 def dispatch(ctx: Context, args) -> int:
     if args.cmd == "index":
         return cmd_index(ctx)
+    if args.cmd == "diff":
+        return cmd_diff(ctx, args.base, args.as_json, args.project)
     if args.cmd == "baseline":
         return cmd_baseline(ctx, args.allow_raise)
     if args.cmd == "next-id":
@@ -666,5 +941,20 @@ def dispatch(ctx: Context, args) -> int:
         return cmd_principles(ctx)
     if args.cmd == "usage":
         return cmd_usage(ctx, args.as_json)
+    if args.cmd == "runs":
+        return cmd_runs(ctx, args)
+    if args.cmd == "agents":
+        from govern import roles
+        return roles.run(ctx, args.check_only, untrack=args.untrack)
+    if args.cmd == "build":
+        from govern import build
+        return build.run(ctx, args)
+    if args.cmd == "sweep":
+        from govern import sweep
+        return sweep.run(ctx, args)
+    if args.cmd == "report":
+        from govern import field_report
+        return field_report.run(ctx, args)
     return cmd_check(ctx, getattr(args, "project", None), getattr(args, "path", None),
-                     getattr(args, "history_from", None), getattr(args, "workspace_only", False))
+                     getattr(args, "history_from", None), getattr(args, "workspace_only", False),
+                     getattr(args, "base", None))

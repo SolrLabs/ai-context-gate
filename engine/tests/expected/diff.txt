@@ -1,0 +1,28 @@
+Governance changes since main
+
+Decisions
+- changed    docs/DECISIONS.md A-100 (locked), from projects/alpha/DECISIONS.md
+- revised    docs/DECISIONS.md D-08 (locked), Revised 2026-10-06
+- removed    docs/DECISIONS.md D-09 (deferred)
+- superseded docs/DECISIONS.md D-12 -> D-31
+- status     docs/DECISIONS.md D-14 provisional -> locked
+- changed    docs/DECISIONS.md D-20 (provisional)
+- added      docs/DECISIONS.md D-31 - Two writers, one log (provisional)
+- moved      projects/alpha/DECISIONS.md D-15 (locked), from docs/DECISIONS.md
+
+Traps
+- removed    projects/alpha/working-files/traps.md T-3
+- changed    projects/alpha/working-files/traps.md T-5
+- added      projects/alpha/working-files/traps.md T-7 - The cache is stale
+- added      projects/beta/working-files/traps.md T-7 - The clock is local
+
+Baseline
+- lowered    decision_words:alpha:A-100 900 -> 700
+- added      governed_docs:alpha = 41
+- removed    handoff_words:alpha (was 1720)
+- raised     working_file_words:docs/plan.md 6100 -> 6400
+
+Compared
+- . at 9b5d6021d99d
+- projects/beta at e761f8be87ae
+- projects/delta: not compared (main names no commit in this repository)

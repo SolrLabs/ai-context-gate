@@ -5,10 +5,12 @@ a finding: anywhere in a file whose format the engine owns (the config, the prof
 principles, the registry file), and in Markdown code (an inline code span or a fenced block).
 Prose and every other file are checked in full.
 
-A file under an always-excluded directory (this tool's own and `.claude/` among them) is left out
-however a `files` glob or path reaches it, and so is one an `exclude` glob matches. So is a file
-git ignores, unless an `include_ignored` glob names it (drafts kept out of git). Every glob is
-matched with `Path.glob` semantics, case-sensitive on every OS.
+A file under an always-excluded directory (`build/`, `node_modules/` and the rest) is left out
+however a `files` glob or path reaches it, unless an `include_excluded` glob names it; one under
+this tool's own directory or `.claude/` is left out whatever that says. So is a file an `exclude`
+glob matches. So is a file git ignores, unless an `include_ignored` glob names it (drafts kept
+out of git); a file under an always-excluded directory that git also ignores needs both. Every
+glob is matched with `Path.glob` semantics, case-sensitive on every OS.
 
 A line that carries `writing-rules: allow <text>[, <text>...]` keeps a spelling on purpose (an
 old name kept for back-compat, say): a rule whose `text` it names is not counted on that line."""
@@ -150,16 +152,24 @@ def _on_disk(root: Path, rel: str, listed: dict) -> bool:
         unicodedata.normalize("NFC", spelled) == unicodedata.normalize("NFC", rel)
 
 
+def _own_folder(rel: str) -> bool:
+    """Whether `rel` sits under this tool's own folder or `.claude/`, at any depth and in any
+    case: left out whatever `include_excluded` says."""
+    return any(part.casefold() in (layout.GOV_DIR, ".claude") for part in rel.split("/")[:-1])
+
+
 def _selected(ctx, params) -> tuple[list[Path], list[str]]:
     """The files `files` names, sorted, and a warning for each entry that matched files but kept
     none. A match is a file `Path.glob` finds whose path `glob_matches` too, spelled as on disk,
-    so case counts on every OS. Every match under an always-excluded directory (this tool's own
-    and `.claude/` among them, `default_exclude`) is left out, and so is one `exclude` names.
+    so case counts on every OS. Every match under an always-excluded directory
+    (`default_exclude`) is left out unless `include_excluded` names it, except under this tool's
+    own folder or `.claude/` (`_own_folder`), which stays out. One `exclude` names is left out.
     So is one git ignores, asked of the repo that holds each file (`_ignored`, as for governed
     docs), unless `include_ignored` names it: drafts kept out of git are still checked there.
     An entry whose every file `Path.glob` found is spelled otherwise on disk warns, naming one."""
     exclude = [_pattern(x) for x in params["exclude"]]
     include = [_pattern(x) for x in params["include_ignored"]]
+    include_excluded = [_pattern(x) for x in params["include_excluded"]]
     listed: dict = {}
     other: dict[str, list[str]] = {}
     found: dict[str, list[tuple[Path, bool]]] = {}
@@ -176,7 +186,8 @@ def _selected(ctx, params) -> tuple[list[Path], list[str]]:
                 other[entry].append(_spelled(ctx.root, rel, listed) or rel)
                 continue
             matched[entry] += 1
-            if default_exclude(rel) is not None:
+            if default_exclude(rel) is not None and (
+                    _own_folder(rel) or not any(glob_matches(x, rel) for x in include_excluded)):
                 why[entry].add("always excluded")
             elif any(glob_matches(x, rel) for x in exclude):
                 why[entry].add("in exclude")
@@ -198,6 +209,8 @@ def _selected(ctx, params) -> tuple[list[Path], list[str]]:
                    f"({', '.join(sorted(why[entry]))})")
             if "gitignored" in why[entry]:
                 msg += " — list it in include_ignored to check it anyway"
+            if "always excluded" in why[entry]:
+                msg += " — list it in include_excluded to check it anyway"
             warnings.append(msg)
     return sorted(kept), warnings
 
@@ -220,9 +233,11 @@ def _suggest(ctx, s) -> str | None:
                  "names (check ids, settings, registry facts) are never flagged where they are "
                  "used as names: in the config, the profile and the registry file, and in "
                  "Markdown code. A project cannot rename them, whichever spelling it enforces. "
-                 "Files under this tool's own directory, `.claude/` or an always-excluded "
-                 "directory are never checked, nor is a file git ignores unless "
-                 "`include_ignored` names it (drafts kept out of git). A spelling "
+                 "Files under this tool's own directory or `.claude/` are never checked. "
+                 "Files under an always-excluded directory (`build/` and the rest) are not "
+                 "either, unless `include_excluded` names them; a file git ignores is not "
+                 "unless `include_ignored` names it (drafts kept out of git), and one that is "
+                 "both needs both. A spelling "
                  "that must stay (an old name kept for back-compat) is kept by a marker on its "
                  "line: `writing-rules: allow <text>`, in a comment.",
        params={
@@ -233,6 +248,11 @@ def _suggest(ctx, s) -> str | None:
            "include_ignored": Param("list", [], "Globs, relative to the governance root, of "
                                                 "files `files` matches that are checked even "
                                                 "though git ignores them", globs=True),
+           "include_excluded": Param("list", [], "Files under an always-excluded folder (build/, "
+                                                 "dist/ and the rest) that are checked anyway "
+                                                 "(not the tool's own folder or .claude/; "
+                                                 "a gitignored one needs include_ignored too)",
+                                     globs=True),
            "rules": Param("tables", [], "One per forbidden string",
                           fields={"text": "str", "use": "str", "why": "str", "level": "str",
                                   "ignore_case": "bool"},
