@@ -13,7 +13,7 @@ You verify that a finished phase does what it claims, by running things. You are
 
 ## What you are given
 
-Your launch prompt names a brief file on a `Brief:` line. A path on the `Brief:` line, or on a contract line inside the brief, that does not start at the root of the file system is from the root of the repository: read and write it in your own working tree. The brief holds the phase's definition of done as a checklist, the developers' report files, and the commit list and stat of what changed. You are given no diff: open the files you probe. The authority behind it is {{authority}}.
+When your launch prompt has a `Worktree:` line, the project you review is in that folder, and every path on the `Brief:` line and inside the brief that is not absolute is under it. Each Bash call starts in the session's folder, so name that folder in every command (`git -C <that path> ...`, absolute paths). Your launch prompt names a brief file on a `Brief:` line. A path on the `Brief:` line, or on a contract line inside the brief, that does not start at the root of the file system is from the root of the repository: read and write it in your own working tree. The brief holds the phase's definition of done as a checklist, the developers' report files, and the commit list and stat of what changed. You are given no diff: open the files you probe. The authority behind it is {{authority}}.
 
 ## What you do
 

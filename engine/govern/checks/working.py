@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from fnmatch import fnmatch
+from pathlib import Path
 
 from govern.checks.docs import all_ticked, status_keyword
 from govern.findings import Findings
@@ -31,6 +32,41 @@ def working_file_count(ctx, params, scope) -> Findings:
     return f
 
 
+def _finished_scan(ctx, params, scope):
+    """`(path, kind, status, age)` for each working file `finished-files` has something to say
+    about, in name order: kind `ticked` (every box ticked, status not finished), `uncommitted`
+    (finished, never committed) or `stale` (finished, committed, untouched past `max_days`; the
+    only kind with an age)."""
+    wf = ctx.working_dir(scope)
+    if not wf.is_dir():
+        return
+    inclusive = ctx.cfg.dialect["finished_age"] == "ge"
+    limit = params["max_days"]
+    for path in sorted(wf.glob("*.md")):
+        if any(fnmatch(path.name, pat) for pat in params["exempt"]):
+            continue
+        fm, body = parse_frontmatter(read(path))
+        status = fm.get("status", "")
+        if status_keyword(status) not in params["finished_statuses"]:
+            if params["ticked"] and all_ticked(body, ctx.markers):
+                yield path, "ticked", status, 0
+            continue
+        if not ctx.committed(path):
+            yield path, "uncommitted", status, 0
+            continue
+        age = (datetime.now() - ctx.last_touched(path)).days
+        if age > limit or (inclusive and age == limit):
+            yield path, "stale", status, age
+
+
+def finished_candidates(ctx, params, scope) -> list[tuple[Path, str, int]]:
+    """`(path, status, age in days)` for each finished, committed working file untouched past
+    `max_days`: the ones `finished-files` says to delete. A finished file never committed is
+    not one."""
+    return [(path, status, age) for path, kind, status, age
+            in _finished_scan(ctx, params, scope) if kind == "stale"]
+
+
 @check("finished-files", scope="project", since="0.4.0", applies="governed", default="warn",
        summary="A working file whose status says it is finished should be deleted once it has "
                "sat untouched for a few days. A finished file that was never committed is "
@@ -52,30 +88,18 @@ def working_file_count(ctx, params, scope) -> Findings:
        })
 def finished_files(ctx, params, scope) -> Findings:
     f = Findings()
-    wf = ctx.working_dir(scope)
-    if not wf.is_dir():
-        return f
-    inclusive = ctx.cfg.dialect["finished_age"] == "ge"
-    limit = params["max_days"]
-    for path in sorted(wf.glob("*.md")):
-        if any(fnmatch(path.name, pat) for pat in params["exempt"]):
-            continue
-        fm, body = parse_frontmatter(read(path))
-        status = fm.get("status", "")
+    for path, kind, status, age in _finished_scan(ctx, params, scope):
         where = f"{scope.name}/{ctx.rel(path)}"
-        if status_keyword(status) not in params["finished_statuses"]:
-            if params["ticked"] and all_ticked(body, ctx.markers):
-                f.warn(f"{where}: every box is ticked: delete it (git keeps it), or set its "
-                       f"status to complete")
-            continue
-        if not ctx.committed(path):
+        if kind == "ticked":
+            f.warn(f"{where}: every box is ticked: delete it (git keeps it), or set its "
+                   f"status to complete")
+        elif kind == "uncommitted":
             f.error(f"{where} is finished but was never committed — commit it once so git "
                     f"keeps it, then delete it")
-            continue
-        age = (datetime.now() - ctx.last_touched(path)).days
-        if age > limit or (inclusive and age == limit):
+        else:
             f.error(f"{where}: status '{status}', last touched {age}d ago "
-                    f"(finished-files max_days={limit}) — delete it; git keeps history")
+                    f"(finished-files max_days={params['max_days']}) — delete it; git keeps "
+                    f"history")
     return f
 
 

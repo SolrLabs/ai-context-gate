@@ -44,6 +44,7 @@ BLOCK_TAIL = ("\nEach line above is part of the task you were given, and each pa
               "say so in that message, with the reason.")
 CONTRACT = re.compile(r"^\s*(Produces|Red):\s*(.+?)\s*$", re.MULTILINE)
 BRIEF = re.compile(r"(?:^|\s)Brief:[ \t]*([^\n]*)")
+WORKTREE = re.compile(r"(?:^|\s)Worktree:[ \t]*([^\n]*)")
 # A final message that points the reader at a file it says it wrote: "Full report: /abs/path.md".
 # One of these words, then at most 20 characters with no line break, then an absolute path that
 # begins at a boundary (start of line, whitespace, a quote, a backtick or a colon) and names a
@@ -258,6 +259,24 @@ def brief_ref(prompt: str, cwd: str | None = None) -> str | None:
     return rest
 
 
+def worktree_ref(prompt: str) -> str | None:
+    """The tree a launch prompt's `Worktree:` line names, when it is an absolute path to a folder
+    that exists; a relative or missing one is ignored (the run is recorded as without the line)."""
+    found = WORKTREE.search(prompt or "")
+    if not found:
+        return None
+    rest = found.group(1).strip()
+    if rest[:1] in ("`", "'", '"'):
+        end = rest.find(rest[0], 1)
+        rest = rest[1:end if end > 0 else len(rest)].strip()
+    else:
+        rest = rest.rstrip(".,;:)`'\"")
+    try:
+        return rest if rest and Path(rest).is_absolute() and Path(rest).is_dir() else None
+    except OSError:
+        return None
+
+
 def brief_path(prompt: str, flavor: type[PurePath] = Path,
                cwd: str | None = None) -> Path | None:
     """The brief file a launch prompt names: an absolute name on `flavor` (the running platform's
@@ -285,6 +304,12 @@ def contract(prompt: str, cwd: str | None = None) -> dict:
     prompt itself."""
     out = {"produces": [], "red": []}
     cwd = cwd if isinstance(cwd, str) and cwd else None
+    # A `Worktree:` line makes that tree the one the agent works in: the brief and every relative
+    # path are read from it, and `launch_cwd` is it.
+    tree = worktree_ref(prompt)
+    if tree:
+        cwd = tree
+        out["worktree"] = tree
     brief = brief_path(prompt, cwd=cwd)
     out["brief"] = str(brief) if brief else None
     ref = brief_ref(prompt, cwd)
@@ -435,6 +460,11 @@ def _brief_base(home, sid, data, prompt) -> str | None:
     """The folder a relative `Brief:` is read from: the session's resolved root when the file is
     there (the coordinator's shell may have moved into a worktree), else the hook's `cwd`."""
     cwd = data.get("cwd") if isinstance(data.get("cwd"), str) and data.get("cwd") else None
+    tree = worktree_ref(prompt)
+    if tree:
+        ref = brief_ref(prompt, tree)
+        if ref and not Path(ref).is_absolute() and (Path(tree) / ref).is_file():
+            return tree
     root = (read_json(resolved_path(home, sid)) or {}).get("root")
     if isinstance(root, str) and root:
         ref = brief_ref(prompt, root)
@@ -582,14 +612,16 @@ def on_start(home, sid, data) -> None:
               "t": time.time(), "paired": bool(held), "blocks": 0, "seen": {}, "ended": None}
     if cwd:
         record["cwd"] = cwd
-        if held.get("brief_ref"):
-            _in_agents_tree(record, Path(cwd))
+    if held.get("brief_ref") and (held.get("worktree") or cwd):
+        _in_agents_tree(record, Path(held.get("worktree") or cwd))
     write_json(path, record)
 
 
 def _in_agents_tree(record: dict, cwd: Path) -> None:
     """A brief named from the repository root is found in the tree the agent started in, which
-    may be a worktree of its own: the paths it promised are put there, beside the brief."""
+    may be a worktree of its own: the paths it promised are put there, beside the brief. A
+    launch that named a `Worktree:` puts them in that tree, whatever folder the agent started in."""
+    cwd = Path(record["worktree"]) if record.get("worktree") else cwd
     folder = cwd / Path(record["brief_ref"]).parent
     for key in ("produces", "red"):
         found = (record.get("in_brief") or {}).get(key, [])
@@ -617,11 +649,11 @@ def _repair_pairing(launch: dict, first_prompt: str, cwd) -> None:
             return
     except OSError:
         return
-    for key in ("produces", "red", "brief", "in_brief", "brief_ref", "launch_cwd"):
+    for key in ("produces", "red", "brief", "in_brief", "brief_ref", "launch_cwd", "worktree"):
         launch.pop(key, None)
     launch.update(contract(first_prompt, base))
-    if launch.get("cwd") and launch.get("brief_ref"):
-        _in_agents_tree(launch, Path(launch["cwd"]))
+    if (launch.get("worktree") or launch.get("cwd")) and launch.get("brief_ref"):
+        _in_agents_tree(launch, Path(launch["cwd"] if launch.get("cwd") else launch["worktree"]))
     launch["repaired"] = True
 
 
@@ -739,7 +771,7 @@ def where(launch: dict, key: str, raw: str) -> list[Path]:
     resolved: neither lookup reaches outside the agent's tree or the brief's folder."""
     written = {here: as_written for here, as_written in
                (launch.get("in_brief") or {}).get(key) or []}.get(raw)
-    root = launch.get("cwd") or launch.get("launch_cwd")
+    root = launch.get("worktree") or launch.get("cwd") or launch.get("launch_cwd")
     if not written or not root or ".." in Path(written).parts or Path(written).is_absolute():
         return [Path(raw)]
     first = Path(root) / written

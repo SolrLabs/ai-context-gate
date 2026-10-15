@@ -86,7 +86,12 @@ LAYOUT = {
                  "trap_prefix": "str"},
     "blocks": {"workspace": "tables", "project": "tables", "registry_columns": "tables"},
     "checks": {"workspace_order": "list", "project_order": "list"},
+    # `auto_remove`: the verdicts the `housekeeping` skill may remove without asking; default none.
+    "sweep": {"auto_remove": "list"},
 }
+
+# The values `[sweep] auto_remove` accepts: the removable verdicts, in lower case.
+SWEEP_AUTO_REMOVE = ("merged", "pr-merged")
 
 # Keys an earlier engine accepted and this one no longer reads: named with what to do, rather than
 # reported as unknown, so a config written for the earlier engine says why it stopped loading.
@@ -405,6 +410,10 @@ def _validate_layout(raw: dict, name: str) -> None:
             raise ConfigError(f"{name}: [registry.keys] '{key}' is not a key the engine reads "
                               f"({', '.join(REGISTRY_KEYS)})")
         _check_type(f"{name}: [registry.keys] {key}", value, "str")
+    for i, value in enumerate(raw.get("sweep", {}).get("auto_remove", [])):
+        if value not in SWEEP_AUTO_REMOVE:
+            raise ConfigError(f"{name}: [sweep] auto_remove[{i}] = {value!r} is not one of "
+                              f"{', '.join(SWEEP_AUTO_REMOVE)}")
     for i, skip in enumerate(raw.get("registry", {}).get("skip", [])):
         _check_type(f"{name}: [registry] skip[{i}]", skip, "str")
     _validate_tables(raw, name)

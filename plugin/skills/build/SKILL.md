@@ -172,10 +172,19 @@ If nothing stands, skip to 5.
 5. `python3 .context-gate/bin/govern phase close`. It pushes the phase branch, confirms the remote
    holds it, and removes the branches and worktrees this phase merged. It opens no pull request
    and merges nothing into the default branch: that is the owner's, or the project's own rule.
+   When the session is ending, run the `housekeeping` skill now.
 6. Report, short: what landed, the gate line, what is unverified and what it needs, each ruling
    with what it costs if wrong, what the owner owes (the exact command, link or decision), and
    what the reviews found and what you did about each, and any fault in context-gate itself, with
    the draft the `report` skill made.
+
+## In a workspace
+
+When the config has a `[registry]`, every `govern build` command takes `--project <name>`. Cut and
+switch the phase branch with `git -C <member folder>`. Launch each agent with the lines
+`build launch` prints, `Worktree:` included, and without isolation: the worktree is already made.
+The gate is the member's own (its registry entry's `runtime_gate`, or what the plan names). Close
+with `phase close --path <member folder>`. A project with no registry ignores this section.
 
 ## Carrying on
 

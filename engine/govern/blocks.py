@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from govern import roles
 from govern.text import eol, parse_frontmatter, read
 
 PLACEHOLDER = "_Run `index` to generate._"
@@ -131,7 +132,10 @@ def trap_index(ctx, doc: Path, scope=None, sources: str | None = None) -> str:
 def agent_roster(ctx) -> str:
     rows = ["| Agent | Model | Effort | Turns | Delegate when |", "|---|---|---|---|---|"]
     adir = ctx.root / ctx.workspace("agents_dir", ".claude/agents")
+    local = roles.local_paths(ctx.root)   # role files on this machine only stay out of the roster
     for path in sorted(adir.glob("*.md")) if adir.is_dir() else []:
+        if path.relative_to(ctx.root).as_posix() in local:
+            continue
         fm, _ = parse_frontmatter(read(path))
         rows.append(f"| `{path.stem}` | {cell(fm.get('model', '?'))} | "
                     f"{cell(fm.get('effort', '?'))} | {cell(fm.get('maxTurns', '?'))} | "

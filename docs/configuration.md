@@ -3,7 +3,7 @@ doc_type: reference
 purpose: Every table and key .context-gate/config.toml accepts, with types, defaults and examples.
 audience: human
 load_when: writing or changing a project's config.toml or a profile's principles.toml
-last_reviewed: 2026-10-10
+last_reviewed: 2026-10-14
 ---
 
 # Configuration reference
@@ -159,6 +159,11 @@ skip = ["docs-site"]
 [registry.keys]
 handoff = "profile.handoff"
 ```
+
+To run `govern build` in one member, pass `--project <name>` to each `build` subcommand: the
+ledger, the phase branch and the review package are the member's. This needs members that are
+repositories of their own; a member that is a folder of the root's repository is built without
+the flag.
 
 ## `[workspace]`
 
@@ -526,6 +531,22 @@ branch, the branch checked out here, any branch another worktree has checked out
 that matches its `keep` setting, a list of `fnmatch` patterns (default `main`, `master`,
 `development`, `beta-*`, `release-*`). When git cannot answer, or the default branch cannot be
 told, it warns that merged branches were not checked.
+
+## Sweep
+
+`govern sweep` reports every worktree and local branch with a verdict saying whether it can go,
+and removes nothing without `--apply --only`. The `[sweep]` table has one key, `auto_remove`,
+which names the verdicts the `housekeeping` skill may remove without asking. An engine older than
+0.7.0-beta.16 refuses the table, so set it in `.context-gate/local.toml` while the committed pin
+is older.
+
+```toml
+# fragment: local.toml, not config.toml
+[sweep]
+auto_remove = ["merged", "pr-merged"]
+```
+
+- `auto_remove`: a list of `"merged"` and `"pr-merged"`. Default `[]`: ask before every removal.
 
 ## Running a beta locally
 
