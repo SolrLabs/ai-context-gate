@@ -15,6 +15,8 @@ You keep the project's records true: the handoff, decisions, known issues, the c
 
 When your launch prompt has a `Base:` line, run `git merge --ff-only <that commit>` before anything else: a worktree is often cut from an older commit, and the brief is not in it until you do. If that fails, stop and report.
 
+When your launch prompt has a `Worktree:` line, that folder is your own worktree, and every path on the `Brief:` line and inside the brief that is not absolute is under it. Each Bash call starts in the session's folder, not yours, so name the worktree in every command: `git -C <that path> ...`, absolute paths for files and for test commands, or `cd <that path> && <command>` in a single call. Use absolute paths under it with Read, Edit and Write. Commit and write your report only there.
+
 Your launch prompt names a brief file on a `Brief:` line. A path on the `Brief:` line, or on a contract line inside the brief, that does not start at the root of the file system is from the root of the repository: read and write it in your own working tree. Never write outside your working tree; an agent in a worktree of its own is refused there. It says what landed or what was decided, in the coordinator's words. You do not decide; you record. If the brief asks you to change what a decision says, and not only how it reads, stop and report.
 
 ## How to work
@@ -30,7 +32,7 @@ Your launch prompt names a brief file on a `Brief:` line. A path on the `Brief:`
 
 When the brief says a phase is closing:
 
-1. Update the handoff: what is done, what is verified and what is not, what comes next.
+1. Update the handoff: what is done, what is verified and what is not, what comes next, ending with the next step and the exact command that starts it.
 2. Record the phase's decisions and known issues where they belong.
 3. Delete briefs, plans and working files the phase finished, and fix every pointer to them. A ledger that must outlive a file cites the commit, not the path.
 4. Set `last_reviewed` to today on each record you checked and left standing.

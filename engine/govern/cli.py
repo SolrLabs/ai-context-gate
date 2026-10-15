@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import functools
 import json
 import os
 import re
@@ -766,6 +767,16 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     pc.add_argument("--dry-run", action="store_true", dest="dry_run",
                     help="print the plan and change nothing")
     pc.add_argument("--path", default=".", help="the repository (default: the working directory)")
+    sw = sub.add_parser("sweep", help="end-of-session housekeeping report: every worktree and "
+                                      "local branch with a verdict, and what is left over "
+                                      "(read only)")
+    sw.add_argument("--project", metavar="NAME",
+                    help="in a workspace, sweep only this project's repository")
+    sw.add_argument("--apply", action="store_true",
+                    help="remove the named worktrees and branches that are MERGED or PR-MERGED, "
+                         "after a verified backup bundle; needs --only")
+    sw.add_argument("--only", nargs="+", metavar="NAME",
+                    help="with --apply, the items to remove: `branch` or `project:branch`")
     rp = sub.add_parser("runs", help="agent runs: start a phase, report on it, or resolve this "
                                      "project's agent-gates and agent-measure settings")
     rsub = rp.add_subparsers(dest="runs_cmd", required=True)
@@ -785,10 +796,18 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     ar.add_argument("--untrack", action="store_true",
                     help="when agent-roles is on in local.toml alone, stop git tracking the "
                          "rendered files that were committed earlier (the files stay)")
-    bd = sub.add_parser("build", help="the build ledger: the phase this branch has in flight, "
-                                      "its units and briefs, and what to do next")
+    # Given before the subcommand or after it; SUPPRESS keeps a subparser's own default from
+    # overwriting a value given earlier.
+    bproj = argparse.ArgumentParser(add_help=False)
+    bproj.add_argument("--project", metavar="NAME", default=argparse.SUPPRESS,
+                       help="in a workspace, the project whose repository the build works in "
+                            "(`start` needs it; other commands find the one build in flight)")
+    bd = sub.add_parser("build", parents=[bproj],
+                        help="the build ledger: the phase this branch has in flight, "
+                             "its units and briefs, and what to do next")
     bsub = bd.add_subparsers(dest="build_cmd", required=True)
-    bs = bsub.add_parser("start", help="start a phase on the checked-out branch")
+    badd = functools.partial(bsub.add_parser, parents=[bproj])
+    bs = badd("start", help="start a phase on the checked-out branch")
     bs.add_argument("phase", help="a slug: lower-case letters, digits and hyphens")
     bs.add_argument("--plan", metavar="FILE", help="the phase's plan, from the project's root")
     bs.add_argument("--high-risk", action="store_true", dest="high_risk",
@@ -799,18 +818,19 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     bs.add_argument("--from", metavar="BRANCH", dest="source",
                     help="the branch the phase was cut from, which review measures against "
                          "(default: the default branch)")
-    bu = bsub.add_parser("unit", help="add a unit and write its brief, or update one")
+    bu = badd("unit", help="add a unit and write its brief, or update one")
     busub = bu.add_subparsers(dest="unit_cmd", required=True)
-    ba = busub.add_parser("add", help="add a unit and write its brief")
+    buadd = functools.partial(busub.add_parser, parents=[bproj])
+    ba = buadd("add", help="add a unit and write its brief")
     ba.add_argument("id")
     ba.add_argument("--title", required=True)
     ba.add_argument("--role", help="a rendered role that writes code (default: developer)")
     ba.add_argument("--red", action="store_true",
                     help="the brief also names a folder for the failing test's output")
-    bx = busub.add_parser("drop", help="remove a unit that is not done (pending, blocked "
-                                       "or failed)")
+    bx = buadd("drop", help="remove a unit that is not done (pending, blocked "
+                            "or failed)")
     bx.add_argument("id")
-    be = busub.add_parser("set", help="update a unit; `running` adds one to its attempts")
+    be = buadd("set", help="update a unit; `running` adds one to its attempts")
     be.add_argument("id")
     be.add_argument("status", help="pending, running, done, blocked or failed")
     be.add_argument("--branch")
@@ -818,24 +838,24 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     be.add_argument("--note")
     be.add_argument("--role", help="hand the unit to another role that writes code; its report "
                                    "then has that role's name")
-    bl = bsub.add_parser("launch", help="check the brief or briefs of a unit, `review`, `fix` or "
-                                        "`close`, mark a unit running and print the launch "
-                                        "prompt of each")
+    bl = badd("launch", help="check the brief or briefs of a unit, `review`, `fix` or "
+                             "`close`, mark a unit running and print the launch "
+                             "prompt of each")
     bl.add_argument("what", metavar="{unit id|review|fix|close}")
-    bc = bsub.add_parser("collect", help="copy the files git ignores under this phase's folder "
-                                         "from the worktree that has BRANCH checked out into "
-                                         "this checkout, for an agent that is not a unit")
+    bc = badd("collect", help="copy the files git ignores under this phase's folder "
+                              "from the worktree that has BRANCH checked out into "
+                              "this checkout, for an agent that is not a unit")
     bc.add_argument("branch")
-    bg = bsub.add_parser("ruling", help="record a decision the coordinator made without the "
-                                        "owner: what, why, and what it costs if wrong")
+    bg = badd("ruling", help="record a decision the coordinator made without the "
+                             "owner: what, why, and what it costs if wrong")
     bg.add_argument("text", nargs="+")
-    bt = bsub.add_parser("status", help="the phase, a line per unit, and the next action")
+    bt = badd("status", help="the phase, a line per unit, and the next action")
     bt.add_argument("--json", action="store_true", dest="as_json")
-    bsub.add_parser("review", help="write the review package and the reviewers' briefs")
-    bf = bsub.add_parser("fix", help="write the fix pass's brief, for the coordinator to fill; "
-                                     "a second pass gets a brief of its own")
+    badd("review", help="write the review package and the reviewers' briefs")
+    bf = badd("fix", help="write the fix pass's brief, for the coordinator to fill; "
+                          "a second pass gets a brief of its own")
     bf.add_argument("--role", help="a rendered role that writes code (default: developer)")
-    bsub.add_parser("close", help="write technical-writer's closing brief")
+    badd("close", help="write technical-writer's closing brief")
     fr = sub.add_parser("report", help="a field report on context-gate itself: draft it, check "
                                        "it for private text, open it as an issue page")
     frsub = fr.add_subparsers(dest="report_cmd", required=True)
@@ -929,6 +949,9 @@ def dispatch(ctx: Context, args) -> int:
     if args.cmd == "build":
         from govern import build
         return build.run(ctx, args)
+    if args.cmd == "sweep":
+        from govern import sweep
+        return sweep.run(ctx, args)
     if args.cmd == "report":
         from govern import field_report
         return field_report.run(ctx, args)

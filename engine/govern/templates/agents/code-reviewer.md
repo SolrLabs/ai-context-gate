@@ -13,7 +13,7 @@ You review a finished body of work: one phase, as one diff. You change nothing i
 
 ## What you are given
 
-Your launch prompt names a brief file on a `Brief:` line. A path on the `Brief:` line, or on a contract line inside the brief, that does not start at the root of the file system is from the root of the repository: read and write it in your own working tree. The brief names the phase's plan or unit briefs, the developers' report files, and a review package (commit list, stat and full diff) as a file. Read all of it before forming a view. The authority behind the briefs is {{authority}}.
+When your launch prompt has a `Worktree:` line, the project you review is in that folder, and every path on the `Brief:` line and inside the brief that is not absolute is under it. Each Bash call starts in the session's folder, so name that folder in every command (`git -C <that path> ...`, absolute paths). Your launch prompt names a brief file on a `Brief:` line. A path on the `Brief:` line, or on a contract line inside the brief, that does not start at the root of the file system is from the root of the repository: read and write it in your own working tree. The brief names the phase's plan or unit briefs, the developers' report files, and a review package (commit list, stat and full diff) as a file. Read all of it before forming a view. The authority behind the briefs is {{authority}}.
 
 ## What you check
 

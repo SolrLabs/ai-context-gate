@@ -254,5 +254,47 @@ class ReportSkill(unittest.TestCase):
                       self.squash(PLUGIN / "skills/options/SKILL.md"))
 
 
+class WorktreeLine(unittest.TestCase):
+    """The `Worktree:` launch line, as the role templates and the build skill explain it."""
+
+    AGENTS = ENGINE / "govern/templates/agents"
+    WRITING = ("developer", "senior-developer", "technical-writer")
+    REVIEWING = ("code-reviewer", "qa-engineer", "ux-reviewer")
+
+    def squash(self, path: Path) -> str:
+        return " ".join(path.read_text(encoding="utf-8").split())
+
+    def test_writing_roles_name_the_worktree_in_every_command(self):
+        for name in self.WRITING:
+            with self.subTest(role=name):
+                text = self.squash(self.AGENTS / f"{name}.md")
+                self.assertIn("that folder is your own worktree, and every path on the "
+                              "`Brief:` line and inside the brief that is not absolute is under it.", text)
+                self.assertIn("Each Bash call starts in the session's folder, not yours", text)
+                self.assertNotIn("run `cd <that path>` before anything else", text)
+
+    def test_reviewing_roles_name_that_folder_in_every_command(self):
+        for name in self.REVIEWING:
+            with self.subTest(role=name):
+                text = self.squash(self.AGENTS / f"{name}.md")
+                self.assertIn("the project you review is in that folder, and every path on the "
+                              "`Brief:` line and inside the brief that is not absolute is under it.", text)
+                self.assertIn("Each Bash call starts in the session's folder, so name that folder "
+                              "in every command", text)
+
+    def test_build_skill_has_the_workspace_section_before_carrying_on(self):
+        text = self.squash(PLUGIN / "skills/build/SKILL.md")
+        head = text.index("## In a workspace")
+        self.assertLess(head, text.index("## Carrying on"))
+        section = text[head:text.index("## Carrying on")]
+        for phrase in ("every `govern build` command takes `--project <name>`",
+                       "`git -C <member folder>`",
+                       "`Worktree:` included, and without isolation",
+                       "`runtime_gate`",
+                       "`phase close --path <member folder>`",
+                       "A project with no registry ignores this section."):
+            self.assertIn(phrase, section)
+
+
 if __name__ == "__main__":
     unittest.main()

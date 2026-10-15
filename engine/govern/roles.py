@@ -444,10 +444,16 @@ def _rows(path: Path) -> list[dict]:
     try:
         with path.open("rb") as fh:
             rows = tomllib.load(fh).get("rendered", [])
-    except (OSError, tomllib.TOMLDecodeError):
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return []
     return [r for r in rows if isinstance(r, dict) and isinstance(r.get("path"), str)
             and inside(r["path"])]
+
+
+def local_paths(root: Path) -> set[str]:
+    """The `path` of each row in the machine-local record, from the project root, as posix
+    strings: the files that exist on this machine only. Empty when the record is missing."""
+    return {Path(r["path"]).as_posix() for r in _rows(root / LOCAL_RECORD)}
 
 
 def recorded(root: Path) -> list[dict]:

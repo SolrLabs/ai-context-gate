@@ -58,6 +58,7 @@ does not have yet goes in `.context-gate/local.toml`, under the same `[checks.<i
 is newer, the pinned engine, CI and every other clone would refuse a check they do not know. Tell
 the user the option then applies on this machine only, until the project upgrades to a release
 that has it, when the table moves to `config.toml`.
+The `[sweep] auto_remove` setting, the verdicts the `housekeeping` skill may remove without asking (`merged`, `pr-merged`), is set in `.context-gate/local.toml` while the committed pin is older than 0.7.0-beta.16. After `govern beta on`, run `python3 .context-gate/bin/govern check` once before restarting Claude Code, so a launcher older than the beta corrects the plugin's name.
 
 - On: `[checks.<id>]` with `level = "error"` and the settings from step 3.
 - Off: `level = "off"`. If the option came from the profile (`layer` is `profile`), ask for a
