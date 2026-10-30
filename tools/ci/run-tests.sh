@@ -9,11 +9,15 @@
 # Extra local checks: every executable tools/ci/extra.d/*.sh, if that directory exists, run last
 # from the repo root with this script's arguments (so `--host` reaches them too).
 set -eu
+# A test that reads stdin must not wait on the caller's open pipe.
+exec </dev/null
+# A test must never see the owner's real profile.
+unset CLAUDE_CONFIG_DIR
 cd "$(dirname "$0")/../.."
 mode=${1:-}
 
 echo "== host: $(python3 --version)"
-python3 -m unittest discover -s engine/tests
+python3 tools/ci/parallel_tests.py engine/tests
 
 if [ "$mode" != "--host" ]; then
   if ! command -v docker >/dev/null 2>&1; then
@@ -36,7 +40,7 @@ if [ "$mode" != "--host" ]; then
   docker run --rm -v "$PWD":/w "$@" -w /w python:3.11-slim sh -c '
     apt-get -qq update >/dev/null 2>&1 && apt-get -qq install -y git >/dev/null 2>&1
     git config --global user.email ci@example.invalid && git config --global user.name ci
-    python -m unittest discover -s engine/tests'
+    python tools/ci/parallel_tests.py engine/tests'
 fi
 
 # The plugin as a release assembles it (plugin/ + the engine), validated by Claude Code itself

@@ -28,8 +28,15 @@ from unittest import mock
 ENGINE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ENGINE))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import profile_guard  # noqa: E402,F401
+
 from govern import __version__, base, cli, config, layout, manifest, registry  # noqa: E402
 from govern.context import REPO_ENV, Context  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fixture_cache import copy_of  # noqa: E402
 
 CHECK = "decision-changes"
 TODAY = date.today().isoformat()
@@ -271,10 +278,20 @@ class Solo(Tree):
     `docs/`, committed on `main`. Three decisions: `P-1` and `P-3` locked, `P-2` provisional.
     The decision index sits at the end of the log, so it is inside the last entry's body."""
 
+    def _place(self, tmp: Path, below: str | None) -> None:
+        self.top = tmp / (below or "solo")
+        Tree.__init__(self, self.top / "gov" if below else self.top, tmp / "home")
+
+    @classmethod
+    def attach(cls, tmp: Path, *, below: str | None = None, **_kw) -> "Solo":
+        """The fixture `Solo(tmp, ...)` builds, for a tree already in `tmp`: nothing is written."""
+        self = cls.__new__(cls)
+        self._place(tmp, below)
+        return self
+
     def __init__(self, tmp: Path, *, git: str | None = "commit", below: str | None = None,
                  extra: str = "", workspace: str = "", log: str | bytes | None = None) -> None:
-        self.top = tmp / (below or "solo")
-        super().__init__(self.top / "gov" if below else self.top, tmp / "home")
+        self._place(tmp, below)
         self.write(layout.CONFIG, SOLO_CONFIG.format(version=__version__, extra=extra,
                                                      workspace=workspace))
         self.write(LOG, log if log is not None else
@@ -295,6 +312,13 @@ class Team(Tree):
 
     PROJECTS = (("alpha", "projects/alpha", "A", 100), ("gamma", "projects/gamma", "G", 300))
     NESTED = ("beta", "beta", "B", 200)
+
+    @classmethod
+    def attach(cls, tmp: Path, **_kw) -> "Team":
+        """The fixture `Team(tmp, ...)` builds, for a tree already in `tmp`: nothing is written."""
+        self = cls.__new__(cls)
+        Tree.__init__(self, tmp / "team", tmp / "home")
+        return self
 
     def __init__(self, tmp: Path, *, nested: bool = False, extra: str = "") -> None:
         super().__init__(tmp / "team", tmp / "home")
@@ -333,11 +357,20 @@ class Case(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
+    def _cached(self, kind: type, **kw):
+        """`kind(self.tmp, **kw)`, built once per process and copied when every keyword allows
+        a key; a keyword of another type is built afresh."""
+        if not all(v is None or isinstance(v, (str, bytes, bool)) for v in kw.values()):
+            return kind(self.tmp, **kw)
+        key = (kind.__name__.lower(), tuple(sorted(kw.items())))
+        copy_of(key, self.tmp, lambda template: kind(template, **kw))
+        return kind.attach(self.tmp, **kw)
+
     def solo(self, **kw) -> Solo:
-        return Solo(self.tmp, **kw)
+        return self._cached(Solo, **kw)
 
     def team(self, **kw) -> Team:
-        return Team(self.tmp, **kw)
+        return self._cached(Team, **kw)
 
     @contextlib.contextmanager
     def fresh(self):

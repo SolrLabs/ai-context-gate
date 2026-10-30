@@ -9,6 +9,8 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import profile_guard  # noqa: E402,F401
+
 from build_support import *  # noqa: E402,F401,F403
 
 class Review(Build):
@@ -305,7 +307,7 @@ class FixAndClose(Build):
         self.assertEqual(agent_runs.unfilled(text), ["Fixes", "Out of scope"])
         self.assertIn("ranked, five at most", text)
         self.assertIn("the test to write first and see fail", text)
-        self.assertIn(f"Base commit: {self.head()}", text.splitlines())
+        self.assertNotIn("Base commit:", text)
         self.assertEqual(text.splitlines()[-3:],
                          [RELATIVE, f"Red: {at('fix', 'red')}",
                           f"Produces: {at('fix', 'developer-report.md')}"])

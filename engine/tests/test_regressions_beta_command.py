@@ -11,6 +11,8 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import profile_guard  # noqa: E402,F401
+
 from regressions_support import *  # noqa: E402,F401,F403
 
 class BetaCommand(Base):
@@ -38,7 +40,8 @@ class BetaCommand(Base):
 
     def run_beta(self, *args: str, env=None) -> subprocess.CompletedProcess:
         return subprocess.run([sys.executable, str(self.entry), "beta", *args],
-                              env=env or self.env, capture_output=True, text=True)
+                              env=env or self.env, capture_output=True, text=True,
+                              cwd=self.root)
 
     def check_ignored(self) -> int:
         return self.git("-C", str(self.root), "check-ignore", "-q", layout.LOCAL).returncode
@@ -871,7 +874,7 @@ class BetaCommand(Base):
         # Only the gate dispatches `beta`: bin/uninstall hands its argv to the installer.
         uninstall = self.root / layout.GOV_DIR / "bin" / "uninstall"
         res = subprocess.run([sys.executable, str(uninstall), "beta"], env=self.env,
-                             capture_output=True, text=True)
+                             capture_output=True, text=True, cwd=self.root)
         self.assertNotIn("no beta", res.stdout + res.stderr)
 
 

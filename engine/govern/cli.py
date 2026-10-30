@@ -84,13 +84,21 @@ def _rel(ctx: Context, path: Path) -> str:
         return str(path)
 
 
-def collect_scoped(ctx: Context, targets: list, workspace: bool
+# The root checks that read `ctx.snapshot` (the `--path` copy). Under `--path` only these run
+# for the root: the others read the working tree, so they would judge unstaged edits. A check
+# joins this set only when it reads `ctx.snapshot`.
+SNAPSHOT_AWARE = {"writing-rules"}
+
+
+def collect_scoped(ctx: Context, targets: list, workspace: bool, root_too: bool = False
                    ) -> list[tuple[str, str, Findings]]:
     """Every check's findings, in run order: (scope label, check id, findings). Without
     `workspace` (a `check --project X` run), a workspace check marked `also_project` still
     runs, restricted to each of `targets` — the workspace checks that are really about one
     project's files (doc-links, generated-blocks, ratchet), so a pre-commit hook checking one
-    project alone still sees them. Every other workspace check sits out.
+    project alone still sees them. Every other workspace check sits out, unless `root_too`
+    (a single repo, where the root is the project): then each runs once, after the scoped ones
+    in run order, so nothing is reported twice.
 
     A size breach the ratchet reported in this run is one finding, the ratchet's
     (`findings.one_per_breach`)."""
@@ -107,8 +115,12 @@ def collect_scoped(ctx: Context, targets: list, workspace: bool
         for scope in targets:
             for cid in _order(ctx, "workspace"):
                 chk = manifest.CHECKS[cid]
-                if chk.scope == "workspace" and chk.also_project:
+                if chk.scope != "workspace":
+                    continue
+                if chk.also_project:
                     out.append((scope.name, cid, _run(ctx, cid, scope)))
+                elif root_too and (ctx.snapshot is None or cid in SNAPSHOT_AWARE):
+                    out.append((scope.name, cid, _run(ctx, cid)))
     for scope in targets:
         for cid in _order(ctx, "project"):
             chk = manifest.CHECKS[cid]
@@ -151,7 +163,8 @@ def cmd_check(ctx: Context, project: str | None, path: str | None = None,
         return fail("--workspace-only checks no project: drop --project and --path")
     if workspace_only and ctx.registry.single:
         return fail("--workspace-only needs a registry workspace: a single repo is its one "
-                    "project, so there is no workspace to check without it")
+                    "project, so there is no workspace to check without it; check --project "
+                    f"{ctx.registry.scopes[0].name} already runs the root's checks")
     if path is not None and not project:
         return fail("--path needs --project")
     if history_from is not None and path is None:
@@ -180,7 +193,9 @@ def cmd_check(ctx: Context, project: str | None, path: str | None = None,
                   f"links into it and ratchet entries")
     else:
         targets = ctx.registry.scopes
-    results = collect_scoped(ctx, targets, workspace=not project)
+    # In a single repo the root is the one project, so `--project` runs the root's checks too.
+    results = collect_scoped(ctx, targets, workspace=not project,
+                             root_too=bool(project) and ctx.registry.single)
     if ctx.cfg.dialect["report"] == "per-scope":
         groups: dict[str, Findings] = {}
         for label, _, found in results:
@@ -344,6 +359,17 @@ def cmd_options(ctx: Context, global_: bool, as_json: bool, rec: list[str] | Non
     return 0
 
 
+def cmd_merge_driver(args: list[str], root: Path | None, prog: str) -> int:
+    from govern import merging
+    if len(args) != 4:
+        return fail("merge-driver takes O A B P (git's %O %A %B %P)")
+    try:
+        ctx = load_context(root, prog)
+    except (config.ConfigError, registry.RegistryMissing):
+        ctx = None      # git still merges the file, as it would without a driver
+    return merging.drive(ctx, Path(args[0]), Path(args[1]), Path(args[2]), args[3])
+
+
 def cmd_phase(args) -> int:
     from govern import build, phase
     good, errors = build.open_builds(Path(args.path))
@@ -363,7 +389,22 @@ def cmd_phase(args) -> int:
         print("\n".join(res.lines))
     if res.error:
         return fail(res.error, res.code)
+    if res.code == 0:
+        _mark_planning(p.repo)
     return res.code
+
+
+def _mark_planning(repo) -> None:
+    """After a close, time in the coordinator's sessions is planning: mark it in the run log, when
+    measurement has made one. The close has succeeded, so nothing here may fail it."""
+    try:
+        from govern import agent_runs
+        home = layout.home()
+        if agent_runs.durable_path(home, repo).exists():
+            agent_runs.mark(home, repo, "")
+            print("run log: planning from here")
+    except Exception:
+        pass
 
 
 def cmd_usage(ctx: Context, as_json: bool) -> int:
@@ -398,6 +439,12 @@ def cmd_runs(ctx: Context, args) -> int:
             for k, v in (r[name] or {}).items():
                 print(f"  {k} = {json.dumps(v)}")
         return 0
+    try:
+        if agent_runs.resolve(ctx.cfg, ctx.root)["measure"] is not None:
+            from govern import coordinator_runs
+            coordinator_runs.catch_up(home, ctx.root)
+    except Exception:
+        pass        # the coordinator's numbers are a bonus; the report never depends on them
     runs, name = agent_runs.load_runs(home, ctx.root, args.all)
     report = agent_runs.build_report(runs)
     if args.as_json:
@@ -432,14 +479,34 @@ def cmd_index(ctx: Context) -> int:
     about by name: an empty block is more often every source going missing (a git-ignored
     checkout, a moved directory) than a project really emptied."""
     pending, lines, changed, missing = render_index(ctx)
+    attrs = _attributes_update(ctx)
     for path, text in pending.items():
         write(path, text)
+    if attrs is not None:
+        write(attrs[0], attrs[1])
+        lines.append("  regenerated .gitattributes :: merge region")
     for line in lines:
         print(line)
     status = "FAIL" if missing else "OK"
     extra = f", {missing} missing" if missing else ""
     print(f"[{status}] index  ({changed} block(s) updated{extra})")
     return 1 if missing else 0
+
+
+def _attributes_update(ctx: Context) -> tuple[Path, str] | None:
+    """`(.gitattributes, its new text)` when the `merge-driver` check is on and the file's merge
+    region is missing or stale, else None. Read before anything is written, so an unreadable
+    file stops `index` with nothing changed."""
+    if ctx.cfg.checks["merge-driver"].level == "off":
+        return None
+    from govern import merging
+    from govern.text import has_bom
+    path = ctx.root / ".gitattributes"
+    old = read(path) if path.is_file() else ""
+    new = merging.attributes_with(ctx, old)
+    if new == old:
+        return None
+    return path, ("\ufeff" if has_bom(path) else "") + new
 
 
 def render_index(ctx: Context) -> tuple[dict[Path, str], list[str], int, int]:
@@ -476,36 +543,63 @@ def render_index(ctx: Context) -> tuple[dict[Path, str], list[str], int, int]:
 
 # ---------------------------------------------------------------------------- baseline
 
-def cmd_baseline(ctx: Context, allow_raise: bool) -> int:
+def cmd_baseline(ctx: Context, allow_raise: list[str] | None = None,
+                 reason: str | None = None) -> int:
+    """`allow_raise` is None without the flag, `[]` for every breach, else the keys it names."""
+    if allow_raise is not None and not (reason or "").strip():
+        print("a raise needs --reason", file=sys.stderr)
+        return 1
+    if allow_raise is None and reason is not None:
+        print("--reason needs --allow-raise", file=sys.stderr)
+        return 1
     try:
         old = ratchet.load_baseline(ctx)
     except ratchet.BaselineUnreadable as exc:
         print(f"[FAIL] baseline  ({exc}; nothing written — restore it from git)")
         return 1
+    try:
+        reasons = ratchet.load_reasons_strict(ctx)
+    except ratchet.BaselineUnreadable as exc:
+        print(f"[FAIL] baseline  ({exc}; nothing written — restore it from git)")
+        return 1
     current = ratchet.compute(ctx)
     new = dict(old)
+    reasons_before = dict(reasons)
     added, raised, lowered, removed, refused = [], [], [], [], []
+
+    def may_raise(key: str) -> bool:
+        return allow_raise is not None and (not allow_raise or key in allow_raise)
+
     for key, val in current.items():
         if key not in old:
-            if allow_raise:
+            if may_raise(key):
                 new[key] = val
+                reasons[key] = reason
                 added.append(f"{key}={val}")
             else:
-                refused.append(f"new entry '{key}'={val} (needs --allow-raise)")
+                refused.append(f"new entry '{key}'={val} (needs --allow-raise {ratchet.arg(key)} --reason TEXT)")
         elif val > old[key]:
-            if allow_raise:
+            if may_raise(key):
                 new[key] = val
+                reasons[key] = reason
                 raised.append(f"{key}: {old[key]} -> {val}")
             else:
-                refused.append(f"'{key}' grew {old[key]} -> {val} (needs --allow-raise)")
+                refused.append(f"'{key}' grew {old[key]} -> {val} (needs --allow-raise {ratchet.arg(key)} --reason TEXT)")
         elif val < old[key]:
             new[key] = val
+            reasons.pop(key, None)
             lowered.append(f"{key}: {old[key]} -> {val}")
     for key, base in old.items():
         if key not in current:
             del new[key]
+            reasons.pop(key, None)
             removed.append(f"{key} (was {base}, no longer breaches)")
+    for key in allow_raise or []:
+        if key not in current or current[key] <= old.get(key, -1):
+            print(f"  ignored {key} (not a new or grown breach)")
     ratchet.write_baseline(ctx, new)
+    if reasons != reasons_before:
+        ratchet.write_reasons(ctx, reasons)
     for label, rows in (("added", added), ("raised", raised),
                         ("lowered", lowered), ("removed", removed)):
         for row in rows:
@@ -530,13 +624,30 @@ def _log_scope(ctx: Context, name: str):
     return scope, ctx.scope_log(scope)
 
 
-def cmd_next_id(ctx: Context, name: str) -> int:
+def _count_ids(ctx: Context, paths: list[Path], prefix: str, fetch: bool,
+               also: tuple[Path, str] | None = None) -> set[int]:
+    """The numbers used in `paths` and on every fetched remote branch; `fetch` asks git for the
+    branches first. Warnings go to stderr."""
+    from govern import refs
+    if fetch and paths:
+        found = ctx._repo_rel(paths[0])
+        why = refs.fetch(found[0]) if found else "no git repository"
+        if why:
+            print(f"warning: git fetch failed ({why}); counting the branches already fetched",
+                  file=sys.stderr)
+    used, warnings = refs.used_numbers(ctx, paths, prefix, also)
+    for line in warnings:
+        print(f"warning: {line}", file=sys.stderr)
+    return used
+
+
+def cmd_next_id(ctx: Context, name: str, fetch: bool = False) -> int:
     scope, log = _log_scope(ctx, name)
     if scope is None or not scope.id_range:
         return fail(f"no id range for '{name}' — a project name, or "
                     f"'{ctx.workspace_label}' for the workspace log")
     prefix, (lo, hi) = scope.id_prefix or "W", scope.id_range
-    used = ctx.grammar.parse_file(log).used_numbers(prefix) if log.exists() else set()
+    used = _count_ids(ctx, [log], prefix, fetch)
     if ctx.cfg.dialect["next_id"] == "first-free":
         free = next((n for n in range(lo, hi + 1) if n not in used), None)
     else:
@@ -546,6 +657,16 @@ def cmd_next_id(ctx: Context, name: str) -> int:
         return fail(f"range {lo}-{hi} is exhausted")
     print(f"{prefix}-{free}")
     return 0
+
+
+def cmd_renumber(ctx: Context, old: str, new: str, project: str | None) -> int:
+    from govern import renumber
+    code, out, err = renumber.renumber(ctx, old, new, project)
+    for line in err:
+        print(line, file=sys.stderr)
+    for line in out:
+        print(line)
+    return code
 
 
 def _doc_for(ctx: Context, name: str, prefix: str, num: str | None) -> Path | None:
@@ -653,7 +774,7 @@ def cmd_find(ctx: Context, name: str, pattern: str, ids_only: bool, context: int
 
 
 def cmd_trap_add(ctx: Context, name: str, title: str, bites: str, body: str,
-                 filename: str) -> int:
+                 filename: str, fetch: bool = False) -> int:
     """Append a new trap; `index` writes its summary row. Numbers are monotonic across every
     trap file of the project and never recycled: other docs still cite retired numbers. The
     heading takes the separator the project's entries already use (`decisions.heading_sep`):
@@ -665,8 +786,8 @@ def cmd_trap_add(ctx: Context, name: str, title: str, bites: str, body: str,
     if not doc.exists():
         return fail(f"no traps file at {ctx.rel(doc)}")
     prefix = ctx.trap_prefix
-    used = set().union(*(ctx.grammar.parse_file(tf).used_numbers(prefix)
-                         for tf in ctx.trap_files(scope)))
+    used = _count_ids(ctx, ctx.trap_files(scope), prefix, fetch,
+                      also=(ctx.working_dir(scope), ctx.projects("trap_glob", "traps*.md")))
     for _, _, build in blocks.targets(ctx):
         build()   # raises before anything is written if any index input is unreadable
     ident = f"{prefix}-{(max(used) + 1) if used else 1}"
@@ -703,6 +824,9 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     c.add_argument("--base", default=None, metavar="REF",
                    help="compare with the commit this branch left REF at (origin/main, say) and "
                         "fail on what changed: the gate a pull request runs")
+    c.add_argument("--siblings", action="store_true",
+                   help="also warn about an id this branch added that another fetched branch "
+                        "added with a different title; the exit code is unchanged")
     df = sub.add_parser("diff", help="what this branch did to the decision logs, traps and "
                                      "baseline: a report, never a gate (always exits 0)")
     df.add_argument("--base", default=None, metavar="REF",
@@ -714,12 +838,27 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     ci = sub.add_parser("ci", help="print a CI workflow that runs the gate and the report on "
                                    "a pull request; it writes nothing")
     ci.add_argument("provider", nargs="?", help="github")
+    md = sub.add_parser("merge-driver", help="git's merge driver for decision logs, trap files "
+                                             "and generated blocks: O A B P")
+    md.add_argument("args", nargs="+", metavar="ARGS",
+                    help="the base, ours and theirs temp files and the path (%%O %%A %%B %%P)")
     sub.add_parser("index", help="regenerate generated blocks")
     bl = sub.add_parser("baseline", help="rewrite the ratchet baseline (lower/remove only)")
-    bl.add_argument("--allow-raise", action="store_true",
-                    help="also record new or grown breaches, instead of refusing them")
+    bl.add_argument("--allow-raise", nargs="*", default=None, metavar="KEY",
+                    help="also record new or grown breaches, instead of refusing them: all of "
+                         "them, or only the KEYs named (needs --reason)")
+    bl.add_argument("--reason", default=None,
+                    help="why the raise is accepted; recorded beside each raised key")
     n = sub.add_parser("next-id", help="print the next free decision id")
     n.add_argument("--project", "--repo", dest="project", required=True)
+    n.add_argument("--fetch", action="store_true",
+                   help="git fetch --all first, so branches pushed since are counted")
+    rn = sub.add_parser("renumber", help="give a decision or trap entry another id, and "
+                                         "everything that cites it")
+    rn.add_argument("old", metavar="OLD")
+    rn.add_argument("new", metavar="NEW")
+    rn.add_argument("--project", "--repo", dest="project", default=None,
+                    help="look for the entry in this project alone")
     sh = sub.add_parser("show", help="print one decision or trap entry, not the whole file")
     sh.add_argument("--project", "--repo", dest="project", required=True)
     sh.add_argument("ids", nargs="*", help="e.g. B-219 T-23 W-11")
@@ -729,6 +868,8 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
                     help="print file:start-end instead of the body, for a surgical edit")
     ta = sub.add_parser("trap-add", help="append a new trap; its summary row is generated")
     ta.add_argument("--project", "--repo", dest="project", required=True)
+    ta.add_argument("--fetch", action="store_true",
+                    help="git fetch --all first, so branches pushed since are counted")
     ta.add_argument("--title", required=True)
     ta.add_argument("--bites", required=True, help="the Bites when column")
     ta.add_argument("--body", default="", help="markdown body, e.g. **Tell:** and **Avoid:** lines")
@@ -755,6 +896,14 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     usub = up.add_subparsers(dest="usage_cmd", required=True)
     usub.add_parser("install", help="install the statusline capture on this machine")
     usub.add_parser("uninstall", help="remove it and put your statusLine back")
+    urow = usub.add_parser("row", help="the capture's own status row: on, off or status")
+    urow.add_argument("state", choices=["on", "off", "status"])
+    uw = usub.add_parser("weights", help="the weekly allowance settings in effect, or weights "
+                                         "suggested from your recorded days")
+    uw.add_argument("--profile", metavar="FOLDER",
+                    help="the Claude profile folder (default: CLAUDE_CONFIG_DIR, else ~/.claude)")
+    uw.add_argument("--suggest", action="store_true",
+                    help="print weights from the days recorded; writes nothing")
     ur = usub.add_parser("resolve", help="the effective option and alerts for this project")
     ur.add_argument("--json", action="store_true", dest="as_json")
     ph = sub.add_parser("phase", help="close a phase: push this branch, then remove the local "
@@ -773,10 +922,15 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     sw.add_argument("--project", metavar="NAME",
                     help="in a workspace, sweep only this project's repository")
     sw.add_argument("--apply", action="store_true",
-                    help="remove the named worktrees and branches that are MERGED or PR-MERGED, "
-                         "after a verified backup bundle; needs --only")
+                    help="remove the named worktrees and branches that are removable "
+                         "(MERGED, PR-MERGED, PUSHED, STALE), after a verified backup bundle; "
+                         "needs --only")
     sw.add_argument("--only", nargs="+", metavar="NAME",
-                    help="with --apply, the items to remove: `branch` or `project:branch`")
+                    help="with --apply, the items to remove: `branch`, `project:branch`, or "
+                         "`remote/branch` for a remote branch")
+    sw.add_argument("--home", action="store_true",
+                    help="with --apply, first fetch --prune each remote and move the checkout "
+                         "from a removable branch to the default branch, fast-forwarded")
     rp = sub.add_parser("runs", help="agent runs: start a phase, report on it, or resolve this "
                                      "project's agent-gates and agent-measure settings")
     rsub = rp.add_subparsers(dest="runs_cmd", required=True)
@@ -802,11 +956,15 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     bproj.add_argument("--project", metavar="NAME", default=argparse.SUPPRESS,
                        help="in a workspace, the project whose repository the build works in "
                             "(`start` needs it; other commands find the one build in flight)")
+    btake = argparse.ArgumentParser(add_help=False)
+    btake.add_argument("--take-over", action="store_true", dest="take_over",
+                       help="change a phase another person started: their email is replaced "
+                            "by yours and a ruling records it")
     bd = sub.add_parser("build", parents=[bproj],
                         help="the build ledger: the phase this branch has in flight, "
                              "its units and briefs, and what to do next")
     bsub = bd.add_subparsers(dest="build_cmd", required=True)
-    badd = functools.partial(bsub.add_parser, parents=[bproj])
+    badd = functools.partial(bsub.add_parser, parents=[bproj, btake])
     bs = badd("start", help="start a phase on the checked-out branch")
     bs.add_argument("phase", help="a slug: lower-case letters, digits and hyphens")
     bs.add_argument("--plan", metavar="FILE", help="the phase's plan, from the project's root")
@@ -820,7 +978,7 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
                          "(default: the default branch)")
     bu = badd("unit", help="add a unit and write its brief, or update one")
     busub = bu.add_subparsers(dest="unit_cmd", required=True)
-    buadd = functools.partial(busub.add_parser, parents=[bproj])
+    buadd = functools.partial(busub.add_parser, parents=[bproj, btake])
     ba = buadd("add", help="add a unit and write its brief")
     ba.add_argument("id")
     ba.add_argument("--title", required=True)
@@ -849,8 +1007,11 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     bg = badd("ruling", help="record a decision the coordinator made without the "
                              "owner: what, why, and what it costs if wrong")
     bg.add_argument("text", nargs="+")
-    bt = badd("status", help="the phase, a line per unit, and the next action")
+    bt = bsub.add_parser("status", parents=[bproj],
+                         help="the phase, a line per unit, and the next action")
     bt.add_argument("--json", action="store_true", dest="as_json")
+    bt.add_argument("--team", action="store_true", dest="team",
+                    help="every build in flight, here and on fetched remote branches")
     badd("review", help="write the review package and the reviewers' briefs")
     bf = badd("fix", help="write the fix pass's brief, for the coordinator to fill; "
                           "a second pass gets a brief of its own")
@@ -884,17 +1045,37 @@ def main(argv: list[str] | None = None, root: Path | None = None,
         argv.insert(0, "check")   # `govern --project X` is a check of X
     args = build_parser(prog).parse_args(argv)
     if args.cmd == "usage" and args.usage_cmd in ("install", "uninstall"):
-        from govern import usage_setup
+        from govern import installer, usage_setup
         fn = usage_setup.install if args.usage_cmd == "install" else usage_setup.uninstall
         try:
             print(fn(layout.home()))
         except (ValueError, OSError) as exc:
-            return fail(f"~/.claude/settings.json: {exc} — settings.json was not changed")
+            path = installer.user_settings(layout.home())
+            return fail(f"{path}: {exc}; it was not changed")
         return 0
+    if args.cmd == "usage" and args.usage_cmd == "row":
+        from govern import usage_setup
+        try:
+            code, msg = usage_setup.row(layout.home(), args.state)
+        except (ValueError, OSError) as exc:
+            return fail(f"status row: {exc}")
+        print(msg)
+        return code
+    if args.cmd == "usage" and args.usage_cmd == "weights":
+        from govern import usage_week
+        if args.suggest:
+            code, lines = usage_week.suggest(layout.home(), args.profile)
+        else:
+            lines = usage_week.describe(layout.home(), args.profile)
+            code = 1 if lines[0].startswith(usage_week.FILE + ": ") else 0
+        print("\n".join(lines))
+        return code
     if args.cmd == "phase":
         return cmd_phase(args)      # any git repository: it reads no project
     if args.cmd == "ci":
         return cmd_ci(args.provider, prog)    # a template: it reads nothing of the project's
+    if args.cmd == "merge-driver" and args.args != ["install"]:
+        return cmd_merge_driver(args.args, root, prog)
     try:
         ctx = load_context(root, prog)
     except config.ConfigError as exc:
@@ -921,16 +1102,21 @@ def main(argv: list[str] | None = None, root: Path | None = None,
 def dispatch(ctx: Context, args) -> int:
     if args.cmd == "index":
         return cmd_index(ctx)
+    if args.cmd == "merge-driver":
+        from govern import merging
+        return merging.install_clone(ctx)
     if args.cmd == "diff":
         return cmd_diff(ctx, args.base, args.as_json, args.project)
     if args.cmd == "baseline":
-        return cmd_baseline(ctx, args.allow_raise)
+        return cmd_baseline(ctx, args.allow_raise, args.reason)
     if args.cmd == "next-id":
-        return cmd_next_id(ctx, args.project)
+        return cmd_next_id(ctx, args.project, args.fetch)
+    if args.cmd == "renumber":
+        return cmd_renumber(ctx, args.old, args.new, args.project)
     if args.cmd == "show":
         return cmd_show(ctx, args.project, args.ids, args.as_list, args.as_lines)
     if args.cmd == "trap-add":
-        return cmd_trap_add(ctx, args.project, args.title, args.bites, args.body, args.file)
+        return cmd_trap_add(ctx, args.project, args.title, args.bites, args.body, args.file, args.fetch)
     if args.cmd == "find":
         return cmd_find(ctx, args.project, args.pattern, args.ids_only, args.context)
     if args.cmd == "options":
@@ -955,6 +1141,11 @@ def dispatch(ctx: Context, args) -> int:
     if args.cmd == "report":
         from govern import field_report
         return field_report.run(ctx, args)
-    return cmd_check(ctx, getattr(args, "project", None), getattr(args, "path", None),
+    code = cmd_check(ctx, getattr(args, "project", None), getattr(args, "path", None),
                      getattr(args, "history_from", None), getattr(args, "workspace_only", False),
                      getattr(args, "base", None))
+    if getattr(args, "siblings", False):
+        from govern import refs
+        for line in refs.sibling_collisions(ctx):
+            print(f"  warn   siblings: {line}")
+    return code

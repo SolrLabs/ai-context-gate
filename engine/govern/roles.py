@@ -346,6 +346,9 @@ def problems(params: dict) -> list[str]:
             for role in params["load_claude_md"] if role not in live]
     out += [f"{where} handback_checks = {entry!r}: {complaint}"
             for entry, _, _, complaint in _entries(params) if complaint]
+    out += [f"{where} brief_lines[{i}] = {value!r}: expected a line of text"
+            for i, value in enumerate(params.get("brief_lines", []))
+            if not isinstance(value, str) or not value.strip()]
     if params.get("unit_gate", "scoped") not in UNIT_GATES:
         out.append(f"{where} unit_gate = {params['unit_gate']!r}: expected one of "
                    f"{', '.join(UNIT_GATES)}")

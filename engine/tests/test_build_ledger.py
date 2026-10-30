@@ -11,6 +11,8 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import profile_guard  # noqa: E402,F401
+
 from build_support import *  # noqa: E402,F401,F403
 
 class NextAction(unittest.TestCase):
@@ -59,7 +61,7 @@ class NextAction(unittest.TestCase):
 
     def test_every_unit_done_in_the_build_stage_is_reviewed(self):
         said = self.say(("u1", "done"), ("u2", "done"))
-        self.assertEqual(said, f"Every unit is done: run `{roles.GOVERN} build review`.")
+        self.assertEqual(said, f"Every added unit is done: run `{roles.GOVERN} build review`.")
 
     def test_the_review_stage_goes_to_a_fix_or_straight_to_the_close(self):
         said = self.say(("u1", "done"), stage="review")
@@ -856,7 +858,7 @@ class ExpectedStatus(Build):
         some = json.loads((EXPECTED / "build-status.json").read_text(encoding="utf-8"))
         none = json.loads((EXPECTED / "build-status-none.json").read_text(encoding="utf-8"))
         keys = ["phase", "branch", "base", "plan", "high_risk", "visual", "stage", "ledger", "rulings",
-                "units", "done", "total", "next"]
+                "units", "done", "total", "next", "unadded"]
         self.assertEqual((list(some), list(none)), (keys, keys))
         self.assertEqual(list(some["units"][0]), ["id", "title", "role", "status", "attempts",
                                                   "branch", "commit", "note", "brief", "report"])

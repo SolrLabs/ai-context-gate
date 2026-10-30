@@ -40,6 +40,12 @@ from govern.text import read
            "handback_checks": Param("list", [],
                                     "Lines the operator adds to every role's hand-back "
                                     "checklist, each `Key: text`"),
+           "brief_lines": Param("list", [],
+                                "Lines every brief that govern build writes carries, under "
+                                "## Project rules"),
+           "commit_reports": Param("bool", False,
+                                   "Unit and review reports (*-report.md) are committed with the "
+                                   "ledger, so a reviewer on another machine can read them"),
            "high_risk_paths": Param("list", [],
                                     "Paths that make a phase high-risk, so qa-engineer runs "
                                     "beside code-reviewer"),

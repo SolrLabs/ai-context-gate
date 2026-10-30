@@ -11,6 +11,8 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import profile_guard  # noqa: E402,F401
+
 from regressions_support import *  # noqa: E402,F401,F403
 
 class Defaults(Base):
@@ -537,7 +539,7 @@ extend_rules = [{ text = "monster", use = "mob", level = "warn" }]
         prof = self.make_profile(self.tmp / "prof", "[projects]\ndocs = []\n")
         code, _, err = self.with_profile(prof.as_posix()).run("check")
         self.assertEqual(code, 2)
-        self.assertIn("a profile holds [checks.*] and [dialect] only", err)
+        self.assertIn("a profile holds [checks.*], [dialect] and [sweep] only", err)
 
     def test_a_profile_dialect_value_is_checked_against_its_choices(self):
         prof = self.make_profile(self.tmp / "prof", '[dialect]\nagent_turns_prose = "never"\n')
@@ -687,7 +689,7 @@ class PreCommitPath(Base):
         w = self.ws(extra="\n[checks.doc-frontmatter]\nmax_working_words = 3\n")
         w.write("projects/alpha/working-files/notes.md",
                fm("working", status="active") + "word " * 10)
-        code, out, _ = w.run("baseline", "--allow-raise")
+        code, out, _ = w.run("baseline", "--allow-raise", "--reason", "test")
         self.assertEqual(code, 0, out)
         baseline = json.loads((w.root / layout.BASELINE).read_text(encoding="utf-8"))
         key = "working_file_words:projects/alpha/working-files/notes.md"
@@ -849,7 +851,7 @@ class ProjectScopedWorkspaceChecks(Base):
 
     def test_ratchet_breach_in_x_reported_y_baseline_kept(self):
         w = self._two(extra="\n[checks.governed-doc-count]\nmax_docs = 0\n")
-        code, _, _ = w.run("baseline", "--allow-raise")
+        code, _, _ = w.run("baseline", "--allow-raise", "--reason", "test")
         self.assertEqual(code, 0)
         before = json.loads((w.root / layout.BASELINE).read_text(encoding="utf-8"))
         self.assertEqual(before.get("governed_docs:alpha"), 1)
@@ -866,7 +868,7 @@ class ProjectScopedWorkspaceChecks(Base):
 
     def test_ratchet_breach_under_path_reported_y_baseline_kept(self):
         w = self._two(extra="\n[checks.governed-doc-count]\nmax_docs = 0\n")
-        code, _, _ = w.run("baseline", "--allow-raise")
+        code, _, _ = w.run("baseline", "--allow-raise", "--reason", "test")
         self.assertEqual(code, 0)
         snap = self._snapshot(w, "alpha")
         wtext(snap / "extra.md", fm())

@@ -13,6 +13,10 @@ from types import SimpleNamespace
 ENGINE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ENGINE))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import profile_guard  # noqa: E402,F401
+
 from govern.checks.docs import (check_doc, could_go, finished_docs,  # noqa: E402
                                 governed_doc_count)
 from govern.findings import Findings  # noqa: E402
