@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """Assemble the Claude Code plugin at a release tag, and install it as a local plugin.
 
-    python3 tools/release/install-plugin.py vX.Y.Z              # into ~/.claude/skills/context-gate/
+    python3 tools/release/install-plugin.py vX.Y.Z              # into <profile>/skills/context-gate/
     python3 tools/release/install-plugin.py vX.Y.Z --out DIR    # assemble only (for --plugin-dir)
 
 A tag may be a beta, vX.Y.Z-beta.N. A beta's plugin is named `context-gate-beta`: it is installed
-in ~/.claude/skills/context-gate-beta/ and loads as `context-gate-beta@skills-dir`, because
-Claude Code never loads a plugin under ~/.claude/skills/ whose name an installed marketplace
-plugin has. ~/.claude/skills/context-gate/ is then left holding only `govern/RELEASE` and a
+in <profile>/skills/context-gate-beta/ and loads as `context-gate-beta@skills-dir`, because
+Claude Code never loads a plugin under <profile>/skills/ whose name an installed marketplace
+plugin has. <profile>/skills/context-gate/ is then left holding only `govern/RELEASE` and a
 README, the marker launchers older than that look for (an existing local install there is
 replaced by it). This is what `govern.local_plugin` installs for the same tag.
 
 The plugin is `plugin/` plus the engine (`engine/govern`) at the same tag, so the skill, its
 hooks and the engine it bundles are always one version. A plugin under
-~/.claude/skills/ loads in later sessions as `<name>@skills-dir`, with no marketplace.
+<profile>/skills/ loads in later sessions as `<name>@skills-dir`, with no marketplace.
 
-The installed copy sets `defaultEnabled: false`: a plugin under ~/.claude/skills/ is otherwise
+The installed copy sets `defaultEnabled: false`: a plugin under <profile>/skills/ is otherwise
 on in every project. A project turns it on in `.claude/settings.local.json` (`govern beta on`)
 or with `claude plugin enable context-gate-beta@skills-dir --scope local` (a release:
 `context-gate@skills-dir`).
@@ -23,12 +23,14 @@ or with `claude plugin enable context-gate-beta@skills-dir --scope local` (a rel
 The bundled engine is stamped `govern/RELEASE` (`vX.Y.Z`), in the assembled copy only: adopt
 installs the engine it runs into the user's engines directory only when it carries that stamp.
 
-The plugin's name, and so its directory under ~/.claude/skills/, is the one the tag's own
+The plugin's name, and so its directory under <profile>/skills/, is the one the tag's own
 plugin.json gives (a beta's with `-beta` added). Refuses a tag whose plugin.json version and engine version disagree.
 Replaces an existing local install of the plugin, which is a directory carrying that stamp: one
 without it was not assembled by this tool, and is refused rather than deleted. That rule is for
-the default place under ~/.claude/skills/; `--out DIR` replaces DIR whatever it holds, as it
-always did. Never touches anything else under ~/.claude/.
+the default place under <profile>/skills/; `--out DIR` replaces DIR whatever it holds, as it
+always did. Never touches anything else in the profile folder.
+
+<profile> is the Claude profile folder: `~/.claude`, or `$CLAUDE_CONFIG_DIR` when that is set.
 """
 from __future__ import annotations
 
@@ -84,7 +86,8 @@ def main() -> int:
         (stage / ".claude-plugin" / "plugin.json").write_text(
             json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         home = Path(os.environ.get("HOME") or Path.home())
-        skills = home / ".claude" / "skills"
+        config = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+        skills = (Path(config).expanduser() if config else home / ".claude") / "skills"
         out = Path(args[args.index("--out") + 1]) if "--out" in args \
             else skills / manifest["name"]
         # What an older launcher reads, for a beta installed in its place only.

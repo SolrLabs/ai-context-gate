@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 
+from govern import layout
 from govern.findings import Findings
 from govern.manifest import Param, check
 from govern.text import claude_project_slug, read, read_text
@@ -12,7 +13,7 @@ KIND = re.compile(r"^[ \t]*type[ \t]*:[ \t]*(.*?)[ \t]*$", re.MULTILINE)
 
 
 def memory_index_path(ctx):
-    return (ctx.home / ".claude" / "projects" / claude_project_slug(ctx.root) / "memory" /
+    return (layout.claude_dir(ctx.home) / "projects" / claude_project_slug(ctx.root) / "memory" /
             "MEMORY.md")
 
 

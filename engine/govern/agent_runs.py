@@ -1114,14 +1114,20 @@ def mark(home: Path, root, name: str, now: float | None = None) -> Path:
 
 def load_runs(home: Path, root, everything: bool = False) -> tuple[list[dict], str | None]:
     """The project's runs since the last mark (all of them with `everything`), and that mark's
-    label (None when there is none or `everything`)."""
-    runs, name, models = [], None, {}
+    label (None when there is none or `everything`). The coordinator's rows come after the agents'
+    and are kept apart: the newest per session and phase, and without `everything` only those of
+    the current mark's phase, wherever in the file they were written."""
+    runs, name, models, coord = [], None, {}, {}
     for row in read_json_lines(durable_path(home, root)):
         if "mark" in row:
             if not everything:
                 runs, name = [], row["mark"]
         elif "model_for" in row:
             models[(row.get("session"), row["model_for"])] = row.get("model")
+        elif row.get("coordinator"):
+            key = (row.get("session"), row.get("phase"))
+            if key not in coord or float(row.get("t") or 0) >= float(coord[key].get("t") or 0):
+                coord[key] = row
         elif "agent" in row:
             runs.append(row)
     later = set()
@@ -1136,7 +1142,14 @@ def load_runs(home: Path, root, everything: bool = False) -> tuple[list[dict], s
     for r in runs:
         if not r.get("model"):
             r["model"] = models.get((r.get("session"), r.get("agent")))
+    runs += [r for r in coord.values() if everything or name is None or r.get("phase") == name]
     return runs, name
+
+
+def _row_tokens(row: dict) -> int:
+    """All four token counts of a coordinator row, which holds them at the top level."""
+    return sum(int(row.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens",
+                                              "cache_read_input_tokens", "output_tokens"))
 
 
 def _all_tokens(row: dict) -> int:
@@ -1145,9 +1158,43 @@ def _all_tokens(row: dict) -> int:
                                                 "cache_read_input_tokens", "output_tokens"))
 
 
+def _coordinator_report(rows: list[dict]) -> dict:
+    """The coordinator's rows summed per phase ("" is planning), in the order first seen."""
+    out = {}
+    for r in rows:
+        slot = out.setdefault(r.get("phase") or "", {
+            "requests": 0, "input_tokens": 0, "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0, "output_tokens": 0, "peak_context": 0,
+            "compactions": 0, "owner_turns": 0, "handbacks": 0, "largest": []})
+        for k in ("requests", "input_tokens", "cache_creation_input_tokens",
+                  "cache_read_input_tokens", "output_tokens", "compactions", "owner_turns",
+                  "handbacks"):
+            slot[k] += int(r.get(k) or 0)
+        slot["peak_context"] = max(slot["peak_context"], int(r.get("peak_context") or 0))
+        slot["largest"] += [x for x in r.get("largest") or [] if isinstance(x, dict)]
+    for slot in out.values():
+        slot["largest"] = sorted(slot["largest"], key=lambda x: -float(x.get("kb") or 0))[:5]
+    return out
+
+
 def build_report(runs: list[dict]) -> dict:
     by_role, by_tool = {}, {}
     for r in runs:
+        if r.get("coordinator"):
+            if not r.get("requests"):
+                continue        # no request, so no model: it shows in the Coordinator section only
+            slot = by_role.setdefault(f"coordinator ({r.get('model')})", {
+                "runs": 0, "tokens": 0, "new_input": 0, "cached_reread": 0, "output": 0,
+                "tool_calls": 0, "wall_s": 0.0})
+            slot["runs"] += 1
+            slot["new_input"] += int(r.get("input_tokens") or 0) \
+                + int(r.get("cache_creation_input_tokens") or 0)
+            slot["cached_reread"] += int(r.get("cache_read_input_tokens") or 0)
+            slot["output"] += int(r.get("output_tokens") or 0)
+            slot["tokens"] += _row_tokens(r)
+            slot["tool_calls"] += sum(int(t.get("calls") or 0)
+                                      for t in (r.get("tools") or {}).values())
+            continue
         slot = by_role.setdefault(f"{r.get('type')} ({r.get('model')})", {
             "runs": 0, "tokens": 0, "new_input": 0, "cached_reread": 0, "output": 0,
             "tool_calls": 0, "wall_s": 0.0})
@@ -1164,11 +1211,13 @@ def build_report(runs: list[dict]) -> dict:
             agg = by_tool.setdefault(name, {"calls": 0, "ms": 0, "bytes": 0, "failed": 0})
             for k in agg:
                 agg[k] += int(t.get(k) or 0)
+    agents = [r for r in runs if not r.get("coordinator")]
     largest = sorted((dict(x, agent=r.get("agent"), type=r.get("type"))
-                      for r in runs for x in r.get("largest") or []),
+                      for r in agents for x in r.get("largest") or []),
                      key=lambda x: -x["bytes"])[:5]
     return {"runs": runs, "by_role": by_role, "by_tool": by_tool, "largest": largest,
-            "suggestions": suggestions(runs)}
+            "coordinator": _coordinator_report([r for r in runs if r.get("coordinator")]),
+            "suggestions": suggestions(agents)}
 
 
 def suggestions(runs: list[dict]) -> list[str]:
@@ -1216,8 +1265,9 @@ def suggestions(runs: list[dict]) -> list[str]:
 
 
 def render_report(report: dict, name: str | None, everything: bool) -> str:
-    runs = report["runs"]
-    scope = "all runs" if everything else f"since mark '{name}'" if name else "no mark yet"
+    runs = [r for r in report["runs"] if not r.get("coordinator")]
+    scope = ("all runs" if everything else "planning, since the last phase closed" if name == ""
+             else f"since mark '{name}'" if name else "no mark yet")
     out = [f"{len(runs)} agent runs ({scope}).", ""]
     out += [one_line(r).replace("[agent run] ", "- ") for r in runs]
     if report["by_role"]:
@@ -1234,6 +1284,21 @@ def render_report(report: dict, name: str | None, everything: bool) -> str:
         out += ["", "Largest results (each is re-read on every later turn of its agent):"]
         out += [f"- {x['bytes'] / 1024:.1f} KB {x['tool']} {str(x.get('label'))[-70:]}"
                 for x in report["largest"]]
+    if report.get("coordinator"):
+        out += ["", "Coordinator (requests, tokens: new input, cached re-read, output; peak "
+                    "context; compactions; owner turns; hand-backs):"]
+        big = []
+        for phase, v in report["coordinator"].items():
+            out.append(f"- {phase or 'planning'}: {v['requests']}, "
+                       f"{v['input_tokens'] + v['cache_creation_input_tokens']:,}, "
+                       f"{v['cache_read_input_tokens']:,}, {v['output_tokens']:,}; "
+                       f"{v['peak_context']:,}; {v['compactions']}; {v['owner_turns']}; "
+                       f"{v['handbacks']}")
+            big += v["largest"]
+        big = sorted(big, key=lambda x: -float(x.get("kb") or 0))[:5]
+        if big:
+            out += ["Largest coordinator results:"]
+            out += [f"- {x.get('kb')} KB {x.get('tool')}" for x in big]
     unfinished = [r for r in runs if r.get("unfinished")]
     if unfinished:
         out += [""] + [f"- {r.get('type') or 'an agent'}: blocked on its contract and never ended"

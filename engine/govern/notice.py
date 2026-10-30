@@ -115,7 +115,7 @@ def enabled_plugins(root: Path, home: Path) -> dict[str, bool]:
     project's, then its settings.local.json, key by key, the later file winning. A file that is
     missing or unreadable, and a value that is not true or false, are skipped."""
     merged: dict[str, bool] = {}
-    for settings in (home / ".claude" / "settings.json", root / ".claude" / "settings.json",
+    for settings in (layout.claude_dir(home) / "settings.json", root / ".claude" / "settings.json",
                      root / ".claude" / "settings.local.json"):
         try:
             enabled = json.loads(settings.read_text(encoding="utf-8-sig")).get("enabledPlugins", {})
@@ -223,7 +223,7 @@ def plugin_available(root: Path, home: Path) -> bool:
     # manifest is there, unless the project's settings turn its id off.
     for folder, plugin_id in ((layout.BETA_PLUGIN, layout.SKILLS_DIR_PLUGIN_ID),
                               (PLUGIN, layout.OLD_SKILLS_DIR_PLUGIN_ID)):
-        local = home / ".claude" / "skills" / folder / ".claude-plugin" / "plugin.json"
+        local = layout.claude_dir(home) / "skills" / folder / ".claude-plugin" / "plugin.json"
         if not local.is_file() or enabled.get(plugin_id) is False:
             continue
         try:
@@ -305,3 +305,45 @@ def emit(ctx) -> None:
         msg = f"{ORANGE}{msg}{RESET}"
     sys.stdout.flush()   # after the command's own output, even when stdout is a buffered pipe
     print(msg, file=sys.stderr)
+
+
+def plugin_behind(root: Path, home: Path) -> str | None:
+    """One line per installed context-gate plugin that applies to this project and is older than
+    its engine pin, with the commands that bring it up to date. Silent for a beta pin, and when
+    the plugin record is missing or unreadable: it never raises."""
+    import tomllib
+    try:
+        with (root / layout.CONFIG).open("rb") as fh:
+            pin = tomllib.load(fh).get("governance", {}).get("engine")
+        if not isinstance(pin, str) or versions.is_beta(pin):
+            return None
+        pin_key = versions.key(pin)
+        record = json.loads((layout.claude_dir(home) / "plugins" / "installed_plugins.json")
+                            .read_text(encoding="utf-8-sig"))
+        entries = record["plugins"][layout.PLUGIN_ID]
+        here = root.resolve()
+        lines = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            scope, version = entry.get("scope"), entry.get("version")
+            if scope == "user":
+                pass
+            elif scope in ("project", "local") and isinstance(entry.get("projectPath"), str):
+                if Path(entry["projectPath"]).resolve() != here:
+                    continue
+            else:
+                continue
+            try:
+                if not isinstance(version, str) or versions.key(version) >= pin_key:
+                    continue
+            except ValueError:
+                continue
+            lines.append(
+                f"{layout.DISPLAY_NAME}'s plugin ({scope}) is {version}; this project runs {pin}. "
+                f"Run claude plugin marketplace update {layout.MARKETPLACE}, then claude plugin "
+                f"update {layout.PLUGIN_ID} --scope {scope}, then /exit and start claude again "
+                f"(claude -c keeps the old plugin).")
+        return "\n".join(lines) or None
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None

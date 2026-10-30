@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import profile_guard  # noqa: E402,F401
+
 from migrate_support import *  # noqa: E402,F401,F403
 
 
@@ -291,9 +293,9 @@ class NewlyVisibleFindings(Base):
         self.assertIn("## Next steps", report)
         next_steps = report.split("## Next steps", 1)[1]
         self.assertIn("govern index", next_steps)
-        self.assertIn("govern baseline --allow-raise", next_steps)
+        self.assertIn("--allow-raise <key> --reason", next_steps)
         self.assertLess(next_steps.index("govern index"),
-                        next_steps.index("govern baseline --allow-raise"))
+                        next_steps.index("--allow-raise <key> --reason"))
 
     def test_newly_visible_missing_field_is_not_sent_to_the_baseline(self):
         # A missing **Why:** is a decision-log error the baseline never records: the next

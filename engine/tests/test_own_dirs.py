@@ -22,6 +22,8 @@ ENGINE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ENGINE))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import profile_guard  # noqa: E402,F401
+
 from govern import blocks, cli, config, installer, layout, profile, registry  # noqa: E402
 from govern.context import Context  # noqa: E402
 from govern.measure import measure  # noqa: E402

@@ -13,6 +13,10 @@ from types import SimpleNamespace
 ENGINE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ENGINE))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import profile_guard  # noqa: E402,F401
+
 import govern.checks  # noqa: E402,F401  (registers the built-in checks)
 from govern import installer, layout, manifest, options, report  # noqa: E402
 from test_single_repo import CFG, SingleRepo, wtext  # noqa: E402
@@ -90,8 +94,8 @@ class Collect(Base):
     def test_engine_only(self):
         o = self.by_id(repo(self.tmp))
         self.assertEqual(sorted(o), ["agent-gates", "agent-measure", "agent-roles",
-                                     "checkout-hygiene", "hooks-wired",
-                                     "licenses", "usage", "writing-rules"])
+                                     "checkout-hygiene", "decision-citations", "hooks-wired",
+                                     "licenses", "merge-driver", "usage", "writing-rules"])
         w = o["writing-rules"]
         self.assertEqual((w.state, w.layer, w.inherit, w.new), ("off", "engine", True, True))
 

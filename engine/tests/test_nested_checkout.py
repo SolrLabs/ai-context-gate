@@ -22,6 +22,10 @@ from unittest import mock
 ENGINE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ENGINE))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import profile_guard  # noqa: E402,F401
+
 from govern import __version__, cli, config, layout, measure, registry  # noqa: E402
 from govern.context import Context  # noqa: E402
 
@@ -272,7 +276,7 @@ class SnapshotIgnores(Fixture):
         super().setUp()
         code, out = self.run_cli("index")
         self.assertEqual(code, 0, out)
-        code, out = self.run_cli("baseline", "--allow-raise")
+        code, out = self.run_cli("baseline", "--allow-raise", "--reason", "test")
         self.assertEqual(code, 0, out)
         self.code, self.out = self.run_cli("check", "--project", NESTED)
         self.assertEqual(self.code, 0, self.out)                # green in place
@@ -336,7 +340,7 @@ class WorkspaceOnly(Fixture):
         self.write("AGENTS.md", fm("control") + "# Agents\n\nSee [a](nested-mod/docs/a.md).\n\n"
                    "<!-- t:generated:start id=agent-roster -->\n"
                    "<!-- t:generated:end id=agent-roster -->\n")
-        for argv in (["index"], ["baseline", "--allow-raise"]):
+        for argv in (["index"], ["baseline", "--allow-raise", "--reason", "test"]):
             code, out = self.run_cli(*argv)
             self.assertEqual(code, 0, out)
         code, out = self.run_cli("check")

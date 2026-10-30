@@ -27,6 +27,8 @@ ENGINE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ENGINE))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import profile_guard  # noqa: E402,F401
+
 from govern import cli, config, installer, layout, migrate, profile, registry  # noqa: E402
 from test_measure import (BODY, FM, example_workspace, commit, orbit, pair, put,  # noqa: E402
                           single_repo, snapshot)
@@ -152,7 +154,7 @@ class SingleRepo(Base):
         data = json.loads(out)
         self.assertEqual(sorted(o["id"] for o in data["options"]),
                          ["agent-gates", "agent-measure", "agent-roles", "checkout-hygiene",
-                          "hooks-wired", "licenses", "usage", "writing-rules"])
+                          "decision-citations", "hooks-wired", "licenses", "merge-driver", "usage", "writing-rules"])
         self.assertTrue(all(o["new"] for o in data["options"]))
 
     def test_agent_roles_answered_on_are_rendered_before_the_gate_and_end_green(self):

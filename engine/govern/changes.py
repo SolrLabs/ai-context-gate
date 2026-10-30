@@ -23,6 +23,7 @@ import json
 from dataclasses import dataclass, field
 
 from govern import base, ratchet
+from govern.context import glob_matches, repo_of
 from govern.decisions import STATUS_RE, Entry, id_key
 from govern.text import shown
 
@@ -164,6 +165,52 @@ def _entries(ctx, cmp: base.Comparison, kind: str, scope) -> list[Row]:
     return [row for _, row in sorted(found, key=lambda pair: pair[0])]
 
 
+def _items_at(ctx, asked: base._Asked, top, commit: str) -> list[base.Item]:
+    """Every decision log's and trap file's entries that the repository at `top` holds at
+    `commit`, parsed with the current grammar. A file the commit does not hold gives none.
+    Raises `base.CannotCompare` when git cannot say or a file cannot be read."""
+    out: list[base.Item] = []
+    for src in base._sources(ctx, traps=True):
+        found = ctx._repo_rel(src.path if src.kind == base.DECISION else src.path / "-")
+        if found is None or found[0] != top:
+            continue
+        rel = found[1]
+        if src.kind == base.DECISION:
+            held = base.exists(top, commit, rel)
+            if held is None:
+                raise base.CannotCompare(f"git could not say whether {rel} is at {commit[:12]}")
+            names = {rel: ctx.rel(src.path)} if held else {}
+        else:
+            rel = rel.rpartition("/")[0] or "."
+            listed = base.ls(top, commit, rel)
+            if listed is None:
+                raise base.CannotCompare(f"git could not list {rel} at {commit[:12]}")
+            prefix = "" if rel == "." else rel + "/"
+            pattern = ctx.projects("trap_glob", "traps*.md")
+            names = {name: ctx.rel(src.path / name[len(prefix):]) for name in sorted(listed)
+                     if name.startswith(prefix) and glob_matches(pattern, name[len(prefix):])}
+        for name, log in names.items():
+            out += [base.Item(src.kind, log, src.scope, e)
+                    for e in asked.entries(src.kind, base.read(top, commit, name))]
+    return out
+
+
+def between(ctx, old: str, new: str) -> list[Row]:
+    """The decision rows then the trap rows between two commits of the governance root's
+    repository, as `_entries` words them: what `new` holds against what `old` held. Neither
+    side is the working tree. Raises `base.CannotCompare` when git cannot say."""
+    root = ctx.root.resolve()
+    top = root if (root / ".git").exists() else repo_of(root)
+    if top is None:
+        raise base.CannotCompare("not a git repository")
+    asked = base._Asked(ctx)
+    repo = base.Repo(path=top, label=".", root=True, commit=old,
+                     base=_items_at(ctx, asked, top, old),
+                     current=_items_at(ctx, asked, top, new))
+    cmp = base.Comparison(ref=None, repos=[repo])
+    return _entries(ctx, cmp, base.DECISION, None) + _entries(ctx, cmp, base.TRAP, None)
+
+
 def _baseline_repo(ctx, cmp: base.Comparison) -> tuple[base.Repo | None, str | None]:
     """`(the compared repository the baseline file is in, its path there)`; the repository is
     None when the comparison has none for it."""
@@ -186,8 +233,13 @@ def _baseline(ctx, repo: base.Repo | None, rel: str | None, scope) -> list[Row]:
     path = ctx.baseline_path
     name = ctx.rel(path)
 
+    reasons = ratchet.load_reasons(ctx)
+
     def number(word: str, key: str, rest: str, old: int | None, new: int | None) -> Row:
-        return _change(word, f"{key}{rest}", key=key, reason=None, **{"from": old, "to": new})
+        why = reasons.get(key) if word in ("added", "raised") else None
+        tail = f" \u2014 {why}" if why else ""
+        return _change(word, f"{key}{rest}{tail}", key=key, reason=why,
+                       **{"from": old, "to": new})
 
     def unreadable(reason: str) -> list[Row]:
         return [_change("unreadable", f"{name} {reason}", key=name, reason=reason,

@@ -13,6 +13,8 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import profile_guard  # noqa: E402,F401
+
 from plugin_support import *  # noqa: E402,F401,F403
 
 
@@ -943,7 +945,7 @@ class BuildInFlight(Plugin):
         self.ledger("pending")
         self.ledger("done", branch="phase/p2", phase="p2")
         self.assertTrue(json.loads(self.start())["systemMessage"].startswith(
-            "A build is in flight: p2, 1 of 1 units done. Next: Every unit is done"))
+            "A build is in flight: p2, 1 of 1 units done. Next: Every added unit is done"))
 
     def test_a_build_folder_with_no_ledger_says_nothing(self):
         self.on_branch()

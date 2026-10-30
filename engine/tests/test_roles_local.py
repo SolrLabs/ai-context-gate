@@ -15,6 +15,10 @@ from unittest import mock
 ENGINE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ENGINE))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import profile_guard  # noqa: E402,F401
+
 import govern.checks  # noqa: E402,F401  (registers the built-in checks)
 from govern import config, layout, roles  # noqa: E402
 from test_roles import AGENTS, ON, RULES, raw, snapshot, record_install  # noqa: E402

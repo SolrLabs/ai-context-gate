@@ -12,6 +12,10 @@ from types import SimpleNamespace
 ENGINE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ENGINE))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import profile_guard  # noqa: E402,F401
+
 import govern.checks  # noqa: E402,F401  (registers the built-in checks)
 from govern import cli, manifest, options, usage_setup  # noqa: E402
 from test_options import repo  # noqa: E402
@@ -308,7 +312,7 @@ class Command(Base):
             code = cli.main(["usage", "install"], root=Path(self._tmp.name))
         self.assertEqual(code, 2)
         self.assertIn("settings.json", err.getvalue())
-        self.assertIn("settings.json was not changed", err.getvalue())
+        self.assertIn("it was not changed", err.getvalue())
 
 
 if __name__ == "__main__":

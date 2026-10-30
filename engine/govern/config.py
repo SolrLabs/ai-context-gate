@@ -86,12 +86,21 @@ LAYOUT = {
                  "trap_prefix": "str"},
     "blocks": {"workspace": "tables", "project": "tables", "registry_columns": "tables"},
     "checks": {"workspace_order": "list", "project_order": "list"},
-    # `auto_remove`: the verdicts the `housekeeping` skill may remove without asking; default none.
-    "sweep": {"auto_remove": "list"},
+    # `auto_remove`: the verdicts the `housekeeping` skill may remove without asking (default:
+    # SWEEP_AUTO_REMOVE_DEFAULT). `stale_days`: how long a pushed branch sits idle before it is
+    # PUSHED; `stale_remote_days`: how long an unmerged remote branch sits idle before it is STALE.
+    "sweep": {"auto_remove": "list", "stale_days": "int", "stale_remote_days": "int"},
 }
 
 # The values `[sweep] auto_remove` accepts: the removable verdicts, in lower case.
-SWEEP_AUTO_REMOVE = ("merged", "pr-merged")
+SWEEP_AUTO_REMOVE = ("merged", "pr-merged", "pushed", "stale")
+# What `auto_remove` means when the config sets no such key: the engine ships no auto-removal, so
+# every removal is asked about. A project or profile names the verdicts it trusts.
+SWEEP_AUTO_REMOVE_DEFAULT: tuple[str, ...] = ()
+# The idle days of a branch whose tip is on its remote before `sweep` calls it PUSHED.
+SWEEP_STALE_DAYS_DEFAULT = 14
+# The idle days of an unmerged remote branch with no open pull request before it is STALE; 0 never.
+SWEEP_STALE_REMOTE_DAYS_DEFAULT = 30
 
 # Keys an earlier engine accepted and this one no longer reads: named with what to do, rather than
 # reported as unknown, so a config written for the earlier engine says why it stopped loading.
@@ -132,11 +141,17 @@ class Config:
     # What loading found that is legal but almost certainly not meant (`excluded_docs`), for
     # every command to say once, before its own output
     warnings: list[str] = field(default_factory=list)
+    # `[sweep]` resolved per key (engine default < profile < project), and the keys the profile
+    # supplied, for `sweep` to say so
+    sweep: dict = field(default_factory=dict)
+    sweep_from_profile: set[str] = field(default_factory=set)
 
     def section(self, name: str) -> dict:
         return self.raw.get(name, {})
 
     def get(self, section: str, key: str, default=None):
+        if section == "sweep":
+            return self.sweep.get(key, default)
         return self.raw.get(section, {}).get(key, default)
 
 
@@ -410,17 +425,26 @@ def _validate_layout(raw: dict, name: str) -> None:
             raise ConfigError(f"{name}: [registry.keys] '{key}' is not a key the engine reads "
                               f"({', '.join(REGISTRY_KEYS)})")
         _check_type(f"{name}: [registry.keys] {key}", value, "str")
-    for i, value in enumerate(raw.get("sweep", {}).get("auto_remove", [])):
-        if value not in SWEEP_AUTO_REMOVE:
-            raise ConfigError(f"{name}: [sweep] auto_remove[{i}] = {value!r} is not one of "
-                              f"{', '.join(SWEEP_AUTO_REMOVE)}")
+    _validate_sweep(raw.get("sweep", {}), name)
     for i, skip in enumerate(raw.get("registry", {}).get("skip", [])):
         _check_type(f"{name}: [registry] skip[{i}]", skip, "str")
     _validate_tables(raw, name)
 
 
+def _validate_sweep(sweep: dict, name: str) -> None:
+    """The values of a `[sweep]` table, a project's or a profile's: `name` says which."""
+    for i, value in enumerate(sweep.get("auto_remove", [])):
+        if value not in SWEEP_AUTO_REMOVE:
+            raise ConfigError(f"{name}: [sweep] auto_remove[{i}] = {value!r} is not one of "
+                              f"{', '.join(SWEEP_AUTO_REMOVE)}")
+    for key in ("stale_days", "stale_remote_days"):
+        stale = sweep.get(key)
+        if stale is not None and stale < 0:
+            raise ConfigError(f"{name}: [sweep] {key} = {stale} must be 0 or more")
+
+
 BLOCK_RENDERERS = {"workspace": ("agent-roster", "registry", "decision-index"),
-                   "project": ("doc-registry", "decision-index", "trap-index")}
+                   "project": ("doc-registry", "decision-index", "trap-index", "team-state")}
 COLUMN_FORMATS = ("plain", "dir", "github-slug", "id-range")
 
 # A `[[blocks.project]]` entry needs exactly one of `file`/`glob` (its target: where the marker
@@ -776,10 +800,11 @@ def load(root: Path, home: Path, *, pin_check: bool = True) -> Config:
             raise ConfigError(str(exc)) from exc
         prof.settings = _renamed_checks(prof.settings,
                                         f"profile {prof.source} ({profiles.PRINCIPLES})", warnings)
-        extra = sorted(set(prof.settings) - {"checks", "dialect", "profile"})
+        extra = sorted(set(prof.settings) - {"checks", "dialect", "profile", "sweep"})
         if extra:
             raise ConfigError(f"profile {profiles.PRINCIPLES}: sets {', '.join(extra)}; a profile "
-                              f"holds [checks.*] and [dialect] only — layout belongs to projects")
+                              f"holds [checks.*], [dialect] and [sweep] only: layout belongs to "
+                              f"projects")
         pd = prof.settings.get("dialect", {})
         name = f"profile {prof.source} ({profiles.PRINCIPLES})"
         if not isinstance(pd, dict):
@@ -793,6 +818,14 @@ def load(root: Path, home: Path, *, pin_check: bool = True) -> Config:
             if key in DIALECT_CHOICES and value not in DIALECT_CHOICES[key]:
                 raise ConfigError(f"{name}: [dialect] {key} = '{value}' is not one of "
                                   f"{DIALECT_CHOICES[key]}")
+        ps = prof.settings.get("sweep", {})
+        if not isinstance(ps, dict):
+            raise ConfigError(f"{name}: [sweep] must be a table")
+        for key, value in ps.items():
+            if key not in LAYOUT["sweep"]:
+                raise ConfigError(f"{name}: unknown [sweep] key '{key}'")
+            _check_type(f"{name}: [sweep] {key}", value, LAYOUT["sweep"][key])
+        _validate_sweep(ps, name)
         layers.append(("profile", prof.settings))
     layers.append(("project", raw))
     if local:
@@ -805,7 +838,10 @@ def load(root: Path, home: Path, *, pin_check: bool = True) -> Config:
     list_overrides: list = []
     checks = _resolve_checks(layers, gov.get("require_reasons", True), overrides, list_overrides,
                              f"profile {prof.source} ({profiles.PRINCIPLES})" if prof else "profile")
+    own = raw.get("sweep", {})
+    inherited = prof.settings.get("sweep", {}) if prof else {}
     return Config(root=root, path=path, raw=raw, dialect=dialect, checks=checks,
+                  sweep={**inherited, **own}, sweep_from_profile=set(inherited) - set(own),
                   notes=[pin_note] if pin_note else [], profile=prof,
                   profile_overrides=overrides, list_overrides=list_overrides,
                   warnings=warnings + excluded_docs(raw))

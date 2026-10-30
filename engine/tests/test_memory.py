@@ -13,6 +13,8 @@ ENGINE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ENGINE))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import profile_guard  # noqa: E402,F401
+
 from govern import text  # noqa: E402
 from govern.checks.memory import memory_index  # noqa: E402
 from base_support import Case  # noqa: E402

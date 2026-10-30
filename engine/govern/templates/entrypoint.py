@@ -5,24 +5,27 @@ Installed as .context-gate/bin/govern (the gate), bin/upgrade (moves the project
 newer engine) and bin/uninstall (removes the tool).
 The logic lives in the context-gate engine; the policy lives in ../config.toml.
 
-    python3 .context-gate/bin/govern check [--project P]
+    python3 .context-gate/bin/govern check [--project P] [--siblings]
     python3 .context-gate/bin/govern index
-    python3 .context-gate/bin/govern baseline [--allow-raise]
-    python3 .context-gate/bin/govern next-id --project P
+    python3 .context-gate/bin/govern baseline [--allow-raise [KEY ...] --reason T]
+    python3 .context-gate/bin/govern next-id --project P [--fetch]
+    python3 .context-gate/bin/govern renumber OLD NEW [--project P]
     python3 .context-gate/bin/govern show --project P IDS | --list | --lines
     python3 .context-gate/bin/govern find --project P PATTERN
-    python3 .context-gate/bin/govern trap-add --project P --title T --bites B
-    python3 .context-gate/bin/govern usage install | uninstall | resolve [--json]
+    python3 .context-gate/bin/govern trap-add --project P --title T --bites B [--fetch]
+    python3 .context-gate/bin/govern usage install | uninstall | resolve [--json] | row on|off|status
     python3 .context-gate/bin/govern phase close [--remote R] [--keep B ...] [--dry-run] [--path D]
     python3 .context-gate/bin/govern runs mark LABEL | report [--all] [--json] | resolve --json
+    python3 .context-gate/bin/govern merge-driver install
+    python3 .context-gate/bin/govern merge-driver O A B P
     python3 .context-gate/bin/govern agents render [--check]
-    python3 .context-gate/bin/govern build start PHASE [--plan FILE] [--from BRANCH] [--high-risk]
-    python3 .context-gate/bin/govern build unit add ID --title T [--role R] [--red]
-    python3 .context-gate/bin/govern build unit set ID STATUS [--branch B] [--commit C] [--note N] [--role R]
-    python3 .context-gate/bin/govern build launch UNIT_ID | review | fix | close
-    python3 .context-gate/bin/govern build collect BRANCH
-    python3 .context-gate/bin/govern build ruling TEXT
-    python3 .context-gate/bin/govern build status [--json] | review | fix [--role R] | close
+    python3 .context-gate/bin/govern build start PHASE [--plan FILE] [--from BRANCH] [--high-risk] [--take-over]
+    python3 .context-gate/bin/govern build unit add ID --title T [--role R] [--red] [--take-over]
+    python3 .context-gate/bin/govern build unit set ID STATUS [--branch B] [--commit C] [--note N] [--role R] [--take-over]
+    python3 .context-gate/bin/govern build launch UNIT_ID | review | fix | close [--take-over]
+    python3 .context-gate/bin/govern build collect BRANCH [--take-over]
+    python3 .context-gate/bin/govern build ruling TEXT [--take-over]
+    python3 .context-gate/bin/govern build status [--json] [--team] | review | fix [--role R] | close
 
 Which engine runs: exactly the version config.toml pins, from
 ~/.local/share/context-gate/engines/<version>/. If it is not installed and config.toml
@@ -53,17 +56,20 @@ from pathlib import Path
 GOV_DIR = Path(__file__).resolve().parent.parent
 ROOT = GOV_DIR.parent
 HOME = Path(os.environ.get("HOME") or Path.home())
+# Claude Code's profile folder: CLAUDE_CONFIG_DIR when set, else ~/.claude.
+CLAUDE_DIR = Path(os.environ["CLAUDE_CONFIG_DIR"].strip()).expanduser() \
+    if os.environ.get("CLAUDE_CONFIG_DIR", "").strip() else HOME / ".claude"
 ENGINES = HOME / ".local" / "share" / "context-gate" / "engines"
 BETA_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)-beta\.([1-9]\d*)", re.ASCII)
 LOCAL = GOV_DIR / "local.toml"
 PLUGIN = "context-gate"
 STABLE_PLUGIN = f"{PLUGIN}@context-gate"
-# The beta's plugin has a name of its own, since Claude Code never loads a plugin under
-# ~/.claude/skills/ whose name an installed marketplace plugin has. Launchers older than that
-# (older launcher, in this file's words) wrote OLD_BETA_PLUGIN, which `beta on` now removes.
+# The beta's plugin has a name of its own, since Claude Code never loads a plugin under the
+# Claude profile's skills/ folder whose name an installed marketplace plugin has. Launchers older
+# than that (older launcher, in this file's words) wrote OLD_BETA_PLUGIN, which `beta on` now removes.
 BETA_PLUGIN = f"{PLUGIN}-beta@skills-dir"
 OLD_BETA_PLUGIN = f"{PLUGIN}@skills-dir"
-PLUGIN_DIR = HOME / ".claude" / "skills" / f"{PLUGIN}-beta"
+PLUGIN_DIR = CLAUDE_DIR / "skills" / f"{PLUGIN}-beta"
 # Seconds a clone may take before it is given up: generous for one shallow tag over a slow link,
 # and short enough that a dead one ends a session start in a line instead of hanging it. A slower
 # link raises it with CONTEXT_GATE_FETCH_TIMEOUT.
@@ -603,7 +609,7 @@ def _both_plugins_warning(version: str) -> str | None:
     imports nothing from govern): user, then project, then local settings, key by key, the later
     file winning; a file that is missing or unreadable is skipped."""
     enabled: dict = {}
-    for settings in (HOME / ".claude" / "settings.json", ROOT / ".claude" / "settings.json",
+    for settings in (CLAUDE_DIR / "settings.json", ROOT / ".claude" / "settings.json",
                      SETTINGS_LOCAL):
         try:
             plugins = json.loads(settings.read_text(encoding="utf-8-sig")).get("enabledPlugins", {})

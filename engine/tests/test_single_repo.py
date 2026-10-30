@@ -20,6 +20,10 @@ from pathlib import Path
 ENGINE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ENGINE))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import profile_guard  # noqa: E402,F401
+
 from govern import __version__, cli, config, installer, layout, migrate, registry  # noqa: E402
 from govern.context import Context  # noqa: E402
 
@@ -269,7 +273,7 @@ class NoDoubleReporting(Base):
 
     def test_a_decision_ratchet_breach_has_one_key_not_two(self):
         r = self.repo(extra="\n[checks.decision-log]\nmax_words = 1\n")
-        code, _, _ = r.run("baseline", "--allow-raise")
+        code, _, _ = r.run("baseline", "--allow-raise", "--reason", "test")
         self.assertEqual(code, 0)
         baseline = json.loads((r.root / layout.BASELINE).read_text(encoding="utf-8"))
         decision_keys = [k for k in baseline if k.startswith("decision_words:")]
@@ -300,7 +304,7 @@ class RepoRelativeLabels(Base):
         self.assertIn("'working_file_words:docs/HANDOFF.md' is a new breach", out)
         self.assertNotIn("words exceeds doc-frontmatter", out)
         self.assertNotIn("myproject/docs/HANDOFF.md", out)
-        code, out, _ = r.run("baseline", "--allow-raise")
+        code, out, _ = r.run("baseline", "--allow-raise", "--reason", "test")
         self.assertEqual(code, 0, out)
         code, out, _ = r.run("check")
         self.assertEqual(code, 0, out)
@@ -327,7 +331,8 @@ class FinishedFileNameInTheLimitMessage(Base):
         line = next(ln for ln in out.splitlines()
                     if ln.startswith("  ERROR") and "governed_docs:" in ln)
         self.assertTrue(line.endswith(
-            " baseline --allow-raise` Finished working files that could go: docs/old.md"), line)
+            ' baseline --allow-raise governed_docs:myproject --reason "<why>"` '
+            "Finished working files that could go: docs/old.md"), line)
         self.assertNotIn("myproject/docs/old.md", line)
 
 

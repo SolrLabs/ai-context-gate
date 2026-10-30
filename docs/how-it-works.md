@@ -87,7 +87,7 @@ instead of the body. `find` takes a case-insensitive regular expression. In a si
 The output is one line per finding, `ERROR` or `warn`, then a status line per scope:
 
 ```text
-  ERROR  ratchet: 'handoff_words:web' is a new breach at 1720, not in baseline.json — fix it, or if it is accepted for now run `govern baseline --allow-raise`
+  ERROR  ratchet: 'handoff_words:web' is a new breach at 1720, not in baseline.json — fix it, or if it is accepted for now run `govern baseline --allow-raise handoff_words:web --reason "<why>"`
 [FAIL] workspace  (1 errors, 0 warnings)
   ERROR  DECISIONS.md: duplicate decision id P-14
   warn   web: HANDOFF.md is 1720 words, over handoff-words max_words=1500 — current state only, not a log of sessions
@@ -387,8 +387,8 @@ recorded in the baseline, `.context-gate/baseline.json`, as a key and a size:
   past its recorded size.
 - **The baseline only goes down on its own.** `govern baseline` lowers entries that shrank and
   removes those that no longer breach. It refuses to add or raise an entry (exit 1) and says so.
-- **Accepting a bigger number is a deliberate act**: `govern baseline --allow-raise` records new
-  and grown breaches too. Commit the baseline so the choice is reviewed like any other change.
+- **Accepting a bigger number is a deliberate act**: `govern baseline --allow-raise <key> --reason "<why>"` records a new
+  or grown breach, with its reason. Commit the baseline so the choice is reviewed like any other change.
 
 The ratchet and config validation are the fixed core: neither can be turned off. A single
 check's size breaches can be taken out of the ratchet with `ratchet = false` (a loosening, so it
@@ -526,8 +526,8 @@ version in between, and every setting that differs from the defaults. If the pol
 load on the new engine, the pin is put back and nothing changes.
 
 An upgrade does not add entries to the baseline. For each new finding, decide: fix it, adjust
-the setting (with a reason if it loosens), turn the check off (with a reason), or accept the
-current breaches with `govern baseline --allow-raise`. The upgrade skill walks through these one
+the setting (with a reason if it loosens), turn the check off (with a reason), or accept a
+current breach with `govern baseline --allow-raise <key> --reason "<why>"`. The upgrade skill walks through these one
 at a time, with the cost of each.
 
 ## Adopting a project

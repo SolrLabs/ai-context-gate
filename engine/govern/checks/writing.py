@@ -167,6 +167,9 @@ def _selected(ctx, params) -> tuple[list[Path], list[str]]:
     So is one git ignores, asked of the repo that holds each file (`_ignored`, as for governed
     docs), unless `include_ignored` names it: drafts kept out of git are still checked there.
     An entry whose every file `Path.glob` found is spelled otherwise on disk warns, naming one."""
+    # Under `check --path` in a single repo the files are the snapshot's; `ctx.rel` maps a
+    # finding back to the real path.
+    base = ctx.snapshot if ctx.snapshot is not None else ctx.root
     exclude = [_pattern(x) for x in params["exclude"]]
     include = [_pattern(x) for x in params["include_ignored"]]
     include_excluded = [_pattern(x) for x in params["include_excluded"]]
@@ -178,12 +181,12 @@ def _selected(ctx, params) -> tuple[list[Path], list[str]]:
     for entry in params["files"]:
         pattern = _pattern(entry)
         found[entry], why[entry], matched[entry], other[entry] = [], set(), 0, []
-        for p in ctx.root.glob(pattern):
+        for p in base.glob(pattern):
             if not p.is_file():
                 continue
-            rel = unicodedata.normalize("NFC", p.relative_to(ctx.root).as_posix())
-            if not (glob_matches(pattern, rel) and _on_disk(ctx.root, rel, listed)):
-                other[entry].append(_spelled(ctx.root, rel, listed) or rel)
+            rel = unicodedata.normalize("NFC", p.relative_to(base).as_posix())
+            if not (glob_matches(pattern, rel) and _on_disk(base, rel, listed)):
+                other[entry].append(_spelled(base, rel, listed) or rel)
                 continue
             matched[entry] += 1
             if default_exclude(rel) is not None and (

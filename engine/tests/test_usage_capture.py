@@ -15,6 +15,7 @@ import tempfile
 import time
 import types
 import unittest
+import weakref
 from pathlib import Path
 from unittest import mock
 
@@ -22,6 +23,10 @@ ENGINE = Path(__file__).resolve().parent.parent
 CAPTURE = ENGINE / "govern" / "templates" / "capture.py"
 HOOK = ENGINE.parent / "plugin" / "hooks" / "usage.py"
 sys.path.insert(0, str(ENGINE))
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import profile_guard  # noqa: E402,F401
 
 from govern import usage_setup  # noqa: E402
 
@@ -42,10 +47,16 @@ EVAL = 'eval "$CONTEXT_GATE_STATUSLINE"'      # what Git Bash is asked to run; t
 
 def load_capture() -> types.ModuleType:
     """capture.py as a module, without running it and without leaving bytecode beside the
-    template (it is copied out of that directory)."""
+    template (it is copied out of that directory). It is loaded with HOME in an empty temp
+    folder, so its SHARE, STATE and HISTORY never point at the real home."""
     mod = types.ModuleType("capture_template")
     mod.__file__ = str(CAPTURE)
-    exec(compile(CAPTURE.read_text(encoding="utf-8"), str(CAPTURE), "exec"), mod.__dict__)
+    home = tempfile.mkdtemp()
+    weakref.finalize(mod, shutil.rmtree, home, True)      # removed when the module is dropped
+    with mock.patch.dict(os.environ, {"HOME": home}):
+        exec(compile(CAPTURE.read_text(encoding="utf-8"), str(CAPTURE), "exec"), mod.__dict__)
+    mod.DAYS = mod.STATE / "days.json"
+    mod.DAY_TIMES = mod.STATE / "day-times.json"
     return mod
 
 

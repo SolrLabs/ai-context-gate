@@ -12,6 +12,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import profile_guard  # noqa: E402,F401
+
 import test_build_workspace as ws  # noqa: E402
 from agent_runs_support import HookCase, setUpModule, tearDownModule  # noqa: E402,F401
 from build_support import BUILD, Build, agent_runs, build  # noqa: E402

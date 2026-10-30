@@ -27,8 +27,11 @@ ENGINE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ENGINE))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import profile_guard  # noqa: E402,F401
+
 from govern import agent_runs, build, layout, phase, roles  # noqa: E402
 from base_support import Case, Solo  # noqa: E402
+from fixture_cache import copy_of  # noqa: E402
 
 EXPECTED = Path(__file__).resolve().parent / "expected"
 BUILD = Path(layout.GOV_DIR) / "build"
@@ -65,21 +68,29 @@ class Build(Case):
 
     def project(self, *, remote: bool = False, default: str = "main", branch: str = "phase/p1",
                 extra: str = "", below: str | None = None) -> Solo:
-        w = Solo(self.tmp, extra=extra, below=below)
-        if default != "main":
-            w.git("branch", "-m", "main", default)
-        if remote:
-            bare = self.tmp / "remote.git"
-            bare.mkdir()
-            w.git("init", "-q", "--bare", at=bare)
-            w.git("symbolic-ref", "HEAD", f"refs/heads/{default}", at=bare)
-            w.git("remote", "add", "origin", str(bare))
-            w.git("push", "-q", "origin", default)
-            w.git("remote", "set-head", "origin", default)
-        if branch:
-            w.branch(branch)
-        self.w = w
-        return w
+        def make(tmp: Path) -> None:
+            w = Solo(tmp, extra=extra, below=below)
+            if default != "main":
+                w.git("branch", "-m", "main", default)
+            if remote:
+                bare = tmp / "remote.git"
+                bare.mkdir()
+                w.git("init", "-q", "--bare", at=bare)
+                w.git("symbolic-ref", "HEAD", f"refs/heads/{default}", at=bare)
+                w.git("remote", "add", "origin", str(bare))
+                w.git("push", "-q", "origin", default)
+                w.git("remote", "set-head", "origin", default)
+            if branch:
+                w.branch(branch)
+
+        def repoint(dest: Path) -> None:
+            Solo.attach(dest, below=below).git("remote", "set-url", "origin",
+                                               str(dest / "remote.git"), at=dest / (below or "solo"))
+
+        key = ("build.project", remote, default, branch, extra, below)
+        copy_of(key, self.tmp, make, repoint if remote else None)
+        self.w = Solo.attach(self.tmp, below=below)
+        return self.w
 
     def go(self, *argv: str) -> tuple[int, str, str]:
         return self.w.run("build", *argv)

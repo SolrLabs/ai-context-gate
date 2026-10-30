@@ -19,6 +19,8 @@ ENGINE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ENGINE))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import profile_guard  # noqa: E402,F401
+
 from govern import installer, layout  # noqa: E402
 from test_single_repo import CFG, SingleRepo  # noqa: E402
 

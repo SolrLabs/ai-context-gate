@@ -16,6 +16,8 @@ from unittest import mock
 ENGINE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ENGINE))
 
+import profile_guard  # noqa: E402,F401
+
 import govern.checks  # noqa: E402,F401  (registers the built-in checks)
 from govern import config, installer, layout, manifest, roles  # noqa: E402
 from test_single_repo import CFG, Base, SingleRepo, fm, wtext  # noqa: E402
@@ -950,6 +952,8 @@ scoped_test = "make test T=<name>"
 full_gate = "make ci"
 senior_triggers = ["money"]
 operator_rules = ["no attribution lines"]
+brief_lines = ["no attribution lines"]
+commit_reports = true
 handback_checks = ["Licences: each new dependency's licence"]
 high_risk_paths = ["db/**"]
 visual_paths = ["web/**"]

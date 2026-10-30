@@ -31,6 +31,7 @@ from pathlib import Path
 
 from govern import agent_runs, layout, phase, profile, roles, tomlw
 from govern.decisions import mask_lines
+from govern.text import Markers
 
 BUILD_DIR = f"{layout.GOV_DIR}/build"
 LEDGER = "ledger.toml"
@@ -58,9 +59,7 @@ PRODUCES_ROLE = re.compile(r"^Produces: (?:.*/)?(.+?)-report(?:-\d+)?\.md\s*$", 
 
 # Everything under build/ is ignored except the ledgers and the briefs: reports, diffs and
 # failing-test output stay out of history, and the plan of record stays in.
-GITIGNORE = """\
-# Written once by context-gate. Reports, review packages and failing-test output stay out of
-# history; the ledger and the briefs are the plan of record and stay in.
+_IGNORE_RULES = """\
 *
 !*/
 !.gitignore
@@ -68,6 +67,16 @@ GITIGNORE = """\
 !*brief.md
 !*brief-[0-9]*.md
 """
+GITIGNORE = """\
+# Written once by context-gate. Reports, review packages and failing-test output stay out of
+# history; the ledger and the briefs are the plan of record and stay in.
+""" + _IGNORE_RULES
+# With `commit_reports` (agent-roles) the unit and review reports are in history too; `red/` output
+# and the review package files stay out.
+GITIGNORE_REPORTS = """\
+# Written once by context-gate. Unit and review reports are committed with the ledger and the
+# briefs; review packages and failing-test output stay out of history.
+""" + _IGNORE_RULES + "!*-report.md\n"
 
 
 # Said above the brief's last lines: the report is part of the task.
@@ -153,7 +162,9 @@ class Ledger:
     visual: bool = False
     stage: str = "build"
     rulings: list[str] = field(default_factory=list)
+    owner: str = ""                    # `git config user.email` of who started it; "" when unknown
     launched: list[str] = field(default_factory=list)   # the fix briefs `launch fix` has printed
+    dropped: list[str] = field(default_factory=list)    # the ids `unit drop` removed
     units: list[dict] = field(default_factory=list)
     origin: str = ""                   # `from`: the branch it was cut from; "" is the default
     crlf: bool = False                 # how the file on disk ends its lines, kept on a rewrite
@@ -184,6 +195,8 @@ def build_dir(root: Path) -> Path:
 def render(ledger: Ledger) -> str:
     """The ledger as TOML: the phase's own keys, then one `[[unit]]` table per unit."""
     head = {"phase": ledger.phase, "branch": ledger.branch, "base": ledger.base}
+    if ledger.owner:
+        head["owner"] = ledger.owner
     if ledger.project:
         head["project"] = ledger.project
     if ledger.origin:
@@ -193,6 +206,8 @@ def render(ledger: Ledger) -> str:
     head.update(high_risk=ledger.high_risk, visual=ledger.visual, stage=ledger.stage, rulings=list(ledger.rulings))
     if ledger.launched:
         head["launched"] = list(ledger.launched)
+    if ledger.dropped:
+        head["dropped"] = list(ledger.dropped)
     text = tomlw.dumps(head, HEADER)
     for unit in ledger.units:
         text += "\n[[unit]]\n" + tomlw.dumps({k: unit[k] for k in UNIT_KEYS})
@@ -212,6 +227,8 @@ def _shape(data: dict, folder: str) -> str | None:
         return "`from` is not text"
     if not isinstance(data.get("project", ""), str):
         return "`project` is not text"
+    if not isinstance(data.get("owner", ""), str):
+        return "`owner` is not text"
     if not isinstance(data.get("high_risk", False), bool):
         return "`high_risk` is not true or false"
     if not isinstance(data.get("visual", False), bool):
@@ -224,6 +241,9 @@ def _shape(data: dict, folder: str) -> str | None:
     launched = data.get("launched", [])
     if not isinstance(launched, list) or not all(isinstance(n, str) for n in launched):
         return "`launched` is not a list of text lines"
+    dropped = data.get("dropped", [])
+    if not isinstance(dropped, list) or not all(isinstance(n, str) for n in dropped):
+        return "`dropped` is not a list of text lines"
     units = data.get("unit", [])
     if not isinstance(units, list) or not all(isinstance(u, dict) for u in units):
         return "`unit` is not a list of tables"
@@ -261,6 +281,15 @@ def load(path: Path) -> Ledger:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise refuse(f"not valid UTF-8 (byte {exc.start})") from None
+    return parse(text, path)
+
+
+def parse(text: str, path: Path) -> Ledger:
+    """The ledger `text` holds, as the file at `path` (the phase folder's name is checked against
+    it). Raises `BuildError` naming `path` when it is not TOML or is not a ledger."""
+    def refuse(why: str) -> BuildError:
+        return BuildError(f"{path}: {why} — fix the file or restore it from git; nothing was "
+                          f"changed")
     try:
         data = tomllib.loads(text.removeprefix(BOM))
     except tomllib.TOMLDecodeError as exc:
@@ -276,8 +305,10 @@ def load(path: Path) -> Ledger:
                   plan=data.get("plan", ""), origin=data.get("from", ""), high_risk=data.get("high_risk", False),
                   visual=data.get("visual", False),
                   stage=data["stage"], rulings=list(data.get("rulings", [])),
-                  launched=list(data.get("launched", [])), units=units,
-                  crlf="\r\n" in text, bom=text.startswith(BOM), project=data.get("project", ""))
+                  launched=list(data.get("launched", [])), dropped=list(data.get("dropped", [])),
+                  units=units,
+                  crlf="\r\n" in text, bom=text.startswith(BOM), project=data.get("project", ""),
+                  owner=data.get("owner", ""))
 
 
 def encoded(ledger: Ledger) -> bytes:
@@ -352,11 +383,66 @@ def ledgers(root: Path) -> tuple[list[Ledger], list[BuildError]]:
     return good, bad
 
 
-def open_builds(path: Path) -> tuple[list[tuple[str, str]], list[BuildError]]:
+def _team(root: Path) -> tuple[list[tuple[Ledger, str]], list[tuple[str, str]], list[BuildError]]:
+    """`team_ledgers`, and `(folder, branch)` for each remote ledger that does not parse: it
+    protects its own branch, and one warning names it on stderr."""
+    from govern import base
+    try:
+        remotes = sorted(phase._ask(root, "remote").split(), key=len, reverse=True)
+        res = phase._run(root, "for-each-ref", "--format=%(refname)", "refs/remotes")
+    except phase.PhaseError as exc:
+        return [], [], [BuildError(str(exc))]
+    if res.returncode != 0:
+        return [], [], [BuildError(f"git for-each-ref failed: {phase._reason(res)}")]
+    found: list[tuple[Ledger, str]] = []
+    unreadable: list[tuple[str, str]] = []
+    bad: list[BuildError] = []
+    for ref in sorted(r for r in phase._out(res).splitlines() if r and not r.endswith("/HEAD")):
+        name = next((ref.removeprefix(f"refs/remotes/{r}/") for r in remotes
+                     if ref.startswith(f"refs/remotes/{r}/")), None)
+        if name is None:
+            continue
+        listed = base.ls(root, ref, BUILD_DIR)
+        if listed is None:
+            bad.append(BuildError(f"{ref}: git could not list {BUILD_DIR}"))
+            continue
+        depth = BUILD_DIR.count("/") + 3
+        for rel in listed:
+            parts = rel.split("/")
+            if len(parts) != depth or parts[-1] != LEDGER:
+                continue
+            try:
+                ledger = parse(base.read(root, ref, rel), root / rel)
+            except base.CannotCompare as exc:
+                bad.append(BuildError(f"{ref}: {rel}: {exc.reason}"))
+                continue
+            except BuildError as exc:
+                why = str(exc).split(": ", 1)[-1].split(" — ")[0]
+                print(f"warning: {ref}:{rel} is not a readable ledger ({why}): its branch "
+                      f"{name} is kept as an open build", file=sys.stderr)
+                unreadable.append((parts[-2], name))
+                continue
+            if ledger.branch == name:
+                found.append((ledger, ref))
+    return found, unreadable, bad
+
+
+def team_ledgers(root: Path) -> tuple[list[tuple[Ledger, str]], list[BuildError]]:
+    """`(ledger, ref)` for each open build on a remote-tracking branch already fetched: a ledger
+    at `.context-gate/build/<phase>/ledger.toml` whose own `branch` is the remote branch's name
+    (a branch cut from a phase before it closed holds a ledger for another branch, and is not
+    open). Never fetches. A git call that fails is an error, never an empty answer; a ledger
+    that does not parse is not one (`open_builds` keeps its branch)."""
+    found, _, bad = _team(root)
+    return found, bad
+
+
+def open_builds(path: Path, remote: bool = True) -> tuple[list[tuple[str, str]], list[BuildError]]:
     """`(phase, branch)` for every tracked ledger anywhere in the repository `path` is in, and the
-    error for each that does not read. When git cannot name the top (no repository, or git cannot
-    run) it is `([], [])` and the caller's own check refuses. A git call that fails after that is
-    an error, never an empty answer."""
+    error for each that does not read; with `remote`, also each open build on a fetched remote
+    branch (`team_ledgers`) not already listed. When git cannot name the top (no repository, or
+    git cannot run) it is `([], [])` and the caller's own check refuses. A git call that fails
+    after that is an error, never an empty answer."""
     top = phase._git(path, "rev-parse", "--show-toplevel")
     if top is None or top.returncode != 0:
         return [], []     # no repository, or git cannot run: `phase.plan` refuses on its own check
@@ -376,6 +462,13 @@ def open_builds(path: Path) -> tuple[list[tuple[str, str]], list[BuildError]]:
             bad.append(exc)
         else:
             good.append((ledger.phase, ledger.branch))
+    if remote:
+        found, unreadable, errors = _team(root)
+        for ledger, _ in found:
+            if (ledger.phase, ledger.branch) not in good:
+                good.append((ledger.phase, ledger.branch))
+        good.extend(u for u in unreadable if u not in good)
+        bad.extend(errors)
     return good, bad
 
 
@@ -536,9 +629,15 @@ def _sections(sections) -> str:
     return "".join(f"## {name}\n\n{_fill(what)}\n\n" for name, what in sections)
 
 
-def unit_brief(ledger: Ledger, unit: dict, red: bool) -> str:
+def _rules(lines) -> str:
+    """The project's own brief lines, under `## Project rules`; nothing when there are none."""
+    return "## Project rules\n\n" + "".join(f"- {line}\n" for line in lines) + "\n" if lines else ""
+
+
+def unit_brief(ledger: Ledger, unit: dict, red: bool, rules=()) -> str:
     return (f"# {ledger.phase} / {unit['id']} — {unit['title']}\n\n"
             + _sections(UNIT_SECTIONS)
+            + _rules(rules)
             + f"{REPORT_NOTE}\n{PATHS_NOTE}\n"
             + (f"Red: {_from_root(ledger, unit['id'], 'red')}\n" if red else "")
             + f"Produces: {_from_root(ledger, unit['id'], ledger.report(unit).name)}\n")
@@ -589,13 +688,13 @@ def ux_reviewer_brief(root: Path, ledger: Ledger) -> str:
             + f"{REPORT_NOTE}\n{PATHS_NOTE}\nProduces: {_from_root(ledger, 'review', 'ux-reviewer-report.md')}\n")
 
 
-def fix_brief(ledger: Ledger, head: str, role: str, number: int) -> str:
+def fix_brief(ledger: Ledger, role: str, number: int, rules=()) -> str:
     """The fix pass's brief; the `number`th pass names its report `<role>-report-<number>.md`
     (the first has no number), so no pass overwrites another's."""
     suffix = f"-{number}" if number > 1 else ""
     return (f"# {ledger.phase} / fix — the fix pass{f' {number}' if number > 1 else ''}\n\n"
-            f"Base commit: {head}\n\n"
             + _sections(fix_sections(_from_root(ledger, "fix", f"red{suffix}")))
+            + _rules(rules)
             + f"{FIX_RUNNING_NOTE}\n\n{REPORT_NOTE}\n{PATHS_NOTE}\n"
             f"Red: {_from_root(ledger, 'fix', f'red{suffix}')}\n"
             f"Produces: {_from_root(ledger, 'fix', f'{role}-report{suffix}.md')}\n")
@@ -634,6 +733,9 @@ def close_brief(root: Path, ledger: Ledger) -> str:
             f"The phase `{ledger.phase}` on the branch `{ledger.branch}` is closing.\n\n"
             + (f"Plan: {_rel(ledger.dir / 'close', root / ledger.plan)}\n\n"
                if ledger.plan else "")
+            + (f"Phase owner: {ledger.owner}. When the project keeps one handoff per owner, "
+               f"update only the handoff whose frontmatter owner is this email.\n\n"
+               if ledger.owner else "")
             + ("## What landed\n\n" + landed + "\n" if landed else "")
             + (RULINGS_HEADING + "\n\n" + rulings + "\n" if rulings else "")
             + _sections((CLOSE_SECTION,))
@@ -644,7 +746,10 @@ def close_brief(root: Path, ledger: Ledger) -> str:
 # ---------------------------------------------------------------------------- status
 
 def _names(units: list[dict]) -> str:
-    ids = [u["id"] for u in units]
+    return _join([u["id"] for u in units])
+
+
+def _join(ids: list[str]) -> str:
     return ids[0] if len(ids) == 1 else ", ".join(ids[:-1]) + " and " + ids[-1]
 
 
@@ -657,9 +762,45 @@ def phase_close(project: str | None, folder: str) -> str:
     return f"{roles.GOVERN} phase close" + (f" --path {shlex.quote(folder)}" if project else "")
 
 
-def next_action(ledger: Ledger) -> str:
+PHASE_HEADING = re.compile(r"^##\s.*?\(.*?\bslug:\s*(?P<slug>[^\s;)]+)\s*[;)]")
+UNIT_HEADING = re.compile(r"^### ([A-Za-z0-9_-]+):\s")
+
+
+def planned_units(root: Path, ledger: Ledger) -> list[str] | None:
+    """The unit ids the plan names for this phase, in plan order: the `### <id>: <title>`
+    headings under the phase's `## ` heading whose parenthetical holds `slug: <phase>`. None when
+    the ledger has no plan, the plan cannot be read or no phase heading names the slug."""
+    if not ledger.plan:
+        return None
+    try:
+        text = (root / ledger.plan).read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        return None
+    ids: list[str] = []
+    inside = found = False
+    lines = text.splitlines()
+    live = mask_lines(lines, Markers("\x00"))   # fences and comments only: no real marker prefix
+    for line, is_live in zip(lines, live):
+        if not is_live:
+            continue
+        if line.startswith("## "):
+            match = PHASE_HEADING.match(line)
+            inside = bool(match and match["slug"] == ledger.phase)
+            found = found or inside
+        elif inside and (unit := UNIT_HEADING.match(line)):
+            ids.append(unit[1])
+    return ids if found else None
+
+
+def unadded(ledger: Ledger, planned: list[str] | None) -> list[str]:
+    """The planned ids that are neither units of the ledger nor dropped, in plan order."""
+    have = {u["id"] for u in ledger.units} | set(ledger.dropped)
+    return [uid for uid in planned or [] if uid not in have]
+
+
+def next_action(ledger: Ledger, planned: list[str] | None = None) -> str:
     """One sentence: what the coordinator does next, and the command for it. A function of the
-    ledger alone."""
+    ledger and, when given, the unit ids the plan names for the phase."""
     govern = govern_build(ledger.project)
     stuck = next((u for u in ledger.units if u["status"] in ("blocked", "failed")), None)
     if stuck:
@@ -680,6 +821,12 @@ def next_action(ledger: Ledger) -> str:
     if not ledger.units:
         return f"Add the first unit with `{govern} unit add <id> --title <title>`."
     if ledger.stage == "build":
+        missing = unadded(ledger, planned)
+        if planned is None:
+            return f"Every added unit is done: run `{govern} review`."
+        if missing:
+            return (f"Every added unit is done; the plan names {_join(missing)} not yet added: "
+                    f"add them with `{govern} unit add`, or drop them from the plan.")
         return f"Every unit is done: run `{govern} review`."
     if ledger.stage == "review":
         return (f"When the reviews are in, run `{govern} fix`, or `{govern} close` "
@@ -711,14 +858,16 @@ def status_data(root: Path, ledger: Ledger | None, branch: str) -> dict:
     if ledger is None:
         return {"phase": None, "branch": branch, "base": None, "plan": None, "high_risk": False, "visual": False,
                 "stage": None, "ledger": None, "rulings": [], "units": [], "done": 0,
-                "total": 0, "next": nothing_in_flight(branch)}
+                "total": 0, "next": nothing_in_flight(branch), "unadded": []}
+    planned = planned_units(root, ledger)
     units = [{**{k: u[k] for k in UNIT_KEYS}, "brief": _posix(root, ledger.brief(u["id"])),
               "report": _posix(root, ledger.report(u))} for u in ledger.units]
     return {"phase": ledger.phase, "branch": ledger.branch, "base": ledger.base,
             "plan": ledger.plan or None, "high_risk": ledger.high_risk, "visual": ledger.visual, "stage": ledger.stage,
             "ledger": _posix(root, ledger.path), "rulings": list(ledger.rulings), "units": units,
             "done": sum(1 for u in ledger.units if u["status"] == "done"),
-            "total": len(ledger.units), "next": next_action(ledger)}
+            "total": len(ledger.units), "next": next_action(ledger, planned),
+            "unadded": unadded(ledger, planned)}
 
 
 def nothing_in_flight(branch: str, project: str | None = None) -> str:
@@ -733,7 +882,7 @@ def _rulings(ledger: Ledger) -> list[str]:
     return ["Rulings:"] + [f"  {n}. {r}" for n, r in enumerate(ledger.rulings, 1)]
 
 
-def status_lines(ledger: Ledger) -> list[str]:
+def status_lines(ledger: Ledger, planned: list[str] | None = None) -> list[str]:
     facts = [f"stage {ledger.stage}", f"base {ledger.base[:12]}"]
     if ledger.plan:
         facts.append(f"plan {ledger.plan}")
@@ -752,7 +901,7 @@ def status_lines(ledger: Ledger) -> list[str]:
                      + (f"  ({'; '.join(more)})" if more else ""))
     if not ledger.units:
         lines.append("  no units yet")
-    return lines + _rulings(ledger) + [f"Next: {next_action(ledger)}"]
+    return lines + _rulings(ledger) + [f"Next: {next_action(ledger, planned)}"]
 
 
 def session_line(root: Path) -> str | None:
@@ -766,7 +915,7 @@ def session_line(root: Path) -> str | None:
         return None
     done = sum(1 for u in ledger.units if u["status"] == "done")
     return (f"A build is in flight: {ledger.phase}, {done} of {len(ledger.units)} units done. "
-            f"Next: {next_action(ledger)}")
+            f"Next: {next_action(ledger, planned_units(root, ledger))}")
 
 
 # ---------------------------------------------------------------------------- commands
@@ -883,9 +1032,21 @@ def _commits_since(root: Path, base: str) -> int:
     return int(text) if res.returncode == 0 and text.isdigit() else 0
 
 
+def git_email(root: Path) -> str | None:
+    """`git config user.email` in `root`; None when git cannot say or it is not set."""
+    try:
+        res = phase._run(root, "config", "user.email")
+    except phase.PhaseError:
+        return None
+    text = phase._out(res)
+    return text if res.returncode == 0 and text else None
+
+
 def start(ctx, name: str, plan: str | None, high_risk: bool, source: str | None = None,
-          visual: bool = False, project: str | None = None, session: Path | None = None) -> int:
-    """`session` is the governance root, where runs are logged; `ctx.root` is the member's."""
+          visual: bool = False, project: str | None = None, session: Path | None = None,
+          take_over: bool = False) -> int:
+    """`session` is the governance root, where runs are logged; `ctx.root` is the member's.
+    `take_over` restarts a phase another person owns, as its new owner (one write)."""
     root = ctx.root
     if not SLUG.fullmatch(name):
         raise BuildError(f"{name!r} is not a phase name: lower-case letters, digits and "
@@ -904,11 +1065,23 @@ def start(ctx, name: str, plan: str | None, high_risk: bool, source: str | None 
     if phase._ask(root, "status", "--porcelain", "--untracked-files=no"):
         raise BuildError("uncommitted changes: commit or set them aside first")
     mine = current(root, branch)
+    email = git_email(root)
+    taken = ""
+    if mine is not None and mine.owner and email is not None \
+            and mine.owner.lower() != email.lower():
+        if not take_over:
+            raise BuildError(f"{mine.phase} belongs to {mine.owner}; run with --take-over to "
+                             f"take it")
+        taken = mine.owner
     # The same phase with no unit yet may be started again, to correct its base or origin.
     again = mine is not None and mine.phase == name and not mine.units
     if mine is not None and not again:
         raise BuildError(f"a build is already in flight on {branch}: {mine.phase} "
                          f"({_local(root, mine.path)})")
+    for fetched, _ in team_ledgers(root)[0]:
+        if fetched.phase == name and fetched.branch != branch:
+            raise BuildError(f"the phase {name} is in flight on {fetched.branch} (a fetched "
+                             f"branch): pick another name")
     path = build_dir(root) / name / LEDGER
     if path.exists() and not again:
         raise BuildError(f"the phase {name} already has a ledger, for the branch "
@@ -927,15 +1100,35 @@ def start(ctx, name: str, plan: str | None, high_risk: bool, source: str | None 
               f"was cut from another branch, start again with --from <branch>"])
     if again:
         ledger = replace(mine, base=base, plan=rel, high_risk=high_risk, visual=visual,
-                         origin=source or default)
+                         origin=source or default, owner=mine.owner or email or "")
+        if taken:
+            today = time.strftime("%Y-%m-%d", time.gmtime())
+            ledger.rulings = [*mine.rulings, f"taken over from {taken} on {today}"]
+            ledger.owner = email
     else:
         ledger = Ledger(path=path, phase=name, branch=branch, base=base, plan=rel,
                         high_risk=high_risk, visual=visual, origin=source or default,
-                        project=project or "")
+                        project=project or "", owner=email or "")
     ledger.folder = _folder(ctx, project)
     ignore = build_dir(root) / ".gitignore"
     wrote_ignore = not ignore.exists()
-    save(ledger, [(ignore, GITIGNORE.encode("utf-8"))] if wrote_ignore else [])
+    want = _gitignore(ctx)
+    write_ignore = wrote_ignore
+    ignore_bytes = want.encode("utf-8")
+    if not wrote_ignore:
+        try:
+            raw = ignore.read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            raw = None
+        if raw is not None:
+            bom = raw.startswith(BOM)
+            have = raw.removeprefix(BOM).replace("\r\n", "\n")
+            write_ignore = have in (GITIGNORE, GITIGNORE_REPORTS) and have != want
+            if write_ignore:
+                ignore_bytes = ((BOM if bom else "")
+                                + (want.replace("\n", "\r\n") if "\r\n" in raw else want)
+                                ).encode("utf-8")
+    save(ledger, [(ignore, ignore_bytes)] if write_ignore else [])
     if not again:
         _keep_in_history(root, ledger, ignore if wrote_ignore else None)
     lines = [f"{'restarted' if again else 'started'} {name} on {branch}, from {ledger.origin} "
@@ -945,7 +1138,9 @@ def start(ctx, name: str, plan: str | None, high_risk: bool, source: str | None 
         logged = session or root
         agent_runs.mark(ctx.home, logged, name)
         lines.append(f"phase '{name}' started in {agent_runs.durable_path(ctx.home, logged)}")
-    _say(lines + [f"Next: {next_action(ledger)}"])
+    if taken:
+        lines.insert(0, f"took over {name} from {taken}")
+    _say(lines + [f"Next: {next_action(ledger, planned_units(root, ledger))}"])
     return 0
 
 
@@ -995,6 +1190,19 @@ def _code_role(ctx, role: str | None) -> str:
     return role
 
 
+def _gitignore(ctx) -> str:
+    """The build folder's `.gitignore` the project's `agent-roles` params ask for."""
+    check = ctx.cfg.checks.get(roles.CHECK)
+    on = check is not None and check.params.get("commit_reports", False) is True
+    return GITIGNORE_REPORTS if on else GITIGNORE
+
+
+def _brief_lines(ctx) -> list[str]:
+    """The lines the project's `agent-roles` params give every brief."""
+    check = ctx.cfg.checks.get(roles.CHECK)
+    return list(check.params.get("brief_lines", [])) if check is not None else []
+
+
 def unit_add(ctx, uid: str, title: str, role: str | None, red: bool,
              project: str | None = None) -> int:
     root = ctx.root
@@ -1018,7 +1226,7 @@ def unit_add(ctx, uid: str, title: str, role: str | None, red: bool,
     unit = {"id": uid, "title": title, "role": role, "status": "pending", "attempts": 0,
             "branch": "", "commit": "", "note": ""}
     ledger.units.append(unit)
-    save(ledger, [(brief, unit_brief(ledger, unit, red).encode("utf-8"))])
+    save(ledger, [(brief, unit_brief(ledger, unit, red, _brief_lines(ctx)).encode("utf-8"))])
     _say([f"added unit {uid} for {role}: {title}", f"wrote {_local(root, brief)}",
           _then(uid, project=ledger.project)])
     return 0
@@ -1036,6 +1244,7 @@ def unit_drop(ctx, uid: str, project: str | None = None) -> int:
         raise BuildError(f"{uid} is {unit['status']}: only a pending, blocked or failed unit "
                          f"can be dropped")
     ledger.units.remove(unit)
+    ledger.dropped.append(uid)
     save(ledger)
     folder = ledger.dir / uid
     say = [f"dropped {uid}"]
@@ -1146,7 +1355,49 @@ def ruling(ctx, text: str, project: str | None = None) -> int:
     return 0
 
 
-def status(ctx, as_json: bool, project: str | None = None) -> int:
+def _last_commit(root: Path, ref: str) -> str | None:
+    """The committer date of `ref` (ISO 8601); None when git cannot say."""
+    try:
+        res = phase._run(root, "log", "-1", "--format=%cI", ref)
+    except phase.PhaseError:
+        return None
+    text = phase._out(res)
+    return text if res.returncode == 0 and text else None
+
+
+def team_rows(root: Path) -> tuple[list[dict], list[BuildError]]:
+    """One row per open build, local ledgers and fetched remote ones, one per `(phase, branch)`
+    with the local ledger winning, sorted by phase then branch."""
+    local, bad = ledgers(root)
+    rows: dict[tuple[str, str], tuple[Ledger, str]] = {
+        (g.phase, g.branch): (g, f"refs/heads/{g.branch}") for g in local}
+    found, errors = team_ledgers(root)
+    for ledger, ref in found:
+        rows.setdefault((ledger.phase, ledger.branch), (ledger, ref))
+    out = [{"phase": g.phase, "branch": g.branch, "owner": g.owner or None, "stage": g.stage,
+            "done": sum(1 for u in g.units if u["status"] == "done"), "total": len(g.units),
+            "last_commit": _last_commit(root, ref)}
+           for _, (g, ref) in sorted(rows.items())]
+    return out, [*bad, *errors]
+
+
+def team_status(ctx, as_json: bool) -> int:
+    rows, bad = team_rows(ctx.root)
+    for exc in bad:
+        print(f"warning: {exc}", file=sys.stderr)
+    if as_json:
+        _say([json.dumps({"builds": rows}, indent=2, ensure_ascii=False)])
+    elif not rows:
+        _say(["no builds in flight"])
+    else:
+        _say([f"{r['phase']}  {r['branch']}  {r['owner'] or '-'}  {r['stage']}  "
+              f"{r['done']}/{r['total']}  {r['last_commit'] or '-'}" for r in rows])
+    return 0
+
+
+def status(ctx, as_json: bool, project: str | None = None, team: bool = False) -> int:
+    if team:
+        return team_status(ctx, as_json)
     branch = checked_out(ctx.root)
     ledger = current(ctx.root, branch) if branch else None
     if ledger is not None:
@@ -1155,7 +1406,7 @@ def status(ctx, as_json: bool, project: str | None = None) -> int:
     if as_json:
         _say([json.dumps(status_data(ctx.root, ledger, branch), indent=2, ensure_ascii=False)])
     else:
-        _say(status_lines(ledger) if ledger else [nothing_in_flight(branch, project)])
+        _say(status_lines(ledger, planned_units(ctx.root, ledger)) if ledger else [nothing_in_flight(branch, project)])
     return 0
 
 
@@ -1225,8 +1476,7 @@ def fix(ctx, role: str | None = None, project: str | None = None) -> int:
         raise BuildError(f"{_local(root, brief)} is not filled in yet: fill it in, or delete "
                          "it, before asking for another fix brief")
     ledger.stage = "fix"
-    head = phase._ask(root, "rev-parse", "HEAD")
-    save(ledger, [(brief, fix_brief(ledger, head, role, number).encode("utf-8"))])
+    save(ledger, [(brief, fix_brief(ledger, role, number, _brief_lines(ctx)).encode("utf-8"))])
     _say([f"wrote {_local(root, brief)}", _then("fix", "its ranked list", ledger.project)])
     return 0
 
@@ -1343,6 +1593,62 @@ def _agent_tree(member: Path, session: Path, project: str, slug: str, uid: str) 
     return path
 
 
+def _short(ref: str) -> str:
+    for prefix in ("refs/heads/", "refs/remotes/"):
+        if ref.startswith(prefix):
+            return ref[len(prefix):]
+    return ref
+
+
+def _default_ahead(root: Path) -> None:
+    """Refuse when the default branch has commits HEAD lacks: an agent's worktree is cut from
+    that branch, so it could not fast-forward to the base the launch names. A repository whose
+    default branch cannot be told has nothing to compare."""
+    try:
+        _, refs = default_branch(root, phase._ask(root, "rev-parse", "--abbrev-ref", "HEAD"))
+    except BuildError:
+        return
+    for ref in refs:
+        if not phase._yes(root, "merge-base", "--is-ancestor", ref, "HEAD"):
+            short = _short(ref)
+            raise BuildError(f"{short} has commits this phase branch does not: agent worktrees "
+                             f"are cut from it and cannot fast-forward to Base. Run git merge "
+                             f"--no-edit {short}, commit, then launch again.")
+
+
+def _retry_base(root: Path, ledger: Ledger, unit: dict, head: str) -> str:
+    """Where a retried unit's agent starts: its own branch with HEAD merged in, so the first
+    attempt's commits are there. HEAD when the unit has no branch here; the branch's tip when
+    it already has HEAD, and HEAD when the branch holds nothing HEAD lacks."""
+    branch = unit["branch"]
+    ref = f"refs/heads/{branch}"
+    if not branch or not phase._yes(root, "rev-parse", "--verify", "--quiet", ref):
+        return head
+    if phase._yes(root, "merge-base", "--is-ancestor", "HEAD", ref):
+        return phase._ask(root, "rev-parse", ref)
+    if phase._yes(root, "merge-base", "--is-ancestor", ref, "HEAD"):
+        return head           # nothing the attempt made that HEAD lacks: no merge, ref unmoved
+    refusal = BuildError(f"{branch} does not merge cleanly with HEAD: merge it by hand, then "
+                         "launch again.")
+    tip = phase._ask(root, "rev-parse", ref)
+    tree = phase._worktrees(root).get(branch)
+    if tree is not None:
+        if phase._ask(Path(tree), "status", "--porcelain"):
+            raise refusal
+        if phase._run(Path(tree), "merge", "--no-edit", head).returncode != 0:
+            phase._run(Path(tree), "merge", "--abort")
+            raise refusal
+        return phase._ask(root, "rev-parse", ref)
+    res = phase._run(root, "merge-tree", "--write-tree", ref, "HEAD")
+    if res.returncode != 0:
+        raise refusal
+    merged = phase._out(res).splitlines()[0]
+    new = phase._ask(root, "commit-tree", merged, "-p", tip, "-p", head, "-m",
+                     f"Merge {ledger.branch} into {branch} for attempt {unit['attempts'] + 1}")
+    phase._ask(root, "update-ref", ref, new, tip)
+    return new
+
+
 def launch(ctx, what: str, project: str | None = None, session: Path | None = None) -> int:
     """Check every brief `what` covers (filled in, committed at HEAD), mark a unit running, and
     print each launch prompt: the role, the brief's path from the repository root, and for a role
@@ -1361,7 +1667,11 @@ def launch(ctx, what: str, project: str | None = None, session: Path | None = No
         # untracked file git ignores is not read as clean).
         if phase._ask(root, "status", "--porcelain", "--ignored", "--", str(brief)):
             raise BuildError(f"{shown} is not committed at HEAD: commit it, then launch")
+    if not project:
+        _default_ahead(root)
     head = phase._ask(root, "rev-parse", "HEAD")
+    unit = ledger.unit(what) if what not in RESERVED else None
+    base = _retry_base(root, ledger, unit, head) if unit is not None else head
     prefix = phase._ask(root, "rev-parse", "--show-prefix")
     lines = []
     again = what == "fix" and all(p.name in ledger.launched for p in _fix_briefs(ledger))
@@ -1370,7 +1680,7 @@ def launch(ctx, what: str, project: str | None = None, session: Path | None = No
     for role, brief in found:
         lines += [f"launch {role} with the prompt:", launch_line(prefix + _posix(root, brief))]
         if role in WORKTREE_ROLES:
-            lines.append(f"Base: {head}")
+            lines.append(f"Base: {base}")
             if project:
                 uid = what if what not in RESERVED else brief.parent.name \
                     + ("-" + brief.stem if what == "fix" else "")
@@ -1379,7 +1689,6 @@ def launch(ctx, what: str, project: str | None = None, session: Path | None = No
                           "launch it without isolation: the worktree is made"]
         elif project:
             lines.append(f"Worktree: {root}")
-    unit = ledger.unit(what) if what not in RESERVED else None
     if unit is not None:
         unit["status"] = "running"
         unit["attempts"] += 1
@@ -1389,6 +1698,25 @@ def launch(ctx, what: str, project: str | None = None, session: Path | None = No
         save(ledger)
     _say(lines)
     return 0
+
+
+def _owned(root: Path, take_over: bool) -> None:
+    """Refuse a change to a phase another person started, unless they take it over. Nothing is
+    said when the ledger has no owner, git has no email, or no build is in flight."""
+    branch = checked_out(root)
+    ledger = current(root, branch) if branch else None
+    email = git_email(root)
+    if ledger is None or not ledger.owner or email is None or ledger.owner.lower() == email.lower():
+        return
+    if not take_over:
+        raise BuildError(f"{ledger.phase} belongs to {ledger.owner}; run with --take-over to "
+                         f"take it")
+    old = ledger.owner
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    ledger.rulings.append(f"taken over from {old} on {today}")
+    ledger.owner = email
+    save(ledger)
+    _say([f"took over {ledger.phase} from {old}"])
 
 
 def run(ctx, args) -> int:
@@ -1401,14 +1729,20 @@ def run(ctx, args) -> int:
         except NoBuild as exc:
             if args.build_cmd != "status":
                 raise BuildError(str(exc)[0].lower() + str(exc)[1:]) from None
+            if getattr(args, "team", False):
+                _say([json.dumps({"builds": []}, indent=2)] if args.as_json
+                     else ["no builds in flight"])
+                return 0
             # Nothing to report is not a refusal: the same exit `status` has in one repository.
             data = {**status_data(ctx.root, None, ""), "next": str(exc)}
             _say([json.dumps(data, indent=2, ensure_ascii=False)] if args.as_json else [str(exc)])
             return 0
         session, ctx = ctx.root, replace(ctx, root=root)
+        if args.build_cmd not in ("status", "start"):
+            _owned(root, getattr(args, "take_over", False))
         if args.build_cmd == "start":
             return start(ctx, args.phase, args.plan, args.high_risk, args.source, args.visual,
-                         project, session)
+                         project, session, getattr(args, "take_over", False))
         if args.build_cmd == "unit":
             if args.unit_cmd == "add":
                 return unit_add(ctx, args.id, args.title, args.role, args.red, project)
@@ -1423,7 +1757,7 @@ def run(ctx, args) -> int:
         if args.build_cmd == "ruling":
             return ruling(ctx, " ".join(args.text), project)
         if args.build_cmd == "status":
-            return status(ctx, args.as_json, project)
+            return status(ctx, args.as_json, project, args.team)
         if args.build_cmd == "review":
             return review(ctx, project)
         if args.build_cmd == "fix":

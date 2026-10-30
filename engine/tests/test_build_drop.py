@@ -10,6 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import profile_guard  # noqa: E402,F401
+
 from build_support import *  # noqa: E402,F401,F403
 
 
@@ -23,7 +25,7 @@ class Drop(Build):
         out = self.ok("unit", "drop", "u2")
         self.assertIn("dropped u2", out)
         self.assertEqual([u["id"] for u in self.ledger()["unit"]], ["u1"])
-        self.assertIn(f"Every unit is done: run `{GOVERN} build review`", self.ok("status"))
+        self.assertIn(f"Every added unit is done: run `{GOVERN} build review`", self.ok("status"))
         self.ok("review")
         self.assertTrue((self.dir() / "review" / "package.diff").is_file())
 

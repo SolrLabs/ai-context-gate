@@ -17,6 +17,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import profile_guard  # noqa: E402,F401
+
 from build_support import Build  # noqa: E402
 from base_support import fm, wtext  # noqa: E402
 from test_build_workspace import Space  # noqa: E402

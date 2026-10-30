@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 
 from govern import roles
+from govern.decisions import mask_lines
 from govern.text import eol, parse_frontmatter, read
 
 PLACEHOLDER = "_Run `index` to generate._"
@@ -83,6 +84,50 @@ def doc_registry(ctx, gov: Path, index: Path) -> str:
             rows.append(f"| [`{cell(link)}`]({link}) | {cell(fm.get('load_when', '?'))}{suffix} |")
         out.append("\n".join(rows))
     return "\n\n".join(out)
+
+
+def _first_sentence(body: str, markers) -> str:
+    """The first sentence of `body`, skipping blank lines, headings, comments and code fences:
+    up to and including the first `. `, or a `.` at the line's end, or else the whole first line."""
+    lines = body.splitlines()
+    for line, live in zip(lines, mask_lines(lines, markers)):
+        line = line.strip()
+        if not live or not line or line.startswith("#"):
+            continue
+        end = line.find(". ")
+        return line[:end + 1] if end >= 0 else line
+    return ""
+
+
+def _table(header: str, rows: list[str]) -> str:
+    cols = header.count("|") - 1
+    if not rows:
+        return "_none_"
+    return "\n".join([header, "|" + "---|" * cols] + rows)
+
+
+def team_state(ctx, scope, index: Path) -> str:
+    """The scope's handoffs (owner, and where each stands) and the builds tracked in this
+    checkout. Never reads the network or a fetched ref: the check must not turn red on a fetch."""
+    from govern import build
+    from govern.checks.docs import owner_name
+    from govern.checks.working import handoff_paths
+    hand = []
+    for path in handoff_paths(ctx, scope):
+        if not path.is_file():
+            continue
+        fm, body = parse_frontmatter(read(path))
+        label = os.path.relpath(path, ctx.root).replace(os.sep, "/")
+        link = os.path.relpath(path, index.parent).replace(os.sep, "/")
+        hand.append(f"| [`{cell(label)}`]({link}) | {cell(owner_name(fm.get('owner')) or '-')} "
+                    f"| {cell(_first_sentence(body, ctx.markers))} |")
+    found, _ = build.open_builds(ctx.root, remote=False)
+    owners = {(l.phase, l.branch): l.owner for l in build.ledgers(ctx.root)[0]}
+    rows = [f"| {cell(ph)} | {cell(br)} | {cell(owners.get((ph, br)) or '-')} |"
+            for ph, br in sorted(found)]
+    return ("**Handoffs**\n\n" + _table("| Handoff | Owner | Where it stands |", hand)
+            + "\n\n**Builds in this checkout**\n\n"
+            + _table("| Phase | Branch | Owner |", rows))
 
 
 def decision_index(ctx, log: Path) -> str:
@@ -179,6 +224,7 @@ def targets(ctx, scope=None):
     project_builders = {
         "doc-registry": lambda path, scope, sources: doc_registry(ctx, scope.gov, path),
         "decision-index": lambda path, scope, sources: decision_index(ctx, path),
+        "team-state": lambda path, scope, sources: team_state(ctx, scope, path),
         "trap-index": lambda path, scope, sources: trap_index(ctx, path, scope, sources),
     }
     if scope is None:

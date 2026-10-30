@@ -4,17 +4,21 @@ See docs/configuration.md ("Usage alerts").
 """
 from __future__ import annotations
 
+import ast
+import re
 import shutil
 import sys
 import time
 from pathlib import Path
 
-from govern import installer, usage
+from govern import __version__, installer, usage, versions
 from govern.layout import GOV_DIR, TOOL
 
 ALERTS_NAME = "usage-alerts.toml"
 TEMPLATE = Path(__file__).resolve().parent / "templates" / "capture.py"
 MARK = f"{TOOL}/capture.py"
+CAPTURE_STAMP_RE = re.compile(r"^# context-gate capture (\S+)$", re.M)
+REFRESH_SECONDS = 60      # Claude Code reruns the statusLine this often, so the row redraws idle
 
 
 def share_dir(home: Path) -> Path:
@@ -27,6 +31,14 @@ def capture_path(home: Path) -> Path:
 
 def chain_path(home: Path) -> Path:
     return share_dir(home) / "statusline-chain.json"
+
+
+def row_path(home: Path) -> Path:
+    return share_dir(home) / "statusline-row.json"
+
+
+def history_path(home: Path) -> Path:
+    return usage.state_dir(home) / "history.jsonl"
 
 
 def _off_told(home: Path) -> Path:
@@ -43,50 +55,134 @@ def is_ours(statusline) -> bool:
 def _backup_settings(home: Path) -> None:
     """Copy the settings file's current bytes to `settings.json.bak` (overwriting any earlier
     backup) right before this module writes it, so a bad write is recoverable by hand."""
-    path = home / installer.SETTINGS
+    path = installer.user_settings(home)
     if not path.exists():
         return
     share_dir(home).mkdir(parents=True, exist_ok=True)
     shutil.copyfile(path, share_dir(home) / "settings.json.bak")
 
 
+def _read_user_settings(home: Path) -> dict:
+    path = installer.user_settings(home)
+    return installer._read_settings_file(path, "settings.json")
+
+
 def _wrap(home: Path, data: dict, current, python: str) -> None:
     usage.write_json(chain_path(home), {"statusLine": current})
     new = dict(current) if isinstance(current, dict) else {"type": "command"}
     new["command"] = f'"{python}" "{capture_path(home)}"'
+    new.setdefault("refreshInterval", REFRESH_SECONDS)
     data["statusLine"] = new
     _backup_settings(home)
-    installer._write_settings(home, data)
+    installer._write_settings_file(installer.user_settings(home), data)
+
+
+def _stamped_template() -> str:
+    """The template with `# context-gate capture <version>` as the first line after its docstring."""
+    text = TEMPLATE.read_text(encoding="utf-8")
+    lines = text.splitlines(keepends=True)
+    end = ast.parse(text).body[0].end_lineno          # the template opens with its docstring
+    return "".join(lines[:end]) + f"# {TOOL} capture {__version__}\n" + "".join(lines[end:])
+
+
+def _newer_installed(path: Path) -> str | None:
+    """The stamp of the installed capture.py when it parses and is newer than this engine, else None
+    (a missing file, an unreadable one or a missing stamp all count as older)."""
+    try:
+        found = CAPTURE_STAMP_RE.search(path.read_text(encoding="utf-8"))
+        return found.group(1) if found and versions.key(found.group(1)) > versions.key(__version__) else None
+    except (OSError, ValueError):
+        return None
 
 
 def install(home: Path, python: str = sys.executable, now: float | None = None) -> str:
+    kept = _newer_installed(capture_path(home))
+    note = f"capture.py is from {kept}, newer than this engine ({__version__}): kept; " if kept else ""
+    return note + _install(home, python, now, keep=bool(kept))
+
+
+def _install(home: Path, python: str, now: float | None, keep: bool) -> str:
     share_dir(home).mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(TEMPLATE, capture_path(home))
+    if not keep:
+        capture_path(home).write_text(_stamped_template(), encoding="utf-8", newline="\n")
     usage.sweep(home, time.time() if now is None else now)
     try:
         _off_told(home).unlink()          # install always leaves a statusLine, so the notice
     except OSError:                       # that none is set no longer applies
         pass
-    data = installer._read_settings(home)
+    data = _read_user_settings(home)
     current = data.get("statusLine")
     if is_ours(current):
         wanted = f'"{python}" "{capture_path(home)}"'
-        if current.get("command") != wanted:
+        moved = current.get("command") != wanted
+        timer = "refreshInterval" not in current
+        if moved or timer:
             # The interpreter this install runs as has moved (or the machine's default
-            # changed) since the last install: rewrite the command in place. The chain file
-            # already holds the statusLine from before context-gate, so it stays untouched.
+            # changed) since the last install, or the refresh timer is missing: rewrite the
+            # statusLine in place, one write, one backup. The chain file already holds the
+            # statusLine from before context-gate, so it stays untouched.
             _backup_settings(home)
-            data["statusLine"] = {**current, "command": wanted}
-            installer._write_settings(home, data)
-            return "usage capture already installed; capture.py and the interpreter path refreshed"
-        return "usage capture already installed; capture.py refreshed"
+            new = {**current, "command": wanted}
+            new.setdefault("refreshInterval", REFRESH_SECONDS)
+            data["statusLine"] = new
+            installer._write_settings_file(installer.user_settings(home), data)
+            what = "the interpreter path" if keep else "capture.py and the interpreter path"
+            msg = ("usage capture already installed; " + what + " refreshed" if moved else
+                   "usage capture already installed" + ("" if keep else "; capture.py refreshed"))
+            return msg + (f"; refresh timer set to {REFRESH_SECONDS} s" if timer else "")
+        return "usage capture already installed" + ("" if keep else "; capture.py refreshed")
     _wrap(home, data, current, python)
     return "usage capture installed as the statusLine, chained to the one you had"
 
 
+def _row_is_on(home: Path) -> bool:
+    # The capture's own rule (`row_on` in templates/capture.py), copied: `1 == True` in Python,
+    # so an equality test would call `{"row": 1}` on while the capture draws nothing.
+    data = usage.read_json(row_path(home))
+    return isinstance(data, dict) and list(data) == ["row"] and data["row"] is True
+
+
+def row(home: Path, state: str) -> tuple[int, str]:
+    """Turn the capture's own status row on or off, or report it. Writes only the row file."""
+    if state == "off":
+        try:
+            row_path(home).unlink()
+        except FileNotFoundError:
+            pass
+        return 0, "status row off: your own statusline shows again"
+    unreadable = False
+    try:
+        ours = is_ours(_read_user_settings(home).get("statusLine"))
+    except (ValueError, OSError):
+        if state == "on":
+            raise
+        ours, unreadable = False, True
+    if state == "on":
+        if not ours:
+            return 1, "the status row needs the capture: run govern usage install first"
+        usage.write_json(row_path(home), {"row": True})
+        return 0, "status row on: restart Claude Code or wait for the next refresh"
+    lines = ["row on" if _row_is_on(home) else "row off"]
+    if unreadable:
+        lines.append("settings.json unreadable: capture state unknown")
+    elif not ours:
+        lines.append("capture not installed")
+    return 0, "\n".join(lines)
+
+
 def uninstall(home: Path) -> str:
+    msg = _uninstall(home)
+    for path in (row_path(home), history_path(home)):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    return msg
+
+
+def _uninstall(home: Path) -> str:
     chain = usage.read_json(chain_path(home))
-    data = installer._read_settings(home)
+    data = _read_user_settings(home)
     ours = is_ours(data.get("statusLine"))
     if chain is None:
         if not ours:
@@ -96,7 +192,7 @@ def uninstall(home: Path) -> str:
         # rather than leave the statusLine pointing at a tool that was just removed.
         _backup_settings(home)
         data.pop("statusLine", None)
-        installer._write_settings(home, data)
+        installer._write_settings_file(installer.user_settings(home), data)
         return ("usage capture removed, but the statusLine you had before could not be "
                  "restored (chain file missing); statusLine is now unset")
     if ours:
@@ -106,7 +202,7 @@ def uninstall(home: Path) -> str:
             data.pop("statusLine", None)
         else:
             data["statusLine"] = saved
-        installer._write_settings(home, data)
+        installer._write_settings_file(installer.user_settings(home), data)
     chain_path(home).unlink()
     return "usage capture removed; your statusLine is as it was"
 
@@ -114,7 +210,7 @@ def uninstall(home: Path) -> str:
 def rewrap(home: Path, python: str = sys.executable) -> str | None:
     if not chain_path(home).exists():
         return None
-    data = installer._read_settings(home)
+    data = _read_user_settings(home)
     current = data.get("statusLine")
     if is_ours(current):
         return None

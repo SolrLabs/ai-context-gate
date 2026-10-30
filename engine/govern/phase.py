@@ -4,10 +4,13 @@ the local branches and worktrees the pushed commit already contains.
 It never opens a pull request and never merges, and it needs no project: any git repository.
 `plan` only reads; `apply` does the push and the removals. The only deleting forms it can build
 are `git branch -d` and a plain `git worktree remove`: git itself refuses to drop unmerged work
-or a worktree with changes, and that refusal is reported, never forced.
+or a worktree with changes, and that refusal is reported, never forced. A worktree locked by a
+process that is gone, or by this session, is unlocked first; any other lock keeps its branch.
 """
 from __future__ import annotations
 
+import os
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,6 +35,7 @@ class Plan:
     default: str = ""                 # the remote's default branch
     removals: list[tuple[str, str | None]] = field(default_factory=list)   # (branch, worktree)
     keeps: list[tuple[str, str]] = field(default_factory=list)             # (branch, reason)
+    unlock: set[str] = field(default_factory=set)   # worktrees whose stale lock `apply` clears
 
 
 @dataclass
@@ -108,6 +112,55 @@ def _worktrees(repo: Path) -> dict[str, str]:
     return found
 
 
+def _locks(repo: Path) -> dict[str, str]:
+    """Worktree path -> the reason it is locked, as git prints them; a bare lock reads `""`."""
+    found, path = {}, None
+    for line in _ask(repo, "worktree", "list", "--porcelain").splitlines():
+        if line.startswith("worktree "):
+            path = line[len("worktree "):]
+        elif line == "locked" and path:
+            found[path] = ""
+        elif line.startswith("locked ") and path:
+            found[path] = line[len("locked "):]
+    return found
+
+
+def lock_pid(reason: str) -> int | None:
+    """The process id a lock reason names (`... (pid 4242)`), or None."""
+    m = re.search(r"\bpid (\d+)", reason)
+    return int(m.group(1)) if m else None
+
+
+def pid_state(pid: int) -> str:
+    """`gone` (no such process), `session` (this process or one that started it), `running` (alive
+    and unrelated) or `unknown` (Windows, or `ps` could not say)."""
+    if os.name == "nt":
+        return "unknown"
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return "gone"
+    except PermissionError:
+        pass
+    except OSError:
+        return "unknown"
+    cur = os.getpid()
+    for _ in range(64):
+        if cur == pid:
+            return "session"
+        if cur in (0, 1):
+            return "running"
+        try:
+            res = subprocess.run(["ps", "-o", "ppid=", "-p", str(cur)], capture_output=True,
+                                 timeout=GIT_TIMEOUT)
+            cur = int(res.stdout.decode("utf-8", errors="replace").strip())
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return "unknown"
+        if res.returncode != 0:
+            return "unknown"
+    return "running"
+
+
 def _in_the_way(tree: str) -> str:
     """` (in the way: a, b, c)`: the first three untracked or modified paths in a worktree git
     would not remove; empty when git cannot say."""
@@ -131,13 +184,21 @@ def _open_build(repo: Path, name: str, closing: str, open_builds) -> str:
     """Why `name` stays because another build is still open, or empty. An open build keeps its own
     branch and what is merged into it; a build whose branch is the one closing, or that does not
     exist here, keeps nothing."""
+    remotes = None
     for slug, branch in open_builds:
-        if branch == closing or not _yes(repo, "rev-parse", "--verify", "--quiet",
-                                         f"refs/heads/{branch}"):
+        if branch == closing:
             continue
+        ref = f"refs/heads/{branch}"
+        if not _yes(repo, "rev-parse", "--verify", "--quiet", ref):
+            if remotes is None:
+                remotes = _ask(repo, "remote").split()
+            ref = next((f"refs/remotes/{r}/{branch}" for r in remotes if _yes(
+                repo, "rev-parse", "--verify", "--quiet", f"refs/remotes/{r}/{branch}")), "")
+            if not ref:
+                continue
         if name == branch:
             return f"the branch of the build {slug}, which is not closed"
-        if _yes(repo, "merge-base", "--is-ancestor", f"refs/heads/{name}", f"refs/heads/{branch}"):
+        if _yes(repo, "merge-base", "--is-ancestor", f"refs/heads/{name}", ref):
             return f"merged into {branch}, whose build {slug} is not closed"
     return ""
 
@@ -189,7 +250,7 @@ def plan(repo: Path, remote: str | None = None, keep=(), open_builds=()) -> Plan
     if not _test(repo, "rev-parse", "--verify", "--quiet", tip + "^{commit}"):
         raise PhaseError(f"{p.remote}/{p.default} is not known here: run git fetch {p.remote}")
 
-    trees = _worktrees(repo)
+    trees, locks = _worktrees(repo), _locks(repo)
     named = set(keep)
     for name, upstream, *_ in rows:
         if name == p.branch:
@@ -206,6 +267,21 @@ def plan(repo: Path, remote: str | None = None, keep=(), open_builds=()) -> Plan
             p.keeps.append((name, f"already in {p.remote}/{p.default}"))
         elif not _test(repo, "merge-base", "--is-ancestor", f"refs/heads/{name}", p.commit):
             p.keeps.append((name, "has commits the pushed branch does not"))
+        elif (tree := trees.get(name)) in locks:
+            reason = locks[tree]
+            pid = lock_pid(reason)
+            state = pid_state(pid) if pid is not None else "unknown"
+            if state in ("gone", "session"):
+                p.removals.append((name, tree))
+                p.unlock.add(tree)
+            elif state == "running":
+                p.keeps.append((name, f"its worktree is locked by process {pid}, which is "
+                                f"running and is not this session; when it ends, run phase "
+                                f"close again"))
+            else:
+                p.keeps.append((name, f"its worktree is locked ({reason or 'no reason given'}); "
+                                f"if no agent works in it, run git worktree unlock {tree} and "
+                                f"phase close again"))
         else:
             p.removals.append((name, trees.get(name)))
     return p
@@ -215,7 +291,8 @@ def describe(p: Plan) -> list[str]:
     """The plan as lines, what `--dry-run` prints."""
     how = f"to {p.remote}/{p.target}" + ("" if p.has_upstream else ", setting the upstream")
     lines = [f"would push {p.branch} {how}"]
-    lines += [f"would remove {b}" + (" and its worktree" if w else "") for b, w in p.removals]
+    lines += [("would unlock and remove " if w in p.unlock else "would remove ") + b
+              + (" and its worktree" if w else "") for b, w in p.removals]
     lines += [f"would keep {b}: {why}" for b, why in p.keeps]
     return lines
 
@@ -245,6 +322,8 @@ def apply(p: Plan) -> Result:
     kept = list(p.keeps)
     for name, tree in p.removals:
         if tree:
+            if tree in p.unlock:
+                _git(p.repo, "worktree", "unlock", tree)   # the remove below reports a failure
             res = _git(p.repo, "worktree", "remove", tree)
             if res is None or res.returncode != 0:
                 kept.append((name, "its worktree stays: "

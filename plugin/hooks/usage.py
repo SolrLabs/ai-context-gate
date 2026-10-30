@@ -22,6 +22,19 @@ def _standing_down() -> bool:
     return not (root / ".context-gate" / "local.toml").is_file()
 
 
+def _record_coordinator(home: Path, sid: str, data: dict) -> None:
+    """With `agent-measure` on for this session's project, put the coordinator's own numbers in
+    the project's run log. The resolved file is written at SessionStart; no file, or `measure`
+    null, means off."""
+    from govern import agent_runs, coordinator_runs
+    resolved = agent_runs.read_json(agent_runs.resolved_path(home, sid))
+    if not isinstance(resolved, dict) or resolved.get("measure") is None:
+        return
+    root, transcript = resolved.get("root"), data.get("transcript_path")
+    if isinstance(root, str) and root and isinstance(transcript, str) and transcript:
+        coordinator_runs.record(home, Path(root), Path(transcript))
+
+
 def main() -> None:
     if _standing_down():
         return
@@ -43,6 +56,10 @@ def main() -> None:
     from govern import layout, usage
     home = layout.home()
     if event == "SessionEnd":
+        try:
+            _record_coordinator(home, sid, data)
+        except Exception:
+            pass
         usage.end_session(home, sid)
         return
     text = usage.on_call(home, sid, time.time())

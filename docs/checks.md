@@ -18,6 +18,8 @@ Each check has a level: `off`, `warn` or `error`. At `error`, a check reports wh
 | [`trap-ids`](#trap-ids) | `error` | A trap id is owned by exactly one of a project's trap files. |
 | [`trap-entries`](#trap-entries) | `warn` | Every trap entry says when it bites: the **Bites when:** line is what the trap index shows. |
 | [`decision-changes`](#decision-changes) | `error` | A locked decision changed in place without a dated Revised line, a decision removed, or an id another branch already took. Advisory (warnings) unless run with `--base`. |
+| [`merge-driver`](#merge-driver) | `off` | `.gitattributes` assigns context-gate's merge driver to the decision logs, trap files, generated-block files and the ratchet baseline, so two branches that each add an entry merge without a conflict. |
+| [`decision-citations`](#decision-citations) | `off` | Docs, agent definitions, build briefs and listed code files cite only decision and trap ids that exist and were not replaced. |
 | [`doc-frontmatter`](#doc-frontmatter) | `error` | Every governed doc carries valid frontmatter, a current review date, and resolvable related links; working files carry a status and stay bounded. |
 | [`workspace-docs`](#workspace-docs) | `error` | The workspace's own docs exist and pass the same doc check as project docs. |
 | [`governed-doc-count`](#governed-doc-count) | `error` | Bounds how many governed docs a project carries. |
@@ -247,6 +249,42 @@ A locked decision changed in place without a dated Revised line, a decision remo
 |---|---|---|---|---|
 | `locked_statuses` | list | `["locked"]` | — | Statuses whose entries may only change with a dated Revised line |
 
+### `merge-driver`
+
+`.gitattributes` assigns context-gate's merge driver to the decision logs, trap files, generated-block files and the ratchet baseline, so two branches that each add an entry merge without a conflict.
+
+| | |
+|---|---|
+| Default level | `off` |
+| Scope | Runs once for the governance root |
+| Ratchet | No |
+| Since | 0.9.0 |
+
+**Question:** Do several people or agents work on branches of this repository at once, and so add decision or trap entries in parallel?
+
+**Why:** Git merges a log by line, so two branches that each append an entry conflict at the end of the file; the driver merges by entry id instead. Git applies it only where `.gitattributes` says so.
+
+No parameters: set its `level` only.
+
+### `decision-citations`
+
+Docs, agent definitions, build briefs and listed code files cite only decision and trap ids that exist and were not replaced.
+
+| | |
+|---|---|
+| Default level | `off` |
+| Scope | Runs once for the governance root |
+| Ratchet | No |
+| Since | 0.9.0 |
+
+**Question:** Do docs, agents or code cite decision or trap ids by number, so a renumbered or replaced entry leaves a dangling reference?
+
+**Why:** An id that names nothing, or an entry replaced by another, sends the reader to the wrong rule; a citation is only as good as the id it points at.
+
+| Parameter | Type | Default | Looser when | Meaning |
+|---|---|---|---|---|
+| `code_globs` | list | `[]` | — | Code files whose comments cite ids, as globs relative to the governance root |
+
 ## Docs
 
 The governed docs: their frontmatter, count, links, generated index blocks and wording.
@@ -448,6 +486,7 @@ Bounds how many files sit directly in a project's working-files directory.
 |---|---|---|---|---|
 | `max_files` | int | `12` | raised | Files directly under the working dir |
 | `extensions` | list | `["*.md", "*.html", "*.pdf"]` | — | Which files count |
+| `per_owner_max` | int | `0` | raised | Owned files (frontmatter owner) each owner may hold in the working dir; 0 counts every file against max_files |
 
 ### `finished-files`
 
@@ -756,6 +795,8 @@ The engine's agent roles and the coordinator's build rules are rendered into the
 | `senior_triggers` | list | `["security: credentials, keys, tokens, signing, sign-in and sessions, the code that decides who may read or change protected data, or input from outside the project (a download, an archive, pasted text). A product rule about who may do what is not security."]` | — | What sends a unit to senior-developer instead of developer |
 | `operator_rules` | list | `[]` | — | Rules the operator gives every role, rendered above the project's own |
 | `handback_checks` | list | `[]` | — | Lines the operator adds to every role's hand-back checklist, each `Key: text` |
+| `brief_lines` | list | `[]` | — | Lines every brief that govern build writes carries, under ## Project rules |
+| `commit_reports` | bool | `false` | — | Unit and review reports (*-report.md) are committed with the ledger, so a reviewer on another machine can read them |
 | `high_risk_paths` | list | `[]` | — | Paths that make a phase high-risk, so qa-engineer runs beside code-reviewer |
 | `visual_paths` | list | `[]` | — | Paths whose change means someone must look at the running product |
 | `escalate_after` | int | `2` | — | Failed or handed-back attempts by developer before a unit goes to senior-developer |

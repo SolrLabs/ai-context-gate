@@ -42,6 +42,11 @@ from govern.decisions import (GRAMMARS, heading_dash, heading_sep, id_key, mask_
 from govern.findings import Findings
 from govern.text import Unreadable, eol, has_bom, overlay, read
 
+# A decision entry: a hyphenated id at level 2 or 3, then a dash.
+ENTRY_RE = re.compile(r"^(#{2,3}) ([A-Z]+)-(\d+)\s*[—–-] ")
+# The same with the hyphen after the prefix optional and a colon allowed as the separator
+# (`## X1: Title`, `## X-2: Title`): measure counts it as an entry, and migrate rewrites it.
+LOOSE_ENTRY_RE = re.compile(r"^(#{2,3}) ([A-Z]+)-?(\d+)\s*(?::|[—–-])\s+\S")
 RANGE_RE = re.compile(r"\s*\(\s*[A-Za-z]*-?\d+\s*[–—-]\s*[A-Za-z]*-?\d+\s*\)\s*$")
 # A successor id, plain (`D-40`), bold (`**D-40**`) or a markdown link (`[D-40](...)`): the
 # wrapping markup is stripped, never captured, so callers only ever see the bare id.
@@ -147,6 +152,33 @@ def _would_be_pointer(body: str, known: set) -> bool:
         return False
     succ, _ = _successor(body)
     return succ is not None and id_key(succ) in known
+
+
+def _migrate_loose(ctx: Context, text: str) -> tuple[str | None, list[str]]:
+    """A loose heading (`## X1: Title`, `## X-1: Title`) becomes `## X-1 - Title`, in the grammar's
+    entry level and the separator the log's own headings use (`heading_sep`). One a section heading groups, a level deeper than the entry level,
+    keeps its depth: `_migrate_sections` flattens it with its section's topic. Every other line,
+    and any heading the entry rule already reads, is left exactly as it is."""
+    level = ctx.grammar.level
+    sep = heading_sep(ctx.grammar, text)
+    lines = text.split("\n")
+    live = mask_lines(lines, ctx.markers)
+    in_section = False
+    changes: list[str] = []
+    for i, line in enumerate(lines):
+        if not live[i]:
+            continue
+        hm = re.match(r"^(#+) ", line)
+        if hm and len(hm.group(1)) <= level:
+            in_section = len(hm.group(1)) == level and not ENTRY_RE.match(line)
+        m = None if ENTRY_RE.match(line) else LOOSE_ENTRY_RE.match(line)
+        if not m:
+            continue
+        depth = level + 1 if in_section and len(m.group(1)) == level + 1 else level
+        ident = f"{m.group(2)}-{m.group(3)}"
+        lines[i] = f"{'#' * depth} {ident}{sep}{line[m.end() - 1:]}"
+        changes.append(f"{ident}: heading rewritten to the entry form")
+    return ("\n".join(lines) if changes else None), changes
 
 
 def _migrate_sections(ctx: Context, text: str) -> tuple[str | None, list[str], list[tuple[int, str]],
@@ -350,15 +382,17 @@ def _plan_decisions(ctx: Context, log: Path, p: Plan) -> None:
     nl = eol(raw)
     lf = raw.replace("\r\n", "\n")
 
-    sections_text, section_changes, section_problems, touched = _migrate_sections(ctx, lf)
-    working = sections_text if sections_text is not None else lf
+    loose_text, loose_changes = _migrate_loose(ctx, lf)
+    start = loose_text if loose_text is not None else lf
+    sections_text, section_changes, section_problems, touched = _migrate_sections(ctx, start)
+    working = sections_text if sections_text is not None else start
     pointers_text, pointer_changes, pointer_problems = _migrate_pointers(ctx, working)
     final = pointers_text if pointers_text is not None else working
 
     p.touched_ids |= touched
     if final != lf:
         p.edits[log] = final.replace("\n", nl) if nl == "\r\n" else final
-    for detail in section_changes + pointer_changes:
+    for detail in loose_changes + section_changes + pointer_changes:
         p.changes.append(Change(log, detail))
     for line, reason in section_problems + pointer_problems:
         p.problems.append(Problem(log, line, reason))
@@ -791,10 +825,9 @@ def _write_report(ctx: Context, path: Path, p: Plan, before, after, applied: boo
         others = [msg for cid, _, msg in newly_visible if cid != "ratchet"]
         if ratchet:
             lines.append(f"- {len(ratchet)} newly visible size breach(es) above can be recorded "
-                         "in the ratchet baseline with `govern baseline --allow-raise`. It "
-                         "records every new or grown breach in the project, not only these, "
-                         "so run `govern check` first and make sure the ratchet findings it "
-                         "lists are only the ones above.")
+                         "in the ratchet baseline, one key at a time, with `govern baseline "
+                         "--allow-raise <key> --reason \"<why>\"`. Run `govern check` to "
+                         "see each key.")
         if others:
             lines.append(f"- {len(others)} other newly visible finding(s) above (a missing "
                          "field, an entry out of order) are fixed in the entries themselves; "

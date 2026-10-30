@@ -4,6 +4,111 @@ Newest first. Each release says what changed and, under **Upgrading**, anything 
 do or decide. The upgrade report quotes every entry between the engine a project ran and the one
 it upgraded to.
 
+## 0.9.0 — 2026-10-30
+
+0.9.0 is team mode. Two developers' branches merge decision logs, trap files, generated blocks and the ratchet baseline without conflicts, and ids stay unique across branches. Builds have owners, and session start says what teammates changed. 0.8.0 and 0.8.1 were not published on their own, so their sections below ship in this release; the main items are the status row with a daily weekly allowance (0.8.1) and coordinator sessions measured in `govern runs report` (0.8.1).
+
+**Upgrading:** from 0.7.0.
+
+1. Raise the pin and run the upgrade.
+2. Run `python3 .context-gate/bin/govern usage install` again; the capture is copied at install.
+3. Where `agent-roles` is on, run `python3 .context-gate/bin/govern agents render`.
+4. Each clone that turns on the `merge-driver` check runs `python3 .context-gate/bin/govern merge-driver install`.
+5. A script that calls `govern baseline --allow-raise` must now pass `--reason TEXT`.
+6. A project that ran a beta with `CLAUDE_CONFIG_DIR` set runs `python3 tools/release/install-plugin.py <tag>` (or `govern beta on`) again, so the plugin lands in the profile Claude Code reads.
+
+**Merging**
+
+- **Added:** `govern merge-driver O A B P`, a merge driver for the version control system. It merges decision logs and trap files by entry id and keeps the log's own order, takes ours for generated blocks (`govern index` refills them), and merges `baseline.json` per key (the larger number wins) and `baseline-reasons.json` per key. Two branches adding the same id leave one conflict with a comment naming the id.
+- **Added:** opt-in check `merge-driver` (default off) keeping a `# context-gate:start/end` region in `.gitattributes`. `govern index` writes it when the check is on; uninstall removes it. A project that is its own checkout gets a warning that the driver does not cover it.
+- **Added:** `govern merge-driver install`: repository config plus `post-merge` and `post-rewrite` hooks that run `govern index`. A foreign hook or `core.hooksPath` is left alone. Session start says when a clone with the region is not wired. It records the Python that ran it in the driver line and hooks; run it again after moving Python.
+- **Changed (breaking for scripts):** `govern baseline --allow-raise` now takes optional keys and requires `--reason TEXT` (exit 1, nothing written, without it). Reasons are kept in `baseline-reasons.json` beside the baseline. Every hint now names the key and a reason.
+- **Changed (parsed output, D9):** `govern diff --json` baseline rows `added` and `raised` carry the recorded `reason` (was always null); the text line ends ` - <reason>`.
+
+**Ids across branches**
+
+- **Added:** `govern next-id --fetch` and `govern trap-add --fetch`: fetch the remote first, then count ids used on every remote branch as well as the local tree, so two branches do not take the same next id. Without `--fetch` they read the remote branches already fetched. A fetch that fails prints a warning naming the cause and goes on with local refs.
+- **Added:** `govern check --siblings`: warns (exit 0) when an id added on this branch is also added on another branch, naming the branch and the other entry's title, and suggests `govern renumber`. It reads local refs only, never the network.
+- **Added:** session start says the same when the project has more than one author in the last 90 days (`plugin/hooks/siblings.py`, a child process with a time cap). A solo project pays one `git log`.
+- **Added:** `govern renumber OLD NEW [--project P]`: renames a decision or trap id and every citation of it in the project, all files written or none. Trap ids are per project.
+- **Added:** opt-in check `decision-citations` (default off): a citation of a decision or trap id that does not exist is a finding. Unreadable files are skipped with a note.
+
+**Builds and owners**
+
+- **Added:** a build ledger records its owner (`owner`, the `git config user.email` of whoever ran `build start`; nothing recorded without an email). Every `govern build` command but `status` refuses another person's phase: `<phase> belongs to <owner>; run with --take-over to take it`. `--take-over` records the ruling `taken over from <owner> on <UTC date>` and moves the owner. Emails compare without case.
+- **Added:** builds on fetched branches are seen. `govern build status --team [--json]` lists every open build, local and on fetched remote branches: phase, branch, owner, stage, done/total, last commit time (`{"builds": [...]}` in JSON). A remote ledger counts only when its own `branch` is that remote branch. Nothing fetches.
+- **Changed:** `govern phase close` and `govern sweep` keep a teammate's open build found on a fetched branch, its local namesake and branches merged into it. A remote ledger that does not parse keeps its branch, with a warning; a failing git call is an error, never "no builds".
+- **Changed:** `govern build start` refuses a phase name in flight on a fetched branch.
+- **Added:** `commit_reports` on `agent-roles` (default false): the build folder's `.gitignore` lets `*-report.md` be committed, so a reviewer on another machine reads unit reports after a fetch. `start` brings an engine-written `.gitignore` in line with the option (CRLF and BOM kept); a hand-edited one is left alone.
+- **Changed:** the phase-close brief names the phase's owner and their handoff.
+
+**What teammates did**
+
+- **Added:** session start in a team project (more than one author in 90 days) lists the decisions and traps teammates added, changed or superseded on the default branch since your last session, with the author's name. It reads local refs only, never lists your own changes and shows up to ten lines.
+- **Added:** `[checks.working-files] handoff` may be a glob (`docs/handoff/*.md`): one handoff per owner, each with its own word ratchet key, so two owners never fail each other's gate.
+- **Added:** a handoff's frontmatter may name an `owner`; `per_owner_max` caps each owner's handoff.
+- **Added:** a `team-state` generated block lists the open builds tracked in this checkout and their owners.
+
+**Status row**
+
+- **Fixed:** the weekly color follows the day's pace since its first figure, not the last hour, so one whole-point step early in a long day no longer turns it red.
+
+## 0.8.1 — 2026-10-28
+
+0.8.1 turns the weekly part of the status row into a daily allowance, weighted per weekday and per Claude profile, and measures the coordinator's own sessions in `govern runs report`.
+
+**Upgrading:** run `python3 .context-gate/bin/govern usage install` again; the capture is copied at install.
+
+- **The row:** the weekly part reads `Weekly: 40% · today 5/18%`: the week's figure, today's spend, today's allowance. The allowance is what was left at today's start times today's weighted share of the days left to the reset. The color follows where the last hour's rate ends your day: green within today's allowance; yellow when the overrun costs a later day at most `later_cut` (default 0.1) of its allowance; red beyond that, or when the week runs out. A zero-weight day reads `off day N%` in yellow (grey under 1%). A payload older than its weekly reset prints a grey `Weekly: N%` alone. The grey "too early" state is gone.
+- **Daily anchors:** the capture records, per profile, local date and weekly window, the first and highest weekly figure in `~/.local/state/context-gate/usage/days.json` (dates older than 35 days are dropped). `first` is raised to the freshest figure any session has seen, so an idle session after midnight cannot charge yesterday to today.
+- **Settings:** `~/.local/share/context-gate/usage-week.toml` holds `[weekly]` and `[weekly.profiles."<folder>"]` with `weights`, `day_end` and `later_cut`. It is read silently, with a default per key. A profile's `weights` replaces the whole table. Folder keys compare case-insensitively where the OS does. A UTF-8 BOM is accepted. See "Weekly allowance" in `docs/configuration.md`.
+- **`govern usage weights [--profile <folder>]`:** shows the settings in effect, or every fault in the file naming its key (exit 1). `--suggest` proposes weights from 14 or more recorded days (today left out) as a table to paste; it writes nothing.
+
+**Coordinator sessions (with `agent-measure` on)**
+
+- **Measured beside the agents:** a main session's transcript (Claude Code's projects folder, named from the project path with every character that is not an ASCII letter or digit turned into `-`) becomes rows per phase: requests, the four token kinds, peak context, compactions, owner turns, hand-backs, tools (calls, seconds, result KB) and the five largest results. Numbers only. A transcript of an unknown shape gives no row.
+- **Recording:** the plugin's `SessionEnd` hook records the ending session. `govern runs report` first catches up every main session since the oldest mark, the running one included, so a killed session is still counted.
+- **The report:** a `Coordinator` section per phase (`planning` for phase `""`), and coordinator rows in "By role and model".
+- **Planning mark:** `govern phase close` now ends by appending a planning mark when the project's run log exists. Sessions after a close count as `planning` until the next `govern runs mark`; the report reads `planning, since the last phase closed`.
+- **Housekeeping:** the skill's first step also runs `govern runs report` when `agent-measure` is on.
+- **Output changed:** `govern runs report --json` has coordinator rows in `runs` and a new `coordinator` key. `govern phase close` prints one new last line, the planning mark.
+
+## 0.8.0 — 2026-10-27
+
+0.8.0 adds an optional status row with usage projection, a faster test gate, field fixes for the build loop, `adopt`, `check` and `sweep`, and a usage history kept per Claude profile. It folds in 0.8.0-beta.1 to beta.4.
+
+**Upgrading:** from 0.7.0. Raise the pin and run the upgrade. Run `python3 .context-gate/bin/govern usage install` again for the row's changes, then `python3 .context-gate/bin/govern usage row on` to try the row. Where `agent-roles` is on, run `python3 .context-gate/bin/govern agents render` so the roles carry the new `brief_lines` text. A project that ran a beta with `CLAUDE_CONFIG_DIR` set runs `python3 tools/release/install-plugin.py <tag>` (or `govern beta on`) again, so the plugin lands in the profile Claude Code reads.
+
+**Status row and test gate (beta.1 to beta.4)**
+
+- **The row:** off until `govern usage row on`. It draws `<folder> │ <branch> │ <model> │ Ctx: N% │ Usage: N% <bar> → Reset: <time> │ Weekly: N%`, colored by the use projected at the reset from the last hour's rate across all sessions; with under 15 minutes of history, the average since the window opened is used. The weekly figure is grey (SGR 38;5;243) until there are 15 minutes of history to project. `govern usage install` sets a 60-second refresh timer, the row wraps to the terminal width, `NO_COLOR` is honored, and a usage part whose `resets_at` is missing is left out. `govern usage row on|off|status` writes, removes or reports the switch.
+- **Profile folder:** `CLAUDE_CONFIG_DIR` is followed when set (blank counts as unset, `~` expands); without it the profile is `~/.claude`. `govern usage install` and uninstall, the plugin notices, the memory check, `govern beta on` and `tools/release/install-plugin.py` use it.
+- **Test gate:** runs in parallel and unsets `CLAUDE_CONFIG_DIR`. The runner gives tests no stdin. Every launcher or release-tool subprocess in a test runs in a scratch folder, checked by `engine/tests/test_subprocess_cwd.py`.
+
+**Field fixes (phase 2)**
+
+- **`build launch`:** refuses when the default branch has commits the phase branch lacks (public issue 7). A retried unit's `Base:` holds its first attempt, merged into the unit's branch. Fix briefs no longer carry a `Base commit:` header (UB-153).
+- **`build status`:** names planned units not yet added (public issue 3). `unit drop` records the id (ledger key `dropped`). Output changed: `build status --json` gains `unadded`.
+- **`agent-roles` param `brief_lines`:** lines every unit and fix brief carries under `## Project rules` (UB-122, UB-105, UB-154, UB-78).
+- **Locked worktrees:** `phase close` and `sweep` unlock and remove a worktree whose lock names a process that is gone or is this session (public issue 6, UB-85).
+- **`check --project` in a single repo:** it runs the root's checks too; under `--path` only those that read the snapshot (today `writing-rules`) (public issue 4).
+- **Adopt and decision headings:** adopt reads `## X1: Title` and `## X-1: Title` headings in a decision log (a file named DECISIONS.md, holding a decision-index pair, or with "decision" in its name), proposes their prefix and migrates them (public issue 2).
+- **Plugin behind the engine:** session start and `govern upgrade` say when the context-gate plugin is older than the project's pin, with the commands that update it.
+- **`govern sweep`:** new verdict `PUSHED` (a local branch whose exact tip is on its remote, idle `[sweep] stale_days`, default 14). Remote branches of the default branch's remote are judged (`MERGED`, `PR-MERGED`, `STALE` after `[sweep] stale_remote_days`, default 30, else `REVIEW`), skipping long-lived names (develop, dev, staging, stage, production, prod, trunk) and keep globs. `--apply` deletes them on the remote with a lease after a bundle; `--apply --home` fetches, returns the checkout to the default branch and fast-forwards it. `[sweep]` has three keys: `auto_remove`, `stale_days` and `stale_remote_days`. `auto_remove` defaults to empty (ask before every removal). A principles profile may now set `[sweep]` (engine default, then profile, then project); the `auto-remove` line ends ` (profile)` when the list comes from the profile. Output changed: the `sweep` lines.
+- **Usage writer and history:** `usage install` stamps `capture.py` with the engine version and never replaces a newer one (engines before 0.8.0 do not read the stamp). The usage history is kept per Claude profile folder (UB-158, UB-159).
+
+## 0.8.0-beta.4 — 2026-10-27
+
+0.8.0-beta.4 follows `CLAUDE_CONFIG_DIR`, the folder Claude Code keeps its profile in when the variable is set (blank counts as unset, `~` expands); without it the profile is `~/.claude` as before. Now in that folder: `govern usage install` and uninstall (and the `settings.json` backup), the plugin notices, the memory check, the local plugin install that `govern beta on` runs, the launcher, and `tools/release/install-plugin.py`, which prints where it installed. The test gate unsets the variable, so a test run never touches your real profile. `govern usage install`'s error now reads `<path>: <reason>; it was not changed`.
+
+**Upgrading:** run `python3 tools/release/install-plugin.py <tag>` (or `govern beta on`) again with the variable set, so the plugin lands in the profile Claude Code reads. Launchers from before 0.8.0-beta.4 still look in `~/.claude`.
+
+## 0.8.0-beta.3 — 2026-10-15
+
+0.8.0-beta.3 adds an optional status row. When it is on, the capture draws `<folder> │ <branch> │ <model> │ Ctx: N% │ Usage: N% <bar> → Reset: <time> │ Weekly: N%`. Context is colored by level. Usage and weekly are colored by the use projected at the reset, from the last hour's rate across all your sessions; every session's capture appends to a shared history under `~/.local/state/context-gate/usage/`, so a stale session shows the fresh figure. With under 15 minutes of history, the average since the window opened is used. `govern usage install` sets a 60-second refresh timer on the statusline, so the row stays current while you wait. The row wraps to the terminal width, and `NO_COLOR` is honored. It is off until `govern usage row on`, it reads only the JSON Claude Code pipes to the status line, and any error falls back to your own statusline. A usage part whose `resets_at` is missing is left out. `govern usage row on|off|status` writes, removes or reports the switch; `on` needs the capture installed, `install` keeps the switch and `uninstall` removes it and the shared history and restores your statusline. The test gate now runs in parallel; the engine tests are in the public set.
+
+**Upgrading:** nothing required. Run `python3 .context-gate/bin/govern usage install` again to get the new capture and the refresh timer, then `python3 .context-gate/bin/govern usage row on` to try the row.
+
 ## 0.7.0 — 2026-10-15
 
 0.7.0 makes the gate change-aware, so a team can hold a pull request to the rules of the records it touches. It adds agent roles and the `govern build` loop for running a plan phase by phase with role agents, workspace members that are repositories of their own, field reports, and `govern sweep` with a housekeeping skill for the end of a session.

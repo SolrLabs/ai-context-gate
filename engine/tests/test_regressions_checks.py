@@ -12,6 +12,8 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import profile_guard  # noqa: E402,F401
+
 from regressions_support import *  # noqa: E402,F401,F403
 
 class Baseline(Base):
