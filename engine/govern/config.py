@@ -46,7 +46,7 @@ LAYOUT_DIALECT = ("markers",)
 
 # Every key the engine reads from a registry entry, and where it reads it by default.
 REGISTRY_KEYS = ("name", "dir", "tier", "role", "governance", "id_prefix", "id_range",
-                 "purpose", "handoff", "license", "upstream", "runtime_gate")
+                 "purpose", "handoff", "license", "upstream", "runtime_gate", "build_root")
 
 # Names an earlier engine spelled differently, old -> new. An old name still loads, read as the
 # new one, with a warning to rename it (an upgrade never turns a project red); both names in one

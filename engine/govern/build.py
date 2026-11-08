@@ -17,6 +17,7 @@ phase. Several files are written all or none.
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -29,7 +30,7 @@ import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from govern import agent_runs, layout, phase, profile, roles, tomlw
+from govern import agent_runs, config, layout, phase, profile, registry, roles, tomlw
 from govern.decisions import mask_lines
 from govern.text import Markers
 
@@ -190,6 +191,40 @@ class Ledger:
 
 def build_dir(root: Path) -> Path:
     return root / BUILD_DIR
+
+
+def state_root(repo: Path) -> Path:
+    """The root that holds `repo`'s build state: `repo` itself, unless it is a member of a
+    workspace whose registry entry sets `build_root`, a path from the workspace root. Then the
+    state lives at `<workspace>/<build_root>`, in the workspace's own (private) repository."""
+    moved = _build_root(repo.resolve())
+    return repo if moved is None else moved
+
+
+@functools.lru_cache(maxsize=None)
+def _build_root(resolved: Path) -> Path | None:
+    root = config.find_root(resolved.parent)
+    if root is None:
+        return None
+    try:
+        cfg = config.load(root, layout.home(), pin_check=False)
+        if "registry" not in cfg.raw:
+            return None
+        reg = registry.load(cfg)
+    except (config.ConfigError, registry.RegistryMissing) as exc:
+        path = Path(str(exc)) if isinstance(exc, registry.RegistryMissing) \
+            else root / config.CONFIG_NAME
+        raise BuildError(f"{path}: cannot read the workspace registry ({exc}) - fix it, "
+                         "then run the command again") from exc
+    for scope in reg.scopes:
+        where = scope.get("dir")
+        if where and (root / where).resolve() == resolved:
+            value = scope.get("build_root")
+            return root / value if value else None
+    return None
+
+
+state_root.cache_clear = _build_root.cache_clear
 
 
 def render(ledger: Ledger) -> str:
@@ -375,12 +410,25 @@ def save(ledger: Ledger, beside: list[tuple[Path, bytes]] = ()) -> None:
 def ledgers(root: Path) -> tuple[list[Ledger], list[BuildError]]:
     """Every ledger under the build folder that reads, and why each other one does not."""
     good, bad = [], []
-    for path in sorted(build_dir(root).glob(f"*/{LEDGER}")):
+    for path in sorted(build_dir(state_root(root)).glob(f"*/{LEDGER}")):
         try:
             good.append(load(path))
         except BuildError as exc:
             bad.append(exc)
     return good, bad
+
+
+def _state_repo(state: Path) -> Path:
+    """The git top-level of the nearest folder at or above `state` that exists: the repository
+    that keeps the build state, which may not have the folder yet. Raises `BuildError`."""
+    folder = state
+    while not folder.is_dir() and folder != folder.parent:
+        folder = folder.parent
+    res = phase._git(folder, "rev-parse", "--show-toplevel")
+    if res is None or res.returncode != 0:
+        raise BuildError(f"{state} is not in a git repository: "
+                         + ("git could not run" if res is None else phase._reason(res)))
+    return Path(phase._out(res))
 
 
 def _team(root: Path) -> tuple[list[tuple[Ledger, str]], list[tuple[str, str]], list[BuildError]]:
@@ -447,13 +495,21 @@ def open_builds(path: Path, remote: bool = True) -> tuple[list[tuple[str, str]],
     if top is None or top.returncode != 0:
         return [], []     # no repository, or git cannot run: `phase.plan` refuses on its own check
     root = Path(phase._out(top))
-    spec = f":(glob)**/{BUILD_DIR}/*/{LEDGER}"
-    res = phase._git(root, "ls-files", "-z", "--", spec)
+    where, spec = root, f":(glob)**/{BUILD_DIR}/*/{LEDGER}"
+    try:
+        state = state_root(root)
+        if state != root:
+            where = _state_repo(state)
+            inside = state.resolve().relative_to(where.resolve()).as_posix()
+            spec = f":(glob){'' if inside == '.' else inside + '/'}{BUILD_DIR}/*/{LEDGER}"
+    except (BuildError, ValueError) as exc:
+        return [], [exc if isinstance(exc, BuildError) else BuildError(str(exc))]
+    res = phase._git(where, "ls-files", "-z", "--", spec)
     if res is None or res.returncode != 0:
         return [], [BuildError("git could not list the ledgers")]
     good, bad = [], []
     for name in res.stdout.decode("utf-8", errors="replace").split("\0"):
-        file = root / name
+        file = where / name
         if not name or not file.is_file():
             continue
         try:
@@ -647,7 +703,7 @@ def _material(root: Path, ledger: Ledger, folder: Path, diff: bool = True) -> st
     """What a reviewer of the phase is handed: the plan, each unit's brief and report, and the
     review package (with `diff` False, its commit list and stat only), each as a path from
     `folder`, the one the brief is in."""
-    lines = [f"- Plan: {_rel(folder, root / ledger.plan)}"] if ledger.plan else []
+    lines = [f"- Plan: {_rel(folder, state_root(root) / ledger.plan)}"] if ledger.plan else []
     lines += [f"- Unit {u['id']}, {u['title']}: brief {_rel(folder, ledger.brief(u['id']))}, "
               f"report {_rel(folder, ledger.report(u))}" for u in ledger.units]
     if diff:
@@ -731,7 +787,7 @@ def close_brief(root: Path, ledger: Ledger) -> str:
     rulings = "".join(f"- {r}\n" for r in ledger.rulings)
     return (f"# {ledger.phase} / close — the phase is closing\n\n"
             f"The phase `{ledger.phase}` on the branch `{ledger.branch}` is closing.\n\n"
-            + (f"Plan: {_rel(ledger.dir / 'close', root / ledger.plan)}\n\n"
+            + (f"Plan: {_rel(ledger.dir / 'close', state_root(root) / ledger.plan)}\n\n"
                if ledger.plan else "")
             + (f"Phase owner: {ledger.owner}. When the project keeps one handoff per owner, "
                f"update only the handoff whose frontmatter owner is this email.\n\n"
@@ -773,7 +829,7 @@ def planned_units(root: Path, ledger: Ledger) -> list[str] | None:
     if not ledger.plan:
         return None
     try:
-        text = (root / ledger.plan).read_text(encoding="utf-8-sig")
+        text = (state_root(root) / ledger.plan).read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError):
         return None
     ids: list[str] = []
@@ -844,6 +900,17 @@ def _posix(root: Path, path: Path) -> str:
         return path.as_posix()
 
 
+def _base(root: Path, path: Path) -> Path:
+    """What a printed path is relative to: the project's root, or the workspace root for a file
+    in the build state a `build_root` moved out of the project."""
+    state = state_root(root)
+    if state != root and (path == state or state in path.parents):
+        top = config.find_root(root.resolve().parent)
+        if top is not None:
+            return top
+    return root
+
+
 def _local(root: Path, path: Path) -> str:
     """A path as a person on this platform reads it, relative to the project's root."""
     try:
@@ -860,11 +927,11 @@ def status_data(root: Path, ledger: Ledger | None, branch: str) -> dict:
                 "stage": None, "ledger": None, "rulings": [], "units": [], "done": 0,
                 "total": 0, "next": nothing_in_flight(branch), "unadded": []}
     planned = planned_units(root, ledger)
-    units = [{**{k: u[k] for k in UNIT_KEYS}, "brief": _posix(root, ledger.brief(u["id"])),
-              "report": _posix(root, ledger.report(u))} for u in ledger.units]
+    units = [{**{k: u[k] for k in UNIT_KEYS}, "brief": _posix(_base(root, ledger.brief(u["id"])), ledger.brief(u["id"])),
+              "report": _posix(_base(root, ledger.report(u)), ledger.report(u))} for u in ledger.units]
     return {"phase": ledger.phase, "branch": ledger.branch, "base": ledger.base,
             "plan": ledger.plan or None, "high_risk": ledger.high_risk, "visual": ledger.visual, "stage": ledger.stage,
-            "ledger": _posix(root, ledger.path), "rulings": list(ledger.rulings), "units": units,
+            "ledger": _posix(_base(root, ledger.path), ledger.path), "rulings": list(ledger.rulings), "units": units,
             "done": sum(1 for u in ledger.units if u["status"] == "done"),
             "total": len(ledger.units), "next": next_action(ledger, planned),
             "unadded": unadded(ledger, planned)}
@@ -907,7 +974,7 @@ def status_lines(ledger: Ledger, planned: list[str] | None = None) -> list[str]:
 def session_line(root: Path) -> str | None:
     """The line a session starts with when the checked-out branch has a build in flight, or
     None. Raises when git or a ledger cannot say."""
-    if not build_dir(root).is_dir():
+    if not build_dir(state_root(root)).is_dir():
         return None
     branch = checked_out(root)
     ledger = current(root, branch) if branch else None
@@ -1042,6 +1109,23 @@ def git_email(root: Path) -> str | None:
     return text if res.returncode == 0 and text else None
 
 
+def _hygiene_refusal(ctx, project: str | None, root: Path, state: Path) -> None:
+    """A member that `checkout-hygiene` keeps free of `.context-gate/build` cannot hold its own
+    build state: refuse to start one there, and point at `build_root`."""
+    check = ctx.cfg.checks.get("checkout-hygiene")
+    scope = ctx.registry.find(project) if project else None
+    if check is None or check.level == "off" or scope is None or state != root:
+        return
+    if scope.get("role") not in check.params.get("roles", []):
+        return
+    for entry in check.params.get("forbidden", []):
+        held = str(entry).rstrip("/")
+        if held == BUILD_DIR or BUILD_DIR.startswith(held + "/"):
+            raise BuildError(f"{project}'s checkout must hold none of '{entry}' "
+                             f"(checkout-hygiene), so its build state cannot live in it: set "
+                             f"build_root on its registry entry - see docs/configuration.md")
+
+
 def start(ctx, name: str, plan: str | None, high_risk: bool, source: str | None = None,
           visual: bool = False, project: str | None = None, session: Path | None = None,
           take_over: bool = False) -> int:
@@ -1064,6 +1148,10 @@ def start(ctx, name: str, plan: str | None, high_risk: bool, source: str | None 
                          f"own; cut one first, e.g. git checkout -b phase/{name}")
     if phase._ask(root, "status", "--porcelain", "--untracked-files=no"):
         raise BuildError("uncommitted changes: commit or set them aside first")
+    state = state_root(root)
+    _hygiene_refusal(ctx, project, root, state)
+    if state != root:
+        _state_clean(root, state)
     mine = current(root, branch)
     email = git_email(root)
     taken = ""
@@ -1077,22 +1165,22 @@ def start(ctx, name: str, plan: str | None, high_risk: bool, source: str | None 
     again = mine is not None and mine.phase == name and not mine.units
     if mine is not None and not again:
         raise BuildError(f"a build is already in flight on {branch}: {mine.phase} "
-                         f"({_local(root, mine.path)})")
+                         f"({_local(_base(root, mine.path), mine.path)})")
     for fetched, _ in team_ledgers(root)[0]:
         if fetched.phase == name and fetched.branch != branch:
             raise BuildError(f"the phase {name} is in flight on {fetched.branch} (a fetched "
                              f"branch): pick another name")
-    path = build_dir(root) / name / LEDGER
+    path = build_dir(state) / name / LEDGER
     if path.exists() and not again:
         raise BuildError(f"the phase {name} already has a ledger, for the branch "
-                         f"{load(path).branch} ({_local(root, path)}): pick another name")
+                         f"{load(path).branch} ({_local(_base(root, path), path)}): pick another name")
     rel = ""
     if plan:
-        file = root / plan
+        file = state / plan
         if not file.is_file():
             raise BuildError(f"--plan {plan}: no such file (a relative path is read from the "
-                             f"project's root)")
-        rel = _posix(root, file)
+                             f"{'build state' if state != root else 'project'}'s root)")
+        rel = _posix(state, file)
     base = merge_base(root, refs, source or default)
     behind = _commits_since(root, base)
     if behind > FAR_BEHIND:
@@ -1110,7 +1198,7 @@ def start(ctx, name: str, plan: str | None, high_risk: bool, source: str | None 
                         high_risk=high_risk, visual=visual, origin=source or default,
                         project=project or "", owner=email or "")
     ledger.folder = _folder(ctx, project)
-    ignore = build_dir(root) / ".gitignore"
+    ignore = build_dir(state) / ".gitignore"
     wrote_ignore = not ignore.exists()
     want = _gitignore(ctx)
     write_ignore = wrote_ignore
@@ -1131,8 +1219,10 @@ def start(ctx, name: str, plan: str | None, high_risk: bool, source: str | None 
     save(ledger, [(ignore, ignore_bytes)] if write_ignore else [])
     if not again:
         _keep_in_history(root, ledger, ignore if wrote_ignore else None)
+    if state != root:
+        _exclude_state(root)
     lines = [f"{'restarted' if again else 'started'} {name} on {branch}, from {ledger.origin} "
-             f"at {ledger.base[:12]}", f"wrote {_local(root, path)}"]
+             f"at {ledger.base[:12]}", f"wrote {_local(_base(root, path), path)}"]
     measure = ctx.cfg.checks.get("agent-measure")
     if measure is not None and measure.level != "off" and not again:
         logged = session or root
@@ -1144,12 +1234,53 @@ def start(ctx, name: str, plan: str | None, high_risk: bool, source: str | None 
     return 0
 
 
+def _state_clean(root: Path, state: Path) -> None:
+    """Refuse when the repository that keeps the build state has uncommitted changes in the
+    build folder: `start` writes there, and the member's own check cannot see that repository."""
+    repo, folder = _state_repo(state), build_dir(state)
+    res = phase._run(repo, "status", "--porcelain", "--", str(folder))
+    if res.returncode != 0:
+        raise BuildError(f"git status failed in {repo}: {phase._reason(res)}")
+    if phase._out(res):
+        raise BuildError(f"uncommitted changes under {_local(_base(root, folder), folder)}: "
+                         "commit them first")
+
+
+def _exclude_state(root: Path) -> None:
+    """Make the member ignore its own `.context-gate/build/` through `info/exclude` in the git
+    directory its worktrees share, so a build folder left there is never committed to the public
+    repository. Written only when git does not ignore the folder yet, anchored (`/<prefix>...`)
+    at the repository's top so it matches the member's own folder and nothing else."""
+    res = phase._run(root, "check-ignore", "-q", f"{BUILD_DIR}/x/{LEDGER}")
+    if res.returncode == 0:
+        return
+    if res.returncode != 1:
+        raise BuildError(f"git check-ignore failed in {root}: {phase._reason(res)}")
+    common = phase._run(root, "rev-parse", "--git-common-dir")
+    if common.returncode != 0:
+        raise BuildError(f"git rev-parse failed in {root}: {phase._reason(common)}")
+    where = phase._run(root, "rev-parse", "--show-prefix")
+    if where.returncode != 0:
+        raise BuildError(f"git rev-parse failed in {root}: {phase._reason(where)}")
+    exclude = root / phase._out(common) / "info" / "exclude"
+    try:
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        have = exclude.read_bytes() if exclude.exists() else b""
+        gap = b"" if not have or have.endswith(b"\n") else b"\n"
+        line = f"/{phase._out(where)}{BUILD_DIR}/\n"
+        exclude.write_bytes(have + gap + line.encode("utf-8"))
+    except OSError as exc:
+        raise BuildError(f"cannot write {exclude}: {exc}") from exc
+
+
 def _keep_in_history(root: Path, ledger: Ledger, wrote: Path | None) -> None:
     """Ask git whether it would commit the ledger just written. A rule in a `.gitignore` above
     the build folder (`build/` is in the stock Python, Node, Gradle and CMake ones) ignores the
     whole folder, and the folder's own negations cannot undo that. If git ignores it, remove what
     `start` wrote and say which rule, in which file, and the line that fixes it."""
-    res = phase._run(root, "check-ignore", "-v", "--", str(ledger.path))
+    state = state_root(root)
+    repo = root if state == root else _state_repo(state)
+    res = phase._run(repo, "check-ignore", "-v", "--", str(ledger.path))
     if res.returncode != 0:
         return
     # `source:line:pattern<TAB>path`; a pattern starting `!` is a rule that keeps the file.
@@ -1159,7 +1290,7 @@ def _keep_in_history(root: Path, ledger: Ledger, wrote: Path | None) -> None:
     ledger.path.unlink(missing_ok=True)
     if wrote is not None:
         wrote.unlink(missing_ok=True)
-    for folder in (ledger.dir, build_dir(root)):
+    for folder in (ledger.dir, build_dir(state)):
         try:
             folder.rmdir()
         except OSError:
@@ -1221,13 +1352,13 @@ def unit_add(ctx, uid: str, title: str, role: str | None, red: bool,
         raise BuildError("--title is empty")
     brief = ledger.brief(uid)
     if brief.exists():
-        raise BuildError(f"{_local(root, brief)} is already there and no unit owns it: remove "
+        raise BuildError(f"{_local(_base(root, brief), brief)} is already there and no unit owns it: remove "
                          f"it, or pick another id")
     unit = {"id": uid, "title": title, "role": role, "status": "pending", "attempts": 0,
             "branch": "", "commit": "", "note": ""}
     ledger.units.append(unit)
     save(ledger, [(brief, unit_brief(ledger, unit, red, _brief_lines(ctx)).encode("utf-8"))])
-    _say([f"added unit {uid} for {role}: {title}", f"wrote {_local(root, brief)}",
+    _say([f"added unit {uid} for {role}: {title}", f"wrote {_local(_base(root, brief), brief)}",
           _then(uid, project=ledger.project)])
     return 0
 
@@ -1249,9 +1380,11 @@ def unit_drop(ctx, uid: str, project: str | None = None) -> int:
     folder = ledger.dir / uid
     say = [f"dropped {uid}"]
     if folder.exists():
-        rel = _local(ctx.root, folder)
+        rel = _local(_base(ctx.root, folder), folder)
         try:
-            res = phase._run(ctx.root, "status", "--porcelain", "--untracked-files=all", "--",
+            state = state_root(ctx.root)
+            repo = ctx.root if state == ctx.root else _state_repo(state)
+            res = phase._run(repo, "status", "--porcelain", "--untracked-files=all", "--",
                              str(folder))
             clean = res.returncode == 0 and not phase._out(res)
         except phase.PhaseError:
@@ -1274,11 +1407,13 @@ def _branch_tree(root: Path, branch: str) -> Path | None:
     return Path(tree) / root.resolve().relative_to(here)
 
 
-def _copy_from_branch(root: Path, branch: str, folder: str, ignored_only: bool) -> list[str]:
+def _copy_from_branch(root: Path, branch: str, folder: str, ignored_only: bool,
+                      dest: Path | None = None) -> list[str]:
     """Copy what a branch's worktree holds under `folder` (relative to the project's root) into
-    the same place here, overwriting older copies and creating folders; the worktree is only
-    read. Every file but a `brief.md` for a unit's folder, or, with `ignored_only`, only the files
+    the same place under `dest` (the project's root unless given), overwriting older copies and
+    creating folders; the worktree is only read. Every file but a `brief.md` for a unit's folder, or, with `ignored_only`, only the files
     git ignores there. The lines to say: one per file copied, or one saying why none was."""
+    dest = root if dest is None else dest
     tree = _branch_tree(root, branch)
     if tree is None:
         return [f"no worktree has {branch} checked out; nothing copied"]
@@ -1295,17 +1430,18 @@ def _copy_from_branch(root: Path, branch: str, folder: str, ignored_only: bool) 
             if base.is_dir() else []
     lines = []
     for rel in found:
-        target = root / rel
+        target = dest / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(tree / rel, target)
-        lines.append(f"copied {rel.as_posix()}")
+        lines.append(f"copied {_posix(_base(root, target), target)}")
     return lines or [f"nothing to copy from the worktree of {branch}"]
 
 
 def collect(ctx, branch: str, project: str | None = None) -> int:
     """The files an agent that is not a unit left in its worktree, in this checkout."""
     ledger = _need(ctx, project)
-    _say(_copy_from_branch(ctx.root, branch, f"{BUILD_DIR}/{ledger.dir.name}", True))
+    _say(_copy_from_branch(ctx.root, branch, f"{BUILD_DIR}/{ledger.dir.name}", True,
+                           state_root(ctx.root)))
     return 0
 
 
@@ -1338,7 +1474,8 @@ def unit_set(ctx, uid: str, status: str, branch: str | None, commit: str | None,
             + (f" (attempt {unit['attempts']})" if status == "running" else "")
             + (f", now for {role}" if role != earlier else "")]
     if status == "done" and branch:
-        said += _copy_from_branch(ctx.root, branch, f"{BUILD_DIR}/{ledger.dir.name}/{uid}", False)
+        said += _copy_from_branch(ctx.root, branch, f"{BUILD_DIR}/{ledger.dir.name}/{uid}", False,
+                                  state_root(ctx.root))
     _say(said)
     return 0
 
@@ -1427,26 +1564,26 @@ def review(ctx, project: str | None = None) -> int:
     files = [(folder / "package.diff", package(root, ledger)),
              (folder / "package-stat.txt", package_stat(root, ledger)),
              (reviewer, code_reviewer_brief(root, ledger).encode("utf-8"))]
-    lines = [f"wrote {_local(root, path)}" for path, _ in files]
+    lines = [f"wrote {_local(_base(root, path), path)}" for path, _ in files]
     if ledger.high_risk:
         if qa.exists():
-            lines.append(f"kept {_local(root, qa)} as it is (delete it to have it written "
+            lines.append(f"kept {_local(_base(root, qa), qa)} as it is (delete it to have it written "
                          f"again)")
         else:
             files.append((qa, qa_engineer_brief(root, ledger).encode("utf-8")))
-            lines.append(f"wrote {_local(root, qa)}")
+            lines.append(f"wrote {_local(_base(root, qa), qa)}")
     if ledger.visual:
         if ux.exists():
-            lines.append(f"kept {_local(root, ux)} as it is (delete it to have it written "
+            lines.append(f"kept {_local(_base(root, ux), ux)} as it is (delete it to have it written "
                          f"again)")
         else:
             files.append((ux, ux_reviewer_brief(root, ledger).encode("utf-8")))
-            lines.append(f"wrote {_local(root, ux)}")
+            lines.append(f"wrote {_local(_base(root, ux), ux)}")
     save(ledger, files)
     if ledger.high_risk:
-        lines.append(f"fill in the definition of done in {_local(root, qa)}")
+        lines.append(f"fill in the definition of done in {_local(_base(root, qa), qa)}")
     if ledger.visual:
-        lines.append(f"fill in what to launch and look at in {_local(root, ux)}")
+        lines.append(f"fill in what to launch and look at in {_local(_base(root, ux), ux)}")
     _say(lines + [_then("review", "the briefs that need it", ledger.project)])
     return 0
 
@@ -1473,11 +1610,11 @@ def fix(ctx, role: str | None = None, project: str | None = None) -> int:
             break
         number += 1
     if brief.exists():
-        raise BuildError(f"{_local(root, brief)} is not filled in yet: fill it in, or delete "
+        raise BuildError(f"{_local(_base(root, brief), brief)} is not filled in yet: fill it in, or delete "
                          "it, before asking for another fix brief")
     ledger.stage = "fix"
     save(ledger, [(brief, fix_brief(ledger, role, number, _brief_lines(ctx)).encode("utf-8"))])
-    _say([f"wrote {_local(root, brief)}", _then("fix", "its ranked list", ledger.project)])
+    _say([f"wrote {_local(_base(root, brief), brief)}", _then("fix", "its ranked list", ledger.project)])
     return 0
 
 
@@ -1498,15 +1635,20 @@ def close(ctx, project: str | None = None) -> int:
         new = _with_rulings(text, ledger, ctx.markers) if text is not None else None
         if new is not None and new != text:
             save(ledger, [(brief, new.encode("utf-8"))])
-            lines = [f"kept {_local(root, brief)}, with its rulings brought up to date"]
+            lines = [f"kept {_local(_base(root, brief), brief)}, with its rulings brought up to date"]
         else:
             save(ledger)
-            lines = [f"kept {_local(root, brief)} as it is (delete it to have it written again)"]
+            lines = [f"kept {_local(_base(root, brief), brief)} as it is (delete it to have it written again)"]
     else:
         save(ledger, [(brief, close_brief(root, ledger).encode("utf-8"))])
-        lines = [f"wrote {_local(root, brief)}"]
+        lines = [f"wrote {_local(_base(root, brief), brief)}"]
     folder = f"{BUILD_DIR}/{ledger.phase}"
-    git = f"git -C {shlex.quote(ledger.folder)}" if ledger.project else "git"
+    state = state_root(root)
+    if state != root:
+        where = _base(root, state)
+        git = f"git -C {shlex.quote(_posix(where, state))}"
+    else:
+        git = f"git -C {shlex.quote(ledger.folder)}" if ledger.project else "git"
     _say([*lines, *_rulings(ledger), _then("close", project=ledger.project),
           "once its branch is merged, run:", f"{git} rm -r -q {folder}",
           f'{git} commit -m "Close phase {ledger.phase}: remove its build folder"',
@@ -1519,7 +1661,7 @@ def _text(root: Path, brief: Path) -> str:
     try:
         return brief.read_text(encoding="utf-8")
     except UnicodeDecodeError:
-        raise BuildError(f"{_local(root, brief)} is not UTF-8") from None
+        raise BuildError(f"{_local(_base(root, brief), brief)} is not UTF-8") from None
 
 
 def _fix_briefs(ledger: Ledger) -> list[Path]:
@@ -1556,7 +1698,7 @@ def _covered(root: Path, ledger: Ledger, what: str) -> list[tuple[str, Path]]:
         found = [(unit["role"], ledger.brief(what))]
     gone = [brief for _, brief in found if not brief.is_file()]
     if not found or gone:
-        raise BuildError((f"{_local(root, gone[0])} is not there" if gone else
+        raise BuildError((f"{_local(_base(root, gone[0]), gone[0])} is not there" if gone else
                           f"there is no {what} brief")
                          + (f": run `{govern_build(ledger.project)} {first}` first" if first else
                             ": restore it from history"))
@@ -1658,14 +1800,18 @@ def launch(ctx, what: str, project: str | None = None, session: Path | None = No
     root = ctx.root
     ledger = _need(ctx, project)
     found = _covered(root, ledger, what)
+    state = state_root(root)
+    moved = state != root
+    # The brief's state is in the workspace's repository when `build_root` moved it.
+    where = _state_repo(state) if moved else root
     for _, brief in found:
-        shown = _local(root, brief)
+        shown = _local(_base(root, brief), brief)
         left = agent_runs.unfilled(_text(root, brief))
         if left:
             raise BuildError(f"{shown}: the brief is not filled in ({', '.join(left)})")
         # Untracked, staged or changed since HEAD: anything but clean (--ignored, so that an
         # untracked file git ignores is not read as clean).
-        if phase._ask(root, "status", "--porcelain", "--ignored", "--", str(brief)):
+        if phase._ask(where, "status", "--porcelain", "--ignored", "--", str(brief)):
             raise BuildError(f"{shown} is not committed at HEAD: commit it, then launch")
     if not project:
         _default_ahead(root)
@@ -1678,7 +1824,7 @@ def launch(ctx, what: str, project: str | None = None, session: Path | None = No
     if again:
         lines.append(AGAIN)
     for role, brief in found:
-        lines += [f"launch {role} with the prompt:", launch_line(prefix + _posix(root, brief))]
+        lines += [f"launch {role} with the prompt:", launch_line(str(brief) if moved else prefix + _posix(root, brief))]
         if role in WORKTREE_ROLES:
             lines.append(f"Base: {base}")
             if project:

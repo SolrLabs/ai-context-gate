@@ -89,10 +89,42 @@ Optional. Every key is a string, and every key is optional.
 | `role` | none | Used by `checkout-hygiene` and `licenses` to pick entries by role |
 | `license` | none | The project's license, read by `licenses` |
 | `upstream` | none | The upstream remote URL, read by `checkout-hygiene` |
+| `build_root` | none | In a workspace, where this member's build state (ledgers, briefs, reports) lives: a folder from the workspace root, in the workspace's own repository and outside the member's `dir`. Checked by `registry` |
 | `purpose`, `runtime_gate` | none | Descriptive facts, shown in a registry column if one is configured |
 
 A project that keeps a decision log needs `id_prefix` and `id_range` (the `registry` check
 reports it otherwise).
+
+#### A public member
+
+A member whose repository is public should receive only code: its governance files, build
+ledgers, briefs and reports live in the workspace's own private repository. Two settings do it.
+
+```toml
+# fragment: the member's entry in projects.toml, then the workspace's config.toml
+[[project]]
+name = "web"
+dir = "web"
+tier = "full"
+role = "publish"
+governance = "governance/web"
+build_root = "planning/web"
+
+[checks.checkout-hygiene]
+level = "error"
+roles = ["publish"]
+forbidden = [".context-gate/", "AGENTS.md"]
+history = true
+```
+
+`governance` points into the workspace, so the member's own tree holds no governance
+directory, and `build_root` puts its build state at `planning/web/.context-gate/build/` in the
+workspace. `checkout-hygiene` then fails when a checkout in the `publish` role holds any
+`forbidden` path in its tree, or, with `history = true`, anywhere in its history; and
+`govern build start` refuses for a member that has no `build_root` while `.context-gate/` is
+forbidden. The member's own `.context-gate/build/` is ignored through its `.git/info/exclude`,
+which `build start` writes. `build status --team` does not see ledgers under `build_root`
+(a limit of this release).
 
 ```toml
 [governance]

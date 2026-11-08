@@ -29,13 +29,16 @@ def _suggest(ctx, s) -> str | None:
                "own files, and their upstream remote matches the registry.",
        question="Do you govern checkouts of repositories you don't want your governance files "
                 "to land in (a fork you send pull requests from, a repo you publish)? Which "
-                "registry roles are they, and which files must never appear in them?",
+                "registry roles are they, and which files must never appear in them? Is a "
+                "checkout published, so that its history must hold none of those paths too?",
        rationale="A governance file inside a fork lands in somebody else's pull request; inside "
                  "a published repo it lands in a release. Both failures are silent.",
        params={
            "roles": Param("list", [], "Registry roles whose checkouts are checked"),
            "forbidden": Param("list", [], "Paths, relative to a checkout, that never belong "
                                           "in it", looser="fewer"),
+           "history": Param("bool", False, "Also look for each forbidden path in the "
+                                           "checkout's history"),
            "rules": Param("table", {}, "Decision id to cite per role, e.g. "
                                        "{ contribute = \"W-1\" }"),
            "upstream_remote": Param("str", "upstream", "Remote whose URL must equal the "
@@ -65,6 +68,15 @@ def checkout_hygiene(ctx, params, scope) -> Findings:
                         f"our files never go there{cite}")
             else:
                 f.warn(f"{name}: '{rel}' is present but untracked inside the checkout{cite}")
+    if params["history"]:
+        for rel in params["forbidden"]:
+            found = git(checkout, "log", "--all", "--format=%H", "-1", "--", rel)
+            if found is None:
+                f.warn(f"{name}: could not ask git whether '{rel}' is in the checkout's "
+                       f"history{cite}")
+            elif found.strip():
+                f.error(f"{name}: '{rel}' is in the checkout's history (commit "
+                        f"{found.strip()[:12]}) — our files never go there{cite}")
     want = scope.get("upstream", "")
     remote = params["upstream_remote"]
     if want:
