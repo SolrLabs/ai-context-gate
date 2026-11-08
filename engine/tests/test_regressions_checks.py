@@ -521,6 +521,48 @@ setup_hint = "run ./bootstrap.sh"
         code, out, _ = w.run("check", "--project", "alpha")
         self.assertIn("alpha: 'AGENTS.md' is present but untracked inside the checkout (W-1)", out)
 
+    def history_output(self, history: str, forbidden: str = "AGENTS.md",
+                       added: str = "AGENTS.md", sub: str = "") -> str:
+        """`check` output for a checkout that added `added` and a later commit removed it;
+        `sub` names a folder of its own when a test runs this twice."""
+        (self.tmp / sub).mkdir(exist_ok=True)
+        w = Workspace(self.tmp / sub, alpha_extra='role = "contribute"', extra=f"""
+[checks.checkout-hygiene]
+level = "error"
+roles = ["contribute"]
+forbidden = ["{forbidden}"]
+rules = {{ contribute = "W-1" }}
+{history}""")
+        repo = w.root / "alpha"
+        w.write(f"alpha/{added}", "x")
+
+        def git(*args: str) -> None:
+            subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+                            "-c", "commit.gpgSign=false", *args],
+                           check=True, capture_output=True, cwd=w.root, env={**os.environ,
+                                                                           "HOME": str(w.home)})
+        git("init", "-q")
+        git("add", "-A")
+        git("commit", "-qm", "add")
+        git("rm", "-q", added)
+        git("commit", "-qm", "remove")
+        return w.run("check", "--project", "alpha")[1]
+
+    def test_checkout_hygiene_history_finds_a_path_a_later_commit_removed(self):
+        out = self.history_output("history = true")
+        self.assertIn("alpha: 'AGENTS.md' is in the checkout's history (commit ", out)
+        self.assertIn("our files never go there (W-1)", out)
+
+    def test_checkout_hygiene_history_finds_a_folder_a_later_commit_removed(self):
+        out = self.history_output("history = true", forbidden=".context-gate/",
+                                  added=".context-gate/build/p1/ledger.toml")
+        self.assertIn("'.context-gate/' is in the checkout's history (commit ", out)
+
+    def test_checkout_hygiene_without_history_says_nothing_of_a_removed_path(self):
+        said = "'AGENTS.md' is in the checkout's history"
+        self.assertIn(said, self.history_output("history = true"))
+        self.assertNotIn(said, self.history_output("", sub="off"))
+
     def test_generic_checks_are_off_until_configured(self):
         code, out, _ = self.ws().run("check")
         self.assertEqual(code, 0, out)

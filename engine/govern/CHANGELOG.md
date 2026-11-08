@@ -4,6 +4,20 @@ Newest first. Each release says what changed and, under **Upgrading**, anything 
 do or decide. The upgrade report quotes every entry between the engine a project ran and the one
 it upgraded to.
 
+## 0.9.1 — 2026-11-07
+
+0.9.1 lets a workspace member keep its build state in the workspace, so the member's own repository, which may be public, holds only code.
+
+**Upgrading:** nothing is required. Without `build_root` nothing changes.
+
+- **Added:** registry key `build_root` (a folder from the workspace root). With it, `govern build --project <member>` keeps that member's ledger, briefs, rulings and reports at `<workspace>/<build_root>/.context-gate/build/<phase>/`, in the workspace repository. The `registry` check reports a `build_root` outside the workspace, inside the member's own folder, or not in a git repository as an error.
+- **Changed:** for such a member, `build start --plan` is read from the state root, `launch` prints `Brief:` as an absolute path, `unit set done --branch` and `collect` copy reports from the agent's worktree into the state folder, and `close` prints `git -C <build_root> rm ...`. `start` makes the member ignore its own `.context-gate/build/` through `.git/info/exclude`.
+- **Changed (parsed output, D9):** for a member with `build_root`, printed paths and the `build status --json` fields `ledger`, `units[].brief` and `units[].report` are relative to the workspace root.
+- **Changed:** `build start` refuses when the state folder has uncommitted changes, and refuses a member in a hygiene role whose `forbidden` covers `.context-gate/build` and that has no `build_root`.
+- **Added:** `checkout-hygiene` param `history` (bool, default false): each `forbidden` path is also looked for in the checkout's history.
+- **Fixed:** a member under a workspace that pins another engine keeps working (the workspace config loads without the pin check); `unit drop` asks the state repository.
+- **Limits:** `build status --team` does not see ledgers under `build_root`; two members sharing one `build_root` are not refused; the workspace's "Builds in this checkout" block also lists a `build_root` member's open builds.
+
 ## 0.9.0 — 2026-10-30
 
 0.9.0 is team mode. Two developers' branches merge decision logs, trap files, generated blocks and the ratchet baseline without conflicts, and ids stay unique across branches. Builds have owners, and session start says what teammates changed. 0.8.0 and 0.8.1 were not published on their own, so their sections below ship in this release; the main items are the status row with a daily weekly allowance (0.8.1) and coordinator sessions measured in `govern runs report` (0.8.1).

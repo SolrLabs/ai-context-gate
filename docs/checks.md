@@ -101,7 +101,7 @@ Checkouts in the configured registry roles carry none of the governance root's o
 | Since | 0.4.0 |
 | Needs | `roles`, to do anything |
 
-**Question:** Do you govern checkouts of repositories you don't want your governance files to land in (a fork you send pull requests from, a repo you publish)? Which registry roles are they, and which files must never appear in them?
+**Question:** Do you govern checkouts of repositories you don't want your governance files to land in (a fork you send pull requests from, a repo you publish)? Which registry roles are they, and which files must never appear in them? Is a checkout published, so that its history must hold none of those paths too?
 
 **Why:** A governance file inside a fork lands in somebody else's pull request; inside a published repo it lands in a release. Both failures are silent.
 
@@ -109,6 +109,7 @@ Checkouts in the configured registry roles carry none of the governance root's o
 |---|---|---|---|---|
 | `roles` | list | `[]` | — | Registry roles whose checkouts are checked |
 | `forbidden` | list | `[]` | a value is removed | Paths, relative to a checkout, that never belong in it |
+| `history` | bool | `false` | — | Also look for each forbidden path in the checkout's history |
 | `rules` | table | `{}` | — | Decision id to cite per role, e.g. { contribute = "W-1" } |
 | `upstream_remote` | str | `"upstream"` | — | Remote whose URL must equal the registry's upstream |
 | `setup_hint` | str | `""` | — | What to run when a checkout or remote is missing |
