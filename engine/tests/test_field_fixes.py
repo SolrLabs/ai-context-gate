@@ -117,7 +117,9 @@ class RetryBehind(Launching):
         self.code("src/later.py", "phase moved on\n")
         head = self.head()
         out = self.ok("launch", "u1")
-        self.assertEqual(out.splitlines()[-1], f"Base: {head}")
+        lines = out.splitlines()
+        self.assertIn(f"Base: {head}", lines)
+        self.assertTrue(any(line.startswith("Phase branch: ") for line in lines), out)
         self.assertEqual(self.head("u1-try"), tip)
 
 

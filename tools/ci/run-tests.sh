@@ -18,6 +18,8 @@ mode=${1:-}
 
 echo "== host: $(python3 --version)"
 python3 tools/ci/parallel_tests.py engine/tests
+echo "== governance: govern check"
+PYTHONPATH=engine python3 -m govern check || { echo "govern check failed" >&2; exit 1; }
 
 if [ "$mode" != "--host" ]; then
   if ! command -v docker >/dev/null 2>&1; then

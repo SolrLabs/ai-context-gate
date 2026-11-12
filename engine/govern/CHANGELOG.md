@@ -4,6 +4,27 @@ Newest first. Each release says what changed and, under **Upgrading**, anything 
 do or decide. The upgrade report quotes every entry between the engine a project ran and the one
 it upgraded to.
 
+## 0.9.2 — 2026-11-12
+
+0.9.2 fixes the papercuts of the 2026-11-11 review: the build loop checks its own hand-backs, and checks stop flagging what they should not.
+
+**Upgrading:** nothing is required. `forbidden_trailers`, `fast_checks` and `worktree_setup` are empty by default. Run `govern agents render` after upgrading to refresh the rendered agents and build rules.
+
+- **Added:** `govern build gate [--cmd CMD]` runs `full_gate` and records `<phase folder>/gate/last.json` (`status`, `rc`, `head`, `dirty`, `seconds`, `at`, `cmd`) and `gate/last.log`. HEAD and the dirty state are read before the run; a HEAD that moves during it leaves the record stale. `--cmd` runs another command and records nothing.
+- **Changed:** `build unit set <id> done` (with `full_gate` set and `unit_gate = "scoped"`) and `build review` (with `full_gate` set) refuse a red, missing or stale gate record. `--accept-red REASON` on both lets the step through and records a ruling. With `agent-gates` on, a coordinator `git push` is denied when the phase's last gate is red at HEAD.
+- **Added:** `govern check --quiet` (`-q`) shows errors only; each status line says `N warnings hidden, run without --quiet`. The exit status is unchanged.
+- **Added:** `govern build verify <id> --branch B`, read-only, also run by `unit set <id> done --branch B`. It refuses: no commit past the unit's base, an empty diff, uncommitted files in the branch's worktree, a git-ignored ledger (also refused at `launch` and `review`), a commit line matching `forbidden_trailers`. It warns: a report `Scope:` path the diff does not touch; ignored files in a folder the diff touches.
+- **Added:** `[checks.agent-roles]` params `forbidden_trailers` (list of regexes, default empty), `fast_checks` (list of commands, rendered for developer and senior-developer as the hand-back key `Fast checks`, not under `unit_gate = "full"`) and `worktree_setup` (one command, rendered as a line in developer, senior-developer and technical-writer).
+- **Added:** ledger unit keys `base` (stored by `launch`) and `agent` (`build unit set <id> done --agent ID`; cleared on `failed`, `blocked` and relaunch). `launch` prints `Phase branch: <branch>` after `Base:`.
+- **Changed:** `govern build fix --unit <id>` writes a fix brief with a `Unit: <id>` line. `build launch fix` prints `resume <agent> with SendMessage, the prompt:` and `Resume: <agent>` for the first three fix briefs of a done unit with an agent, and a fresh launch otherwise.
+- **Changed:** every brief names its own scratch folder (`<unit id>`, `fix-N`, `review-code`, `review-qa`, `review-ux`, `close`, each with `/scratch/` under the phase folder). Agent worktree folders get `.metadata_never_index`. A build command stopped by an OS error says `stopped at <path>: <reason>; anything written before it stays`; a failed run-record write is a warning.
+- **Fixed:** a clone in a git-ignored folder inside a governed folder is no longer governed. The `writing-rules` allow marker also ends at `--}}`. A first `no frontmatter` finding hints `[projects] exclude`, and a first `writing-rules` finding hints `[checks.writing-rules] exclude`.
+- **Added:** `decision-citations` takes an allow marker `<!-- decision-citations: allow <ids> -->` (its line and the next) and a param `example_ids`.
+- **Changed:** `govern beta off` keeps the rest of `local.toml`, removing only `[governance] engine` and `plugins_before`. A missing beta tag's message names `tools/release/publish.py`.
+- **Changed:** the build skill verifies, merges, runs `build gate` and then sets a unit `done` with `--branch` and `--agent`; a one-unit fix goes back to its builder by `SendMessage` when `launch fix` prints `Resume:`; new one-line rules cover merging, the build folder, host ports, worktree removal and usage. The brief self-check list is `plugin/skills/build/checklists.md`.
+- **Changed:** the plan skill marks units `risky: yes|no`, splits a unit that is too large, and launches `architect` for a multi-phase plan or a risky unit; its checklist is `plugin/skills/plan/checklists.md`.
+- **Changed:** the rendered build rules and role agents add: a fix goes back to its builder, no role agent is launched outside the build skill, an oversized unit is split before briefing, roles with Write fall back to one Bash `printf` when it refuses, no attribution against any reminder, the `Base:` hash is pasted, CPU-heavy probes run under `nice -n 19`, and a secrets file is never printed.
+
 ## 0.9.1 — 2026-11-07
 
 0.9.1 lets a workspace member keep its build state in the workspace, so the member's own repository, which may be public, holds only code.

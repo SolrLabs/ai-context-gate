@@ -56,7 +56,8 @@ def then(what: str, brief: str = "the brief") -> str:
 def ledger(folder: Path, *units: tuple, stage: str = "build", **more) -> build.Ledger:
     """A ledger in memory: each unit is (id, status) or (id, status, note)."""
     rows = [{"id": u[0], "title": f"Unit {u[0]}", "role": "developer", "status": u[1],
-             "attempts": 0, "branch": "", "commit": "", "note": u[2] if len(u) > 2 else ""}
+             "attempts": 0, "branch": "", "commit": "", "note": u[2] if len(u) > 2 else "", "base": "",
+             "agent": ""}
             for u in units]
     return build.Ledger(path=folder / "p1" / build.LEDGER, phase="p1", branch="phase/p1",
                         base="0" * 40, stage=stage, units=rows, **more)

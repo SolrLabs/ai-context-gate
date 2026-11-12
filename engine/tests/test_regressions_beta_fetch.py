@@ -182,19 +182,24 @@ class BetaFetch(Base):
         self.assertEqual(res.stderr, "")
         self.assertEqual((self.state(), tree_of(self.engines), tree_of(self.skills)), once)
 
+    HINT = (f"if this beta was tagged only on the private repository, publish it with python3 "
+            f"tools/release/publish.py v{BETA} --public <dir> --push")
+
     def test_without_a_source_a_missing_beta_is_refused_as_before(self):
         before = self.state()
         res = self.run_beta("on", BETA)
         self.assertEqual(res.returncode, 2, res.stdout)
         self.assertEqual(res.stderr.strip(),
                          f"error: engine {BETA} is not installed — from a clone of the "
-                         f"repository, run: python3 tools/release/install-engine.py v{BETA}")
+                         f"repository, run: python3 tools/release/install-engine.py v{BETA} "
+                         f"({self.HINT})")
         self.installed(BETA, plugin=False)
         res = self.run_beta("on", BETA)
         self.assertEqual(res.returncode, 2, res.stdout)
         self.assertEqual(res.stderr.strip(),
                          f"error: the local plugin is not {BETA} — from a clone of the "
-                         f"repository, run: python3 tools/release/install-plugin.py v{BETA}")
+                         f"repository, run: python3 tools/release/install-plugin.py v{BETA} "
+                         f"({self.HINT})")
         self.assertEqual(self.state(), before)
 
     def test_a_source_without_the_tag_changes_nothing(self):
@@ -210,6 +215,7 @@ class BetaFetch(Base):
         self.assertEqual(len(said), 2, res.stderr)
         self.assertTrue(said[1].startswith(
             f"error: could not fetch engine v{BETA} from {src.as_posix()}: "), said[1])
+        self.assertTrue(said[1].endswith(f" — {self.HINT}"), said[1])
         self.assertEqual((self.state(), tree_of(self.engines), tree_of(self.skills)), before)
 
     def test_a_fetch_with_no_git_to_run_is_refused_in_one_line(self):
@@ -266,7 +272,8 @@ class BetaFetch(Base):
         self.assertEqual(res.stderr.splitlines(),
                          [f"context-gate: installing engine {BETA} from {src.as_posix()}",
                           f"error: the local plugin is not {BETA} — from a clone of the "
-                          f"repository, run: python3 tools/release/install-plugin.py v{BETA}"])
+                          f"repository, run: python3 tools/release/install-plugin.py v{BETA} "
+                          f"({self.HINT})"])
         self.assertEqual(self.engines_installed(), [BETA])
         self.assertEqual((self.state(), tree_of(self.skills)), (before, {}))
 

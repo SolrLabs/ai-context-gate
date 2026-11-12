@@ -16,6 +16,8 @@ from govern.manifest import Param, check
        params={
            "code_globs": Param("list", [], "Code files whose comments cite ids, as globs "
                                "relative to the governance root", globs=True),
+           "example_ids": Param("list", [], "Ids written as examples, never reported (`T-3`); "
+                                "one place is marked with `decision-citations: allow <ids>`"),
        })
 def decision_citations(ctx, params) -> Findings:
     f = Findings()
@@ -36,8 +38,15 @@ def decision_citations(ctx, params) -> Findings:
         for path in ctx.trap_files(s):
             if path.is_file():
                 held.update(e.key for e in ctx.grammar.parse_file(path).entries)
+    examples = []
+    for i, value in enumerate(params["example_ids"]):
+        if isinstance(value, str) and decisions.id_key(value) is not None:
+            examples.append(value)
+        else:
+            f.error(f"[checks.decision-citations] example_ids[{i}] = {value!r}: "
+                    f"expected an id like P-1")
     unreadable: list = []
-    for c in citations.scan(ctx, params["code_globs"], unreadable):
+    for c in citations.scan(ctx, params["code_globs"], unreadable, examples):
         key = decisions.id_key(c.ident)
         entry = entries.get(key)
         if key is not None and key[0] == ctx.trap_prefix.upper() and entry is not None:

@@ -194,7 +194,7 @@ class Review(Build):
         text = (self.dir() / "review" / "code-reviewer-brief.md").read_text(encoding="utf-8")
         for said_by_the_role in ("Critical", "Findings:", "Status:", "heredoc", "severity"):
             self.assertNotIn(said_by_the_role, text)
-        self.assertLessEqual(len(text.splitlines()), 11)
+        self.assertLessEqual(len(text.splitlines()), 12)
 
     def test_without_a_plan_the_brief_names_none(self):
         self.ready()
@@ -215,7 +215,7 @@ class Review(Build):
                       "is no diff to read): package-stat.txt\n", text)
         self.assertNotIn("package.diff", text)
         self.assertIn("package.diff", (d / "code-reviewer-brief.md").read_text(encoding="utf-8"))
-        self.assertIn("Scratch files go only in scratch.\n", text)
+        self.assertIn("Scratch files go only in .context-gate/build/p1/review-qa/scratch/; ", text)
         self.assertEqual(text.splitlines()[-2:], [RELATIVE, f"Produces: {at('review', 'qa-engineer-report.md')}"])
         lines = out.splitlines()
         self.assertEqual(lines[-1], then("review", "the briefs that need it"))
@@ -435,7 +435,7 @@ class FixAndClose(Build):
         self.reviewed()
         self.ok("close")
         text = (self.dir() / "close" / "brief.md").read_text(encoding="utf-8")
-        self.assertNotIn("elete", text)
+        self.assertNotIn("elete", text.replace("delete only what you created", ""))
         self.assertEqual(text.splitlines()[-2:],
                          [RELATIVE, f"Produces: {at('close', 'technical-writer-report.md')}"])
 
@@ -548,7 +548,8 @@ class Launch(Build):
         return brief
 
     def prompt(self, role: str, path: str) -> list[str]:
-        return [f"launch {role} with the prompt:", f"Brief: {path}", f"Base: {self.head()}"]
+        return [f"launch {role} with the prompt:", f"Brief: {path}", f"Base: {self.head()}",
+                "Phase branch: phase/p1"]
 
     def reviewed(self, *flags: str) -> None:
         self.started(*flags, extra=VISUAL_ON if "--visual" in flags else "")
@@ -573,7 +574,7 @@ class Launch(Build):
         self.commit()
         out = self.ok("launch", "u1")
         self.assertEqual(out.splitlines()[0], "launch senior-developer with the prompt:")
-        self.assertEqual(out.splitlines()[-1], f"Base: {self.head()}")
+        self.assertEqual(out.splitlines()[-2], f"Base: {self.head()}")
 
     def test_a_relaunch_is_one_more_attempt_from_the_brief_as_committed(self):
         self.started()
@@ -584,7 +585,7 @@ class Launch(Build):
         self.code()
         out = self.ok("launch", "u1")
         self.assertEqual(self.ledger()["unit"][0]["attempts"], 2)
-        self.assertEqual(out.splitlines()[-1], f"Base: {self.head()}")
+        self.assertEqual(out.splitlines()[-2], f"Base: {self.head()}")
         self.assertEqual(brief.read_bytes(), before)
 
     def test_a_brief_still_to_fill_is_refused_by_name_and_nothing_changes(self):

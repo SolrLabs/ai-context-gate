@@ -543,13 +543,38 @@ def on_pre_resume(home, sid, data) -> None:
                    {**contract(inp.get("message") or "", data.get("cwd")), "t": time.time()})
 
 
-def on_pre_bash(gates, data) -> dict | None:
-    if gates and gates["deny_push"] and data.get("agent_id") \
-            and pushes((data.get("tool_input") or {}).get("command") or ""):
-        return _deny("Pushing is the coordinator's job, not a subagent's. Do not run `git push`: "
-                     "commit your work, and say in your final message that it is committed and "
-                     "ready to push.")
-    return None
+def _red_gate(root) -> str | None:
+    """The refusal for a coordinator's push when the current phase's last full gate is red at
+    HEAD; None when there is no record, it is still running, it is for another head, or anything
+    cannot be read: a push is never blocked on a guess."""
+    try:
+        from govern import build, phase     # not at the top: the hook imports this on every event
+        top = Path(root)
+        branch = build.checked_out(top)
+        ledger = build.current(top, branch) if branch else None
+        rec = build._gate_record(ledger) if ledger is not None else None
+        if not rec or rec.get("status") != "done" or rec.get("rc") in (0, None):
+            return None
+        head = phase._out(phase._run(top, "rev-parse", "HEAD"))
+        if not head or rec.get("head") != head:
+            return None
+        return (f"push refused: the last full gate on this phase is red (rc {rec['rc']} at "
+                f"{head[:7]}). Run python3 .context-gate/bin/govern build gate.")
+    except Exception:
+        return None
+
+
+def on_pre_bash(gates, data, root=None) -> dict | None:
+    if not gates or not pushes((data.get("tool_input") or {}).get("command") or ""):
+        return None
+    if data.get("agent_id"):
+        if gates["deny_push"]:
+            return _deny("Pushing is the coordinator's job, not a subagent's. Do not run `git "
+                         "push`: commit your work, and say in your final message that it is "
+                         "committed and ready to push.")
+        return None
+    red = _red_gate(root) if root else None
+    return _deny(red) if red else None
 
 
 def on_start(home, sid, data) -> None:
@@ -1089,7 +1114,7 @@ def handle(home: Path, resolved: dict, data: dict) -> dict | None:
         if tool == "SendMessage":
             on_pre_resume(home, sid, data)
         elif tool == "Bash":
-            return on_pre_bash(gates, data)
+            return on_pre_bash(gates, data, root)
         return None
     if event in ("PostToolUse", "PostToolUseFailure"):
         out = None
@@ -1234,7 +1259,8 @@ def suggestions(runs: list[dict]) -> list[str]:
         cached = sum(int((r.get("tokens") or {}).get("cache_read_input_tokens") or 0)
                      for r in resumed)
         out.append(f"{len(resumed)} runs were resumed and re-read {cached:,} cached tokens "
-                   "between them: prefer a fresh agent with a short brief.")
+                   "between them: resume a unit's builder only for its own fix, and launch a fresh agent "
+                   "from the fourth round.")
     commands = {}
     for r in runs:
         for c in {x["command"] for x in r.get("repeated") or []}:

@@ -137,7 +137,7 @@ def collect(ctx: Context, targets: list, workspace: bool) -> list[tuple[str, Fin
 
 def cmd_check(ctx: Context, project: str | None, path: str | None = None,
              history_from: str | None = None, workspace_only: bool = False,
-             base: str | None = None) -> int:
+             base: str | None = None, quiet: bool = False) -> int:
     """`--path` checks a scope's files from a directory swapped in for the one the registry
     names — a git pre-commit hook's staged-tree snapshot, say — instead of the checkout on disk.
     `--history-from` then answers every git question a project-scope check asks about those
@@ -200,12 +200,12 @@ def cmd_check(ctx: Context, project: str | None, path: str | None = None,
         groups: dict[str, Findings] = {}
         for label, _, found in results:
             groups.setdefault(label, Findings()).extend(found)
-        return 0 if report_per_scope(list(groups.items())) else 1
+        return 0 if report_per_scope(list(groups.items()), quiet) else 1
     total = Findings()
     for _, _, found in results:
         total.extend(found)
     label = f"project:{project}" if project else ctx.workspace_label
-    return 0 if REPORTERS["aggregate"](label, total) else 1
+    return 0 if REPORTERS["aggregate"](label, total, quiet) else 1
 
 
 # ---------------------------------------------------------------------------- diff
@@ -824,6 +824,9 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     c.add_argument("--base", default=None, metavar="REF",
                    help="compare with the commit this branch left REF at (origin/main, say) and "
                         "fail on what changed: the gate a pull request runs")
+    c.add_argument("--quiet", "-q", action="store_true",
+                   help="print every error and no warning line, each status line counting the "
+                        "warnings it hid; for a commit hook. The exit code is unchanged")
     c.add_argument("--siblings", action="store_true",
                    help="also warn about an id this branch added that another fetched branch "
                         "added with a different title; the exit code is unchanged")
@@ -994,6 +997,11 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     be.add_argument("--branch")
     be.add_argument("--commit")
     be.add_argument("--note")
+    be.add_argument("--accept-red", metavar="REASON", dest="accept_red",
+                    help="let `done` through on a red, missing or stale full gate, and record "
+                         "a ruling with this reason")
+    be.add_argument("--agent", help="the id of the agent that built the unit; a fix for it "
+                                    "is then sent back to that agent")
     be.add_argument("--role", help="hand the unit to another role that writes code; its report "
                                    "then has that role's name")
     bl = badd("launch", help="check the brief or briefs of a unit, `review`, `fix` or "
@@ -1004,6 +1012,10 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
                               "from the worktree that has BRANCH checked out into "
                               "this checkout, for an agent that is not a unit")
     bc.add_argument("branch")
+    bv = badd("verify", help="check that BRANCH holds the committed work of a unit "
+                             "before it is marked done; changes nothing")
+    bv.add_argument("id")
+    bv.add_argument("--branch", required=True)
     bg = badd("ruling", help="record a decision the coordinator made without the "
                              "owner: what, why, and what it costs if wrong")
     bg.add_argument("text", nargs="+")
@@ -1012,10 +1024,17 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     bt.add_argument("--json", action="store_true", dest="as_json")
     bt.add_argument("--team", action="store_true", dest="team",
                     help="every build in flight, here and on fetched remote branches")
-    badd("review", help="write the review package and the reviewers' briefs")
+    brv = badd("review", help="write the review package and the reviewers' briefs")
+    brv.add_argument("--accept-red", metavar="REASON", dest="accept_red",
+                     help="review on a red, missing or stale full gate, and record a ruling "
+                          "with this reason")
+    bgt = badd("gate", help="run the project's full gate and record its result for this phase")
+    bgt.add_argument("--cmd", metavar="CMD", dest="gate_cmd",
+                     help="run this command instead of `full_gate`; nothing is recorded")
     bf = badd("fix", help="write the fix pass's brief, for the coordinator to fill; "
                           "a second pass gets a brief of its own")
     bf.add_argument("--role", help="a rendered role that writes code (default: developer)")
+    bf.add_argument("--unit", help="the brief is for the fixes to this one unit")
     badd("close", help="write technical-writer's closing brief")
     fr = sub.add_parser("report", help="a field report on context-gate itself: draft it, check "
                                        "it for private text, open it as an issue page")
@@ -1143,7 +1162,7 @@ def dispatch(ctx: Context, args) -> int:
         return field_report.run(ctx, args)
     code = cmd_check(ctx, getattr(args, "project", None), getattr(args, "path", None),
                      getattr(args, "history_from", None), getattr(args, "workspace_only", False),
-                     getattr(args, "base", None))
+                     getattr(args, "base", None), getattr(args, "quiet", False))
     if getattr(args, "siblings", False):
         from govern import refs
         for line in refs.sibling_collisions(ctx):

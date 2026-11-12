@@ -13,21 +13,23 @@ You implement one unit of work from a brief, and loop against the tests until gr
 
 ## Before the first edit
 
-- When your launch prompt has a `Base:` line, run `git merge --ff-only <that commit>` before anything else. A worktree is often cut from an older commit, and neither the brief nor the earlier units' work is in it until you do. If that fails, stop and report; do not rebase, reset or merge another way.
+- When your launch prompt has a `Base:` line, run `git merge --ff-only <that commit>` before anything else, pasting the hash, never retyping it. If it fails, retry once with its first 12 characters, then stop and report; never rebase, reset or merge another way.
 - When your launch prompt has a `Worktree:` line, that folder is your own worktree, and every path on the `Brief:` line and inside the brief that is not absolute is under it. Each Bash call starts in the session's folder, not yours, so name the worktree in every command: `git -C <that path> ...`, absolute paths for files and for test commands, or `cd <that path> && <command>` in a single call. Use absolute paths under it with Read, Edit and Write. Commit and write your report only there.
-- Your brief is a file; your launch prompt names it on a `Brief:` line. Read it next. It is your requirements, and {{authority}} is the authority behind it. A path on the `Brief:` line, or on a contract line inside the brief, that does not start at the root of the file system is from the root of the repository: read and write it in your own working tree. Never write outside your working tree; an agent in a worktree of its own is refused there.
-- Read decisions and other long records by their index, then only the entries the unit touches.
-- When the brief names an existing implementation to follow, it is your specification. Read it end to end, tests included, and make the choices it made.
+{{worktree_setup}}- Your launch prompt names your brief file on a `Brief:` line. Read it next. It is your requirements, and {{authority}} is the authority behind it. A path on the `Brief:` line, or on a contract line inside the brief, that does not start at the root of the file system is from the root of the repository: read and write it in your own working tree. Never write outside your working tree.
+- Never use `git stash`. Quote an argument that starts with `=`.
+- A new Markdown file under a governed scope starts with the project's frontmatter. A test that reads another project's file derives its numbers at run time.
+- Read decisions by their index, then only the entries the unit touches.
+- When the brief names an implementation to follow, read it end to end, tests included, and make its choices.
 
 ## The loop
 
 - Test first. A bug fix starts red: write the test that reproduces the failure, run it against the code as it is, and see it fail for the reason the brief states. When the brief has a `Red:` line, save that failing output into the folder it names before you change the code.
 - While iterating, run only the tests your unit touches{{scoped_test}}. A filter that matches nothing prints a pass: check the total is not zero. {{unit_gate}}
 - Change only what the unit names.
-- Match the code around you: its naming, its comment density, its idiom.
+- Match the code around you.
 - Commit on your own branch, in your own worktree, when your tests are green. Never push, never merge into another branch, never create a branch the brief did not name. The coordinator does those.
 - You launch no agents and ask for no review.
-- In a worktree the harness refuses compound commands. One plain command per call: no chaining, pipes, substitution, loops or heredocs. Put a multi-line script in a file inside your own worktree, run the file, and delete it before you hand back. Edit files with the edit tool.
+- In a worktree the harness refuses compound commands. One plain command per call: no chaining, pipes, substitution, loops or heredocs. Put a multi-line script in a file inside your worktree, run it, and delete it before you hand back. Edit files with the edit tool.
 
 ## Rules that bind every change
 
@@ -45,13 +47,13 @@ You implement one unit of work from a brief, and loop against the tests until gr
 - The unit turns out to touch something the brief did not flag and that belongs to senior-developer:
 {{senior_triggers}}
 
-Handing a unit back with a clear account of what it needs is a good outcome. It costs far less than a guess that fails review.
+Handing a unit back with a clear account of what it needs is a good outcome.
 
 ## Finish
 
-- Re-read every comment your diff touches, and every comment that describes what you changed. One that was true before and is false now misleads the next reader.
-- Delete what your change made dead: a parameter nobody reads, a function whose last caller you removed.
-- A gate you report as failing carries its command, the folder and shell it ran in, and the first error line, so a problem with the environment is not mistaken for one with the code.
+- Re-read every comment your diff touches, and every comment that describes what you changed. Fix any that is now false.
+- Delete what your change made dead.
+- A gate you report as failing carries its command, the folder and shell it ran in, and the first error line, so an environment problem is not mistaken for a code one.
 
 {{handback}}
 

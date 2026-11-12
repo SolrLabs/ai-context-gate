@@ -242,7 +242,7 @@ Where every project keeps its records. Paths are relative to each project's gove
 | `decision_log` | string | `"DECISIONS.md"` | The project's decision log |
 | `working_dir` | string | `"working-files"` | The working-files directory |
 | `trap_glob` | string | `"traps*.md"` | Trap files, inside the working-files directory |
-| `trap_prefix` | string | `"T"` | The trap-id prefix, as in `T-3` |
+| `trap_prefix` | string | `"T"` | The trap-id prefix, as in `T-3` | <!-- decision-citations: allow T-3 -->
 
 Governed docs never include files under `node_modules/`, `.venv/`, `venv/`, `vendor/`, `dist/`,
 `build/`, `target/`, `.git/`, `.context-gate/` (the tool's own files and reports) or `.claude/`
@@ -346,7 +346,7 @@ Format settings. The defaults are the standard. A project may keep a different f
 
 | Key | Default | Other value | Meaning |
 |---|---|---|---|
-| `decision_heading` | `"any-dash"` | `"em-dash"` | Which dash separates an entry's id from its title. `any-dash` accepts an em dash, an en dash or a hyphen, with spacing optional; `em-dash` requires ` — `. The examples in these docs use a hyphen (`## D-12 - Title`); an em or en dash is read too. A heading-shaped line that fails the grammar is an error either way. |
+| `decision_heading` | `"any-dash"` | `"em-dash"` | Which dash separates an entry's id from its title. `any-dash` accepts an em dash, an en dash or a hyphen, with spacing optional; `em-dash` requires ` — `. The examples in these docs use a hyphen (`## D-12 - Title`); an em or en dash is read too. A heading-shaped line that fails the grammar is an error either way. | <!-- decision-citations: allow D-12 -->
 | `next_id` | `"max-plus-one"` | `"first-free"` | Whether `next-id` prints the highest id plus one, or reuses the first gap. A reused gap can collide with a deleted id that is still cited. |
 | `id_overlap` | `"prefix-aware"` | `"prefix-blind"` | Whether id ranges are compared only within the same prefix, or across prefixes too |
 | `agent_turns_prose` | `"must-match"` | `"forbid"` | Whether an agent's prose may state a turn count that matches its `maxTurns`, or may state none at all |
@@ -711,7 +711,7 @@ beta's own engine. For a beta whose engine has no `govern/local_plugin.py` (a fo
 engine and then names the `install-plugin.py` command to run. `govern beta` and `govern beta off` never use the network.
 `beta on` then writes `local.toml`, sets `enabledPlugins` in
 `.claude/settings.local.json` to turn the beta plugin on and the stable plugin off, and keeps every
-other key in that file. `govern beta off` removes `local.toml`, puts the two plugin keys back as it
+other key in that file. `govern beta off` clears its keys from `local.toml`, puts the two plugin keys back as it
 found them, and works even when the beta engine is broken or gone. With no beta on, it says so and
 touches nothing.
 
@@ -722,9 +722,10 @@ version named. It refuses when there is no beta, and when the newest one is a be
 project already runs (`0.6.0-beta.4` with a pin of `0.6.0` or `0.6`). Name the version to switch to
 that beta anyway.
 
-`govern beta off` removes `local.toml` whole. When the file holds anything besides its
-`[governance]` table, `beta off` prints those lines after its usual output, so you can copy what
-you want to keep into `.context-gate/config.toml`. A file it cannot parse is printed whole.
+`govern beta off` removes only `[governance] engine` and `plugins_before` from `local.toml` and
+keeps the rest of the file (your `[checks.*]` tables and comments); it deletes the file when
+nothing else is left. A file it cannot parse is printed whole. A beta tag that is missing names
+`tools/release/publish.py` in its message.
 
 With another beta already on, `govern beta on` switches to the new one. It changes only the
 `engine` value in `local.toml` and keeps the rest of the file: your `[checks.*]` tables, your
@@ -1058,6 +1059,19 @@ while the status row is on (`govern usage row on`), so it needs two weeks of the
 14 days it prints a ready-to-paste `[weekly.profiles."<folder>"]` table, each weekday weighted by
 its average use against the busiest weekday. It writes nothing.
 
+## Reading less output
+
+`govern check --quiet` (`-q`) prints errors only. Each status line says
+`N warnings hidden, run without --quiet`, and the exit status does not change.
+
+## Allowing an example
+
+`decision-citations` takes `<!-- decision-citations: allow <ids> -->`, which covers its own line and
+the next, and the param `example_ids` for ids that appear as examples everywhere. The
+`writing-rules` allow marker also ends at `--}}`. A first `no frontmatter` finding hints
+`[projects] exclude`, and a first `writing-rules` finding hints `[checks.writing-rules] exclude`.
+A clone in a git-ignored folder inside a governed folder is not governed.
+
 ## Agent roles
 
 With `agent-roles` on, the engine writes the project's agent definitions and the coordinator's
@@ -1114,6 +1128,12 @@ the files stay on that machine: they are recorded in `.context-gate/rendered.loc
 out of git through the repository's own `info/exclude`, and `render` names any of them git still
 tracks (`--untrack` stops that, leaving the files). A param that `local.toml` sets while
 `config.toml` has the check on is refused, because it would be rendered into committed files.
+
+`forbidden_trailers` is a list of regexes (default empty): `build verify` refuses a unit branch
+whose commit message has a line matching one, for example `["(?im)^co-authored-by:.*claude"]`.
+`fast_checks` is a list of commands, rendered for `developer` and `senior-developer` as the
+hand-back key `Fast checks` (not under `unit_gate = "full"`). `worktree_setup` is one command,
+rendered as a line in `developer`, `senior-developer` and `technical-writer`.
 
 ## Agent gates
 
@@ -1245,13 +1265,15 @@ attempts = 0
 |---|---|
 | `build start <phase> [--plan FILE] [--from BRANCH] [--high-risk] [--visual]` | Writes the ledger; `--visual` marks the phase visual, so `build review` writes a third brief for `ux-reviewer`, and is refused unless `visual_paths` renders that role. Refuses on the default branch, a dirty tree, an existing ledger, or when git ignores the ledger (it prints the line to add to `.gitignore`) |
 | `build unit add <id> --title T [--role R] [--red]` | Adds a unit and writes its `brief.md` |
-| `build unit set <id> <status> [--role R] [--branch B] [--commit C] [--note N]` | Updates a unit |
+| `build unit set <id> <status> [--role R] [--branch B] [--commit C] [--note N] [--agent ID] [--accept-red REASON]` | Updates a unit. `done` with `--branch` runs `build verify`; `--agent` stores the agent that built it (cleared on `failed`, `blocked` and relaunch). With `full_gate` set and `unit_gate = "scoped"`, `done` is refused on a red, missing or stale gate record; `--accept-red` lets it through and records a ruling |
+| `build gate [--cmd CMD]` | Runs `full_gate` and records `<phase folder>/gate/last.json` (`status`, `rc`, `head`, `dirty`, `seconds`, `at`, `cmd`) and `gate/last.log`. A HEAD that moves during the run leaves the record stale. `--cmd` runs another command and records nothing |
+| `build verify <id> --branch B` | Read-only hand-back check. Refuses: no commit past the unit's base, an empty diff, uncommitted files in the branch's worktree, a git-ignored ledger, a commit line matching `forbidden_trailers`. Warns: a report `Scope:` path the diff does not touch; ignored files in a folder the diff touches |
 | `build launch <unit, review, fix or close>` | Refuses an unfilled or uncommitted brief; prints the launch prompt |
 | `build collect <branch>` | Copies what the agent on that branch produced (reports, failing output) from its worktree into this checkout's build folder |
 | `build ruling <text>` | Records a decision made without the owner: what, why, cost if wrong |
 | `build status [--json]` | The phase, a line per unit, and what is next |
-| `build review` | Writes the review package and the reviewers' briefs |
-| `build fix [--role R]` | Writes a ranked fix brief |
+| `build review [--accept-red REASON]` | Writes the review package and the reviewers' briefs; with `full_gate` set it is refused on a red, missing or stale gate record |
+| `build fix [--role R] [--unit ID]` | Writes a ranked fix brief; `--unit` adds a `Unit: <id>` line, and `launch fix` then resumes the unit's agent with SendMessage (first three fix briefs of a done unit with an agent) |
 | `build close` | Writes the technical writer's brief and prints the `phase close` command |
 
 The brief contract: the launch prompt carries `Brief:`, a path from the repository root (or an
@@ -1259,8 +1281,13 @@ absolute one), and, for a role that works in a worktree, `Base:`, the commit the
 fast-forwards to first. `Produces:` and `Red:` are paths from the repository root, written and
 checked in the agent's own working tree; `build unit set <id> done --branch <branch>` and
 `build collect <branch>` copy what an agent produced into the coordinator's checkout. A brief still
-holding a `<!-- fill:` line is refused at launch by `agent-gates`. SessionStart tells the
-coordinator when a build is in flight.
+holding a `<!-- fill:` line is refused at launch by `agent-gates`. `launch` also prints
+`Phase branch: <branch>` after `Base:`. Every brief names its own scratch folder under the phase
+folder (`<unit id>`, `fix-N`, `review-code`, `review-qa`, `review-ux`, `close`, each with
+`/scratch/`), and agent worktree folders get `.metadata_never_index`. A build command stopped by an
+OS error says `stopped at <path>: <reason>; anything written before it stays`; a failed run-record
+write is a warning. With `agent-gates` on, a coordinator `git push` is denied when the phase's last
+gate is red at HEAD. SessionStart tells the coordinator when a build is in flight.
 
 ## Profiles
 
