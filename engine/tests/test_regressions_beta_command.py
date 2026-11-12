@@ -169,7 +169,7 @@ class BetaCommand(Base):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn(f"beta {other} off", res.stdout)
         self.assertEqual(self.settings.read_text(encoding="utf-8"), self.STABLE_TRUE)
-        self.assertFalse(local.exists())
+        self.assertEqual(local.read_bytes(), self.OWN.lstrip("\n").encode())
 
     def test_ub10_switch_keeps_crlf(self):
         text = (f'[governance]\r\nengine = "{BETA}"\r\n'
@@ -392,137 +392,94 @@ class BetaCommand(Base):
         self.assertEqual(kept.read_bytes(), b"kept before")      # the other file was still tried
         self.assertEqual(lost.read_bytes(), b"lost after")
 
-    # `beta off` removes local.toml, so it shows what the user had put there.
-    HELD = ("local.toml held settings of your own, now removed. Copy what you want to keep into "
-            ".context-gate/config.toml:\n")
-
-    def _off_output(self, version: str = BETA, put_back: str = "") -> str:
-        """What `beta off` has always printed."""
+    # `beta off` takes the beta out of local.toml and keeps the rest of the file.
+    def _off_output(self, version: str = BETA, put_back: str = "", local: str = "removed") -> str:
         return (f"beta {version} off for this project, on this machine:\n"
-                "  .context-gate/local.toml          removed\n" + put_back +
+                f"  .context-gate/local.toml          {local}\n" + put_back +
                 "Back on the committed pin. Anything the beta installed outside this project "
                 "(see its release\nnotes) is still installed. Restart the Claude Code session to "
                 "load the stable plugin.\n")
 
-    def test_off_shows_the_settings_it_removes(self):
-        local = self._first_beta_on()
-        self.assertIn(b"plugins_before", local.read_bytes())
+    KEPT = "engine and plugins_before removed, the rest kept"
+
+    def test_off_keeps_the_rest_of_local_toml_byte_for_byte(self):
+        local = self._first_beta_on(f'[governance]\nengine = "{BETA}"\n\n[checks.usage]\n'
+                                    'level = "warn"\n')
         res = self.run_beta("off")
         self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertFalse(local.exists())
+        self.assertEqual(local.read_bytes(), b'[checks.usage]\nlevel = "warn"\n')
         self.assertEqual(res.stdout, self._off_output(
             put_back="  .claude/settings.local.json       context-gate-beta@skills-dir and "
-                     "context-gate@context-gate put back\n")
-            + self.HELD + "  # my alerts, kept across betas\n  [checks.usage]\n  enabled = true\n")
-        for gone in ("[governance]", "plugins_before", "engine ="):
-            self.assertNotIn(gone, res.stdout)
+                     "context-gate@context-gate put back\n", local=self.KEPT))
+        self.assertNotIn("held settings", res.stdout)
 
-    def test_off_prints_text_the_console_cannot_encode(self):
-        wtext(self.root / layout.LOCAL, f'[governance]\nengine = "{BETA}"\n\n[checks.usage]\n'
-              'note = "caf\u00e9 \u6d4b\u8bd5"\n')
-        res = self.run_beta("off", env={**self.env, "PYTHONIOENCODING": "ascii"})
-        self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertEqual(res.stderr, "")
-        self.assertIn('  [checks.usage]\n  note = "caf\\xe9 \\u6d4b\\u8bd5"\n', res.stdout)
+    def test_off_keeps_a_table_before_and_after_the_governance_table(self):
+        for eol in ("\n", "\r\n"):
+            with self.subTest(eol=eol):
+                head = '# mine\n[checks.usage]\nenabled = true\n\n'
+                tail = '# about writing\n[checks.writing-rules]\nlevel = "error"\n'
+                gov = f"[ governance ]  # this machine\nengine = '{BETA}'\nplugins_before = {{}}\n"
+                local = self._first_beta_on((head + gov + tail).replace("\n", eol))
+                res = self.run_beta("off")
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertEqual(local.read_bytes(), (head + tail).replace("\n", eol).encode())
 
-    def test_off_with_only_the_governance_table_prints_what_it_always_did(self):
+    def test_off_keeps_a_governance_key_of_the_users_own(self):
+        local = self._first_beta_on(f'[governance]\nsource = "x"\nengine = "{BETA}"\n'
+                                    'plugins_before = {}\n[checks.usage]\nenabled = true\n')
+        self.assertEqual(self.run_beta("off").returncode, 0)
+        self.assertEqual(local.read_bytes(),
+                         b'[governance]\nsource = "x"\n[checks.usage]\nenabled = true\n')
+
+    def test_off_drops_a_governance_table_that_is_last(self):
+        local = self._first_beta_on(f'[checks.usage]\nenabled = true\n\n[governance]\n'
+                                    f'engine = "{BETA}"\n')
+        self.assertEqual(self.run_beta("off").returncode, 0)
+        self.assertEqual(local.read_bytes(), b"[checks.usage]\nenabled = true\n")
+
+    def test_off_deletes_local_toml_holding_only_the_governance_table(self):
         for text in (f'[governance]\nengine = "{BETA}"\n',
                      f'# this machine only\n\n[governance]\nengine = "{BETA}"\n'
                      'plugins_before = {}\n\n# nothing else\n'):
             with self.subTest(text=text):
-                wtext(self.root / layout.LOCAL, text)
+                local = self._first_beta_on(text)
                 res = self.run_beta("off")
                 self.assertEqual(res.returncode, 0, res.stderr)
-                self.assertEqual(res.stdout, self._off_output())
+                self.assertFalse(local.exists())
+                self.assertEqual(res.stdout, self._off_output(
+                    put_back="  .claude/settings.local.json       context-gate-beta@skills-dir "
+                             "and context-gate@context-gate put back\n"))
 
-    def test_off_leaves_out_only_the_governance_tables_own_lines(self):
-        """Header through the line before the next table header: a table before it, a table
-        after it and a sub-table of it are all shown, CRLF or not."""
-        for eol in ("\n", "\r\n"):
-            with self.subTest(eol=eol):
-                text = ("[checks.usage]\nenabled = true\n\n"
-                        f"[ governance ]  # this machine\nengine = '{BETA}'\n"
-                        "plugins_before = {}\n\n"
-                        '[governance.notes]\nwhy = "trying it"\n\n'
-                        '[checks.writing-rules]\nlevel = "error"\n').replace("\n", eol)
-                wtext(self.root / layout.LOCAL, text)
-                res = self.run_beta("off")
-                self.assertEqual(res.returncode, 0, res.stderr)
-                self.assertEqual(res.stdout, self._off_output() + self.HELD + (
-                    "  [checks.usage]\n  enabled = true\n\n"
-                    '  [governance.notes]\n  why = "trying it"\n\n'
-                    '  [checks.writing-rules]\n  level = "error"\n'))
-
-    def test_off_shows_the_comment_block_directly_above_the_next_table(self):
-        """A run of comment lines right above a table header belongs to that table; a comment
-        inside the governance table, or one with a blank line before the header, is not."""
-        text = ("[governance]\nengine = '" + BETA + "'\n# about engine\n\n# loose, then a gap\n\n"
-                "# about usage\n# still about usage\n[checks.usage]\nenabled = true\n")
-        wtext(self.root / layout.LOCAL, text)
-        res = self.run_beta("off")
-        self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertEqual(res.stdout, self._off_output() + self.HELD + (
-            "  # about usage\n  # still about usage\n  [checks.usage]\n  enabled = true\n"))
-
-    def test_off_shows_a_file_it_cannot_parse_whole(self):
+    def test_off_leaves_a_file_it_cannot_parse_whole_and_exits_1(self):
         for name, raw in (("a broken table header",
                            f'[governance\nengine = "{BETA}"\n\n[checks.usage]\n'.encode()),
                           ("a byte-order mark",
-                           b"\xef\xbb\xbf" + f'[governance]\nengine = "{BETA}"\n'.encode())):
+                           b"\xef\xbb\xbf" + f'[governance]\nengine = "{BETA}"\n'.encode()),
+                          ("not UTF-8", b'[governance]\nengine = "\xff"\n\n[checks.usage]\n'),
+                          ("a header look-alike in a string",
+                           f'[governance]\nengine = "{BETA}"\n\n[checks.usage]\nnote = \"\"\"\n'
+                           '[governance]\nengine = "x"\n\"\"\"\n'.encode())):
             with self.subTest(form=name):
-                (self.root / layout.LOCAL).write_bytes(raw)
+                local = self._first_beta_on("")
+                local.write_bytes(raw)
+                state = self.state()
                 res = self.run_beta("off")
-                self.assertEqual(res.returncode, 0, res.stderr)
-                self.assertFalse((self.root / layout.LOCAL).exists())
-                shown = "".join(f"  {line}\n" if line else "\n" for line in
-                                raw.decode("utf-8-sig").strip().splitlines())
-                self.assertEqual(res.stdout, self._off_output().replace(
-                    f"beta {BETA} off", "the beta off") + self.HELD + shown)
+                self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+                self.assertNotIn("Traceback", res.stderr)
+                self.assertIn("local.toml could not be edited", res.stderr)
+                self.assertEqual(self.state(), state)
 
-    def test_off_never_hides_a_setting_a_line_that_looks_like_a_header_would_swallow(self):
-        """A line starting with `[` inside a string is not a table header: the file is shown
-        whole whenever the lines kept do not parse to what the file holds besides [governance]."""
-        text = (f'[governance]\nengine = "{BETA}"\n\n[checks.usage]\nnote = """\n[governance]\n'
-                'x\n"""\nlimit = 5\n')
-        wtext(self.root / layout.LOCAL, text)
+    def test_off_twice_leaves_the_settings_the_user_changed_since(self):
+        local = self._first_beta_on()
+        self.assertEqual(self.run_beta("off").returncode, 0)
+        kept = local.read_bytes()
+        wtext(self.settings, self.STABLE_TRUE)
+        state = self.state()
         res = self.run_beta("off")
         self.assertEqual(res.returncode, 0, res.stderr)
-        for line in ("[checks.usage]", 'note = """', "limit = 5"):
-            self.assertIn(f"  {line}\n", res.stdout)
-
-    def test_off_reads_a_quoted_governance_header_as_the_governance_table(self):
-        wtext(self.root / layout.LOCAL, f'["governance"]\nengine = "{BETA}"\n')
-        res = self.run_beta("off")
-        self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertEqual(res.stdout, self._off_output())
-
-    def test_off_reads_a_multi_line_array_in_the_governance_table_as_its_own(self):
-        wtext(self.root / layout.LOCAL,
-              f'[governance]\nengine = "{BETA}"\nxs = [\n[1],\n]\n')
-        res = self.run_beta("off")
-        self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertEqual(res.stdout, self._off_output())
-        # With a table of the user's own after it, the whole file is shown rather than strays.
-        wtext(self.root / layout.LOCAL,
-              f'[governance]\nengine = "{BETA}"\nxs = [\n[1],\n]\n\n[checks.usage]\n'
-              'enabled = true\n')
-        res = self.run_beta("off")
-        self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertIn("  [checks.usage]\n  enabled = true\n", res.stdout)
-
-    def test_off_still_works_on_a_file_that_is_not_utf8(self):
-        wtext(self.settings, self.STABLE_TRUE.replace("true", "false"))
-        local = self.root / layout.LOCAL
-        local.write_bytes(b'[governance]\nengine = "\xff"\n\n[checks.usage]\n')
-        res = self.run_beta("off")
-        self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertNotIn("Traceback", res.stderr)
-        self.assertFalse(local.exists())
-        self.assertFalse(self.settings.exists())
-        self.assertEqual(res.stdout, self._off_output().replace(f"beta {BETA} off", "the beta off")
-                         .replace("removed\n", "removed\n  .claude/settings.local.json       "
-                                  "context-gate@context-gate put back\n", 1)
-                         + "local.toml was not UTF-8 text, so what it held cannot be shown.\n")
+        self.assertEqual(res.stdout, "no beta is on in this project\n")
+        self.assertEqual(self.state(), state)
+        self.assertEqual(local.read_bytes(), kept)
 
     # A newer beta installed beside the one that is on.
     def _newer_line(self, newer: str, running: str = BETA) -> str:

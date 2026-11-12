@@ -24,7 +24,7 @@ from pathlib import Path
 
 from govern import config, layout, manifest
 from govern.decisions import FENCE, INLINE_CODE_RE, LIVE, line_kinds
-from govern.context import default_exclude, glob_matches
+from govern.context import WRITING_EXCLUDE_HINT, default_exclude, glob_matches
 from govern.findings import Findings
 from govern.manifest import Param, check
 from govern.profile import PRINCIPLES
@@ -37,8 +37,8 @@ OUTWARD = ("README.md", "CONTRIBUTING.md", "docs")
 NAME_CHARS = frozenset(string.ascii_letters + string.digits + "_-")
 
 # `writing-rules: allow licence, licences`, keywords in any case: the texts run to the end of the
-# line, or to the end of the comment the marker sits in (`-->`, `*/`).
-ALLOW_RE = re.compile(r"writing-rules:\s*allow\s+(.*?)\s*(?:-->|\*/|$)", re.IGNORECASE)
+# line, or to the end of the comment the marker sits in (`-->`, `*/`, `--}}`).
+ALLOW_RE = re.compile(r"writing-rules:\s*allow\s+(.*?)\s*(?:-->|\*/|--\}\}|$)", re.IGNORECASE)
 
 
 def vocabulary() -> set[str]:
@@ -294,5 +294,7 @@ def writing_rules(ctx, params) -> Findings:
                 msg += f" (use '{rule['use']}')"
             if rule.get("why"):
                 msg += f" — {rule['why']}"
+            if ctx.hint_once("exclude"):
+                msg += f" \u2014 {WRITING_EXCLUDE_HINT}"
             (f.warn if rule.get("level") == "warn" else f.error)(msg)
     return f

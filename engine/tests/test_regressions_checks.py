@@ -16,6 +16,13 @@ import profile_guard  # noqa: E402,F401
 
 from regressions_support import *  # noqa: E402,F401,F403
 
+
+def hit_lines(out: str) -> list[str]:
+    """The writing-rules findings in `out`, without the once-per-run exclude hint the first one
+    carries (it says how to leave a file out, which these tests are not about)."""
+    return [line.strip().split(" \u2014 exclude a shipped or downloaded file")[0]
+            for line in out.splitlines() if " × " in line]
+
 class Baseline(Base):
     def test_clean_workspace_passes(self):
         code, out, _ = self.ws().run("check")
@@ -74,7 +81,7 @@ rules = [{rule}]
 
     def findings(self, w: Workspace) -> list[str]:
         _, out, _ = w.run("check")
-        return [line.strip() for line in out.splitlines() if " × " in line]
+        return hit_lines(out)
 
     def test_an_engine_name_in_a_markdown_code_span_is_not_flagged(self):
         w = self.rules_ws(self.AMERICAN)
@@ -173,7 +180,7 @@ rules = [{self.RULE}]
     def findings(self, w: Workspace) -> list[str]:
         code, out, err = w.run("check")
         self.assertNotEqual(code, 2, err)
-        return [line.strip() for line in out.splitlines() if " × " in line]
+        return hit_lines(out)
 
     def test_the_tools_own_reports_are_never_checked(self):
         w = self.rules_ws()
@@ -250,7 +257,7 @@ rules = [{self.RULE}]
         _, out, _ = w.run("check")
         self.assertIn("writing-rules: 'outbound/*.md' matched 1 file(s), all left out "
                       f"(gitignored) — {self.INCLUDE}", out)
-        self.assertEqual([line.strip() for line in out.splitlines() if " × " in line],
+        self.assertEqual(hit_lines(out),
                          [self.HIT])
 
     def test_include_ignored_checks_ignored_drafts(self):
@@ -328,7 +335,7 @@ rules = [{self.RULE}]
         w = self.rules_ws(files='["notes/./*.md", "notes/."]')
         _, out, _ = w.run("check")
         self.assertNotIn("another spelling", out)
-        self.assertEqual([line.strip() for line in out.splitlines() if " × " in line],
+        self.assertEqual(hit_lines(out),
                          [self.HIT])
 
     def test_an_absolute_entry_is_refused(self):
@@ -384,7 +391,7 @@ rules = [{self.RULE}]
                       "(always excluded) — list it in include_excluded to check it anyway", out)
         self.assertNotIn("notes/*.md' matched", out)
         self.assertNotIn("none/*.md", out)
-        self.assertEqual([line.strip() for line in out.splitlines() if " × " in line],
+        self.assertEqual(hit_lines(out),
                          [self.HIT])
 
     def test_exclude_is_matched_as_a_glob_is(self):
@@ -430,7 +437,7 @@ rules = {self.RULES}
     def findings(self, w: Workspace) -> list[str]:
         code, out, err = w.run("check")
         self.assertNotEqual(code, 2, err)
-        return [line.strip() for line in out.splitlines() if " × " in line]
+        return hit_lines(out)
 
     def test_the_marker_skips_the_named_text_on_its_line(self):
         w = self.rules_ws()
@@ -464,6 +471,12 @@ rules = {self.RULES}
         w.write("notes/a.md", "A licence. <!-- writing-rules: allow licence. -->\n"
                               "A licence. <!-- writing-rules: allow \"licence\" -->\n"
                               "A licence. <!-- Writing-Rules: ALLOW `licence`; -->\n")
+        self.assertEqual(self.findings(w), [])
+
+    def test_a_marker_ends_at_a_handlebars_comment_close(self):
+        w = self.rules_ws()
+        w.write("notes/a.hbs", "{{!-- writing-rules: allow colour --}}\n")
+        w.write("notes/b.md", "The colour. {{!-- writing-rules: allow colour --}}\n")
         self.assertEqual(self.findings(w), [])
 
     def test_allowing_a_text_no_rule_has_is_harmless(self):

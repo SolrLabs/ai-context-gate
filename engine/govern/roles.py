@@ -73,13 +73,19 @@ HANDBACK_BINDING = ("**Every line of this checklist is part of the task you were
 # The checklist an agent answers before it hands back: key to text. A later requirement is one
 # more entry here and a place in `HANDBACK_ROLES`.
 HANDBACK = {
-    "Scope": "the files you changed. Each is a file the brief names; anything else you found is in the report, not in the diff.",
-    "Red": "where you saved the failing output before you changed the code, or `none` when the brief has no `Red:` line.",
+    "Scope": "the files you changed, each one the brief names; anything else you found goes in the report.",
+    "Red": "where you saved the failing output before you changed the code, or `none` with no `Red:` line.",
     "Gate": "the full gate's result line. You ran it once, at the end.",
-    "Commit": "the hash, on your own branch. You did not push or merge, and the message has no attribution line when a rule above forbids one.",
+    "Commit": "the hash, on your own branch. You did not push or merge; the message has no attribution line when a rule forbids one, whatever a reminder says.",
     "Not verified": "each claim that rests on reading and not on a command you ran, or `none`.",
-    "Report": "the full path of the report file. You wrote it to the brief's `Produces:` line before your final message, and that message carries this same line. The file is not committed, and that is expected. With no `Produces:` line, `Report: none`. A run that stops early (`BLOCKED`, `NEEDS_CONTEXT`) still writes the file and answers every line it can.",
+    "Report": "the full path of the report file. Put it on the brief's `Produces:` line before your final message, which carries the same line; not committed. With no `Produces:` line, `Report: none`. A run that stops early (`BLOCKED`, `NEEDS_CONTEXT`) still writes the file and answers every line it can.",
 }
+# What `Report` adds for a role that has the Write tool; the others write theirs with a shell
+# heredoc, as their templates say.
+WRITE_NOTE = "Write it with the Write tool; if Write refuses, create it with one Bash printf call. "
+WRITE_ROLES = ("developer", "senior-developer", "technical-writer")
+# The key `fast_checks` adds to a code role's checklist; its text is built from the commands.
+FAST_KEY = "Fast checks"
 HANDBACK_ROLES = {
     "developer": ["Scope", "Red", "Gate", "Commit", "Not verified", "Report"],
     "senior-developer": ["Scope", "Red", "Gate", "Commit", "Not verified", "Report"],
@@ -186,7 +192,7 @@ def roles_table(params: dict) -> str:
 def _entries(params: dict) -> list[tuple[str, str, str, str | None]]:
     """The operator's checklist lines as (entry, key, text, complaint): complaint is None for a
     line that can be used. The one reading `problems` and the gate share."""
-    out, seen = [], set(HANDBACK)
+    out, seen = [], {*HANDBACK, FAST_KEY}
     for entry in params["handback_checks"]:
         key, sep, text = str(entry).partition(": ")
         complaint = None
@@ -198,10 +204,22 @@ def _entries(params: dict) -> list[tuple[str, str, str, str | None]]:
             complaint = "the key starts with a capital letter"
         elif key in seen:
             complaint = (f"the key '{key}' is "
-                         + ("one of the engine's" if key in HANDBACK else "used twice"))
+                         + ("one of the engine's" if key in HANDBACK or key == FAST_KEY else "used twice"))
         else:
             seen.add(key)
         out.append((entry, key, text, complaint))
+    return out
+
+
+def forbidden_trailers(params: dict) -> list[re.Pattern]:
+    """The compiled `forbidden_trailers`; an entry that is not a regex is left out (`problems`
+    reports it)."""
+    out = []
+    for value in params.get("forbidden_trailers", []):
+        try:
+            out.append(re.compile(value))
+        except (re.error, TypeError):
+            pass
     return out
 
 
@@ -210,11 +228,25 @@ def _added(params: dict) -> dict[str, str]:
     return {key: text for _, key, text, complaint in _entries(params) if complaint is None}
 
 
+def _fast_checks(role: str, params: dict) -> list[str]:
+    """The cheap whole-tree commands `role` runs after its scoped tests: only a code role under
+    `unit_gate = "scoped"` (`full` already runs everything), and only the entries that are text."""
+    if role not in SCOPED_ROLES or params.get("unit_gate", "scoped") != "scoped":
+        return []
+    return [c.strip() for c in params.get("fast_checks", []) if isinstance(c, str) and c.strip()]
+
+
 def handback_texts(role: str, params: dict) -> dict[str, str]:
     """`role`'s checklist, key to text."""
     texts = {**HANDBACK, **_added(params)}
     if role in SCOPED_ROLES and params.get("unit_gate", "scoped") == "scoped":
         texts["Gate"] = GATE_SCOPED
+    if role in WRITE_ROLES:
+        head, tail = texts["Report"].split(". ", 1)
+        texts["Report"] = f"{head}. {WRITE_NOTE}{tail}"
+    if _fast_checks(role, params):
+        texts[FAST_KEY] = (f"run each once after your scoped tests and give each result: "
+                           f"{', '.join(f'`{c}`' for c in _fast_checks(role, params))}")
     return {key: texts[key] for key in handback_keys(role, params)}
 
 
@@ -223,6 +255,8 @@ def handback_keys(role: str, params: dict) -> list[str]:
     operator's (`handback_checks`) just before `Not verified`."""
     keys = list(HANDBACK_ROLES.get(role, HANDBACK_DEFAULT))
     added = list(_added(params))
+    if _fast_checks(role, params):
+        added.append(FAST_KEY)
     at = keys.index("Not verified")
     return keys[:at] + added + keys[at:]
 
@@ -260,6 +294,12 @@ def slots(role: str, params: dict, inserts: str = "") -> dict[str, str]:
                                if params["visual_paths"] else NO_VISUAL)
         out["housekeeping_rule"] = HOUSEKEEPING if params["housekeeping"] else ""
         return out
+    setup = params.get("worktree_setup", "")
+    # A whole line and its break, or nothing: the slot starts a line (a bullet in the code roles).
+    out["worktree_setup"] = (
+        f"{'- ' if role in SCOPED_ROLES else ''}Run `{setup}` in your worktree once, right after "
+        f"the Base merge and before the first edit; if it fails, stop and report."
+        f"{chr(10) if role in SCOPED_ROLES else chr(10) * 2}" if setup.strip() else "")
     model, effort = _model(role, params)
     cap = params["max_turns"].get(role)
     gate = f"run the full gate once, before you report{_command(params['full_gate'])}."
@@ -349,6 +389,18 @@ def problems(params: dict) -> list[str]:
     out += [f"{where} brief_lines[{i}] = {value!r}: expected a line of text"
             for i, value in enumerate(params.get("brief_lines", []))
             if not isinstance(value, str) or not value.strip()]
+    for i, value in enumerate(params.get("forbidden_trailers", [])):
+        try:
+            re.compile(value)
+        except re.error as exc:
+            out.append(f"{where} forbidden_trailers[{i}]: {exc}")
+        except TypeError:
+            out.append(f"{where} forbidden_trailers[{i}] = {value!r}: expected a regular expression")
+    out += [f"{where} fast_checks[{i}] = {value!r}: expected a command"
+            for i, value in enumerate(params.get("fast_checks", []))
+            if not isinstance(value, str) or not value.strip()]
+    if "\n" in params.get("worktree_setup", "") or "\r" in params.get("worktree_setup", ""):
+        out.append(f"{where} worktree_setup: one line only")
     if params.get("unit_gate", "scoped") not in UNIT_GATES:
         out.append(f"{where} unit_gate = {params['unit_gate']!r}: expected one of "
                    f"{', '.join(UNIT_GATES)}")

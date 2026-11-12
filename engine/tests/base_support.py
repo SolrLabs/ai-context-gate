@@ -292,7 +292,8 @@ class Solo(Tree):
     def __init__(self, tmp: Path, *, git: str | None = "commit", below: str | None = None,
                  extra: str = "", workspace: str = "", log: str | bytes | None = None) -> None:
         self._place(tmp, below)
-        self.write(layout.CONFIG, SOLO_CONFIG.format(version=__version__, extra=extra,
+        release = __version__.split("-")[0]     # a beta's fixtures pin the release it is of
+        self.write(layout.CONFIG, SOLO_CONFIG.format(version=release, extra=extra,
                                                      workspace=workspace))
         self.write(LOG, log if log is not None else
                    fm() + "# Decisions\n" + decision("P", 1) + decision("P", 2, "provisional")
@@ -323,7 +324,8 @@ class Team(Tree):
     def __init__(self, tmp: Path, *, nested: bool = False, extra: str = "") -> None:
         super().__init__(tmp / "team", tmp / "home")
         projects = self.PROJECTS + ((self.NESTED,) if nested else ())
-        self.write(layout.CONFIG, TEAM_CONFIG.format(version=__version__, extra=extra))
+        release = __version__.split("-")[0]     # a beta's fixtures pin the release it is of
+        self.write(layout.CONFIG, TEAM_CONFIG.format(version=release, extra=extra))
         self.write("projects.toml", TEAM_REGISTRY + "".join(
             PROJECT.format(name=n, dir=d, prefix=p, lo=lo, hi=lo + 99) for n, d, p, lo in projects))
         self.write("governance/DECISIONS.md", fm() + "# Decisions\n" + decision("W", 1)

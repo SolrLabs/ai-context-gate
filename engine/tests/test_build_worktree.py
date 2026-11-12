@@ -48,6 +48,7 @@ class Worktree(ws.Workspace):
             "launch developer with the prompt:",
             f"Brief: {BUILD.as_posix()}/p1/u1/brief.md",
             f"Base: {head}",
+            "Phase branch: phase/p1",
             f"Worktree: {self.tree()}",
             NOTE])
         self.assertTrue((self.tree() / "readme.txt").is_file())
@@ -57,6 +58,18 @@ class Worktree(ws.Workspace):
         # It is a worktree of the member, not of the workspace root.
         self.assertIn("build/p1/u1", build.phase._worktrees(member))
         self.assertEqual(self.ledger("alpha")["unit"][0]["status"], "running")
+
+    def test_launch_asks_spotlight_not_to_index_the_worktrees_folder(self):
+        member = self.ready()
+        folder = self.w.root / ".claude" / "worktrees"
+        self.assertFalse(folder.exists())
+        self.ok("--project", "alpha", "launch", "u1")
+        self.assertTrue((folder / ".metadata_never_index").is_file())
+        # `launch` also marks the repository's own folder, when it is there.
+        own = member / ".claude" / "worktrees"
+        own.mkdir(parents=True)
+        self.ok("--project", "alpha", "launch", "u1")
+        self.assertTrue((own / ".metadata_never_index").is_file())
 
     def test_a_second_launch_reuses_the_worktree(self):
         self.ready()
@@ -108,6 +121,9 @@ class Worktree(ws.Workspace):
         report = self.tree() / BUILD / "p1" / "u1" / "developer-report.md"
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text("Status: DONE\n", encoding="utf-8")
+        (self.tree() / "code.txt").write_text("x\n", encoding="utf-8")
+        self.w.git("add", "code.txt", at=self.tree())
+        self.w.git("commit", "-qm", "work", at=self.tree())
         out = self.ok("--project", "alpha", "unit", "set", "u1", "done", "--branch", "build/p1/u1")
         self.assertIn(f"copied {BUILD.as_posix()}/p1/u1/developer-report.md", out)
         self.assertEqual((member / BUILD / "p1" / "u1" / "developer-report.md")
@@ -130,7 +146,7 @@ class Single(Build):
         out = self.ok("launch", "u1")
         self.assertEqual(out.splitlines(), [
             "launch developer with the prompt:", f"Brief: {BUILD.as_posix()}/p1/u1/brief.md",
-            f"Base: {self.head()}"])
+            f"Base: {self.head()}", "Phase branch: phase/p1"])
         self.assertNotIn("Worktree", out)
         self.assertFalse((self.w.root / ".claude").exists())
 

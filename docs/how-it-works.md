@@ -26,7 +26,7 @@ on. It runs the same way on every machine and in CI.
 | Record | What the gate keeps true |
 |---|---|
 | **Decision logs** | Entries are headed `## P-12 - Title` (a prefix, a number, any dash, a title), unique, in ascending order and inside the project's id range. Each carries a `**Status:**` (`locked`, `provisional` or `deferred`), the required fields (`**Rule:**` and `**Why:**`) and an optional `**Topic:**`, and stays short (250 words). A changed decision is rewritten in place, a locked one with a dated `**Revised:**` line; git keeps the old text. A replaced decision shrinks to a one-line pointer, `## P-3 - Replaced by P-40`, so citations still resolve. `next-id` prints the next free id, and gaps are never reused. |
-| **Traps** | Known pitfalls, one entry each (`## T-3 - Title`) with a `**Bites when:**` line, in the working-files directory (`traps*.md`). A trap id lives in exactly one file. A generated index lists them all. |
+| **Traps** | Known pitfalls, one entry each (`## T-3 - Title`) with a `**Bites when:**` line, in the working-files directory (`traps*.md`). A trap id lives in exactly one file. A generated index lists them all. | <!-- decision-citations: allow T-3 -->
 | **Docs** | Every governed doc carries frontmatter (`doc_type`, `purpose`, `audience`, `load_when`, `last_reviewed`), is reviewed within 120 days if it is a control or reference doc, links only to files that exist, and is listed in the project's generated doc index when the project keeps one. The number of governed docs per project is bounded. |
 | **Working files** | The working-files directory holds at most 12 files. A file whose status says it is finished should be deleted a week after it was last touched (git keeps it); the gate warns until it is, and one that was never committed is flagged until it is. A working file and the HANDOFF have word limits. |
 | **Agents and skills** | Every agent definition pins its `name`, `description`, `model` and `effort`, and sets `omitClaudeMd` (a warning when missing); a turn cap, when set, stays under a configured ceiling, and prose never contradicts it. Every skill has a description. Hooks a rule depends on are wired. The Claude Code memory index stays short. |
@@ -201,7 +201,7 @@ It is a report and never fails: it exits 0 whether or not anything changed, and 
 a repository could be compared. Whether a change is allowed is for `check --base` to say.
 
 Every decision and trap line is `- <word> <log> <id>`, then what the word needs. The log is the
-file the entry is in now, or for `removed` the file it was in, so trap `T-7` in two projects is
+file the entry is in now, or for `removed` the file it was in, so trap `T-7` in two projects is <!-- decision-citations: allow T-7 -->
 two lines. A decision that is in another log than at the base ends with `, from <old log>`
 whatever its word, so a decision moved and reworded keeps the move:
 `- changed    governance/DECISIONS.md A-100 (locked), from projects/alpha/DECISIONS.md`. A log

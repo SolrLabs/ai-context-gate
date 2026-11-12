@@ -44,7 +44,7 @@ class DefaultBranch(Launching):
         self.assertEqual(self.ledger()["unit"][0]["status"], "pending")
         self.w.git("merge", "-q", "--no-edit", "main")
         out = self.ok("launch", "u1")
-        self.assertEqual(out.splitlines()[-1], f"Base: {self.head()}")
+        self.assertEqual(out.splitlines()[-2], f"Base: {self.head()}")
 
     def test_the_remote_copy_of_the_default_branch_is_named_with_its_remote(self):
         self.started(remote=True)
@@ -60,7 +60,7 @@ class DefaultBranch(Launching):
         w = self.started()
         self.ready()
         w.git("branch", "-m", "main", "trunk")
-        self.assertEqual(self.ok("launch", "u1").splitlines()[-1], f"Base: {self.head()}")
+        self.assertEqual(self.ok("launch", "u1").splitlines()[-2], f"Base: {self.head()}")
 
 
 class Retried(Launching):
@@ -88,7 +88,7 @@ class Retried(Launching):
     def merged(self, tip: str, head: str) -> str:
         out = self.ok("launch", "u1")
         new = self.head("u1-try")
-        self.assertEqual(out.splitlines()[-1], f"Base: {new}")
+        self.assertEqual(out.splitlines()[-2], f"Base: {new}")
         self.assertNotEqual(new, tip)
         self.assertEqual(self.w.git("rev-parse", f"{new}^1", f"{new}^2").split(), [tip, head])
         for old in (tip, head):
@@ -139,7 +139,7 @@ class Retried(Launching):
         self.w.git("branch", "u1-try")
         self.ok("unit", "set", "u1", "failed", "--branch", "u1-try")
         out = self.ok("launch", "u1")
-        self.assertEqual(out.splitlines()[-1], f"Base: {self.head()}")
+        self.assertEqual(out.splitlines()[-2], f"Base: {self.head()}")
         self.assertEqual(self.head("u1-try"), self.head())
 
 

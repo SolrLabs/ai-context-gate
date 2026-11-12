@@ -63,32 +63,40 @@ def one_per_breach(results: list[tuple[str, str, "Findings"]], reporter: str = "
             found.warnings = [w for w in found.warnings if found.breach.get(w) not in reported]
 
 
-def report_aggregate(label: str, f: Findings) -> bool:
-    """Every error, then every warning, then one status line."""
+def _counts(f: Findings, quiet: bool) -> str:
+    """The status line's counts; quiet mode names the warnings it hid instead of counting them."""
+    n = len(f.warnings)
+    warned = f"{n} warnings hidden, run without --quiet" if quiet and n else f"{n} warnings"
+    return f"{len(f.errors)} errors, {warned}"
+
+
+def report_aggregate(label: str, f: Findings, quiet: bool = False) -> bool:
+    """Every error, then every warning (none when `quiet`), then one status line."""
     for e in f.errors:
         print(f"  ERROR  {e}")
-    for w in f.warnings:
-        print(f"  warn   {w}")
+    if not quiet:
+        for w in f.warnings:
+            print(f"  warn   {w}")
     status = "OK" if f.ok else "FAIL"
-    print(f"[{status}] {label}  ({len(f.errors)} errors, {len(f.warnings)} warnings)")
+    print(f"[{status}] {label}  ({_counts(f, quiet)})")
     return f.ok
 
 
-def report_per_scope(groups: list[tuple[str, Findings]]) -> bool:
-    """Each scope's errors, then its warnings, then its status line; a total when there is more
-    than one scope. A multi-project run shows at a glance which project is failing."""
+def report_per_scope(groups: list[tuple[str, Findings]], quiet: bool = False) -> bool:
+    """Each scope's errors, then its warnings (none when `quiet`), then its status line; a total
+    when there is more than one scope. A multi-project run shows at a glance which project is
+    failing."""
     total = Findings()
     for label, f in groups:
         for e in f.errors:
             print(f"  ERROR  {e}")
-        for w in f.warnings:
-            print(f"  warn   {w}")
-        print(f"[{'OK' if f.ok else 'FAIL'}] {label}  ({len(f.errors)} errors, "
-              f"{len(f.warnings)} warnings)")
+        if not quiet:
+            for w in f.warnings:
+                print(f"  warn   {w}")
+        print(f"[{'OK' if f.ok else 'FAIL'}] {label}  ({_counts(f, quiet)})")
         total.extend(f)
     if len(groups) > 1:
-        print(f"[{'OK' if total.ok else 'FAIL'}] total  ({len(total.errors)} errors, "
-              f"{len(total.warnings)} warnings)")
+        print(f"[{'OK' if total.ok else 'FAIL'}] total  ({_counts(total, quiet)})")
     return total.ok
 
 

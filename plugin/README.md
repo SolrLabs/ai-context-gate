@@ -37,5 +37,7 @@ teammates are offered the same plugin.
 | Usage hooks (`PostToolUse`, `UserPromptSubmit`, `SessionEnd`) | Runs on every tool call in every project, but exits at once (a single file check, so no tokens; a short Python process still starts on each tool call) when the `usage` option is off. On: about 20 tokens per data line, sent every 5 points of usage (every point from 90), plus your alert text when a break point is crossed |
 | Agent hooks (`PreToolUse`, `PostToolUse`, `SubagentStart`, `SubagentStop`, `UserPromptSubmit`) | Every shell call and tool call in every project with the plugin enabled starts one short Python process (about 19 ms measured on one machine), which exits at once when `agent-gates` and `agent-measure` are both off. `agent-gates` on: a role agent is launched only from a brief file, a subagent cannot stop while its brief's files are missing, and it cannot `git push`. `agent-measure` on: per-tool timing and result size inside subagents, real token totals per run, and one line to the coordinator per finished run |
 
+A hook run straight from `plugin/hooks` needs `PYTHONPATH=engine`, or it cannot import the engine.
+
 Loading the plugin from a checkout of this repository, for development, is in
 [CONTRIBUTING](../CONTRIBUTING.md).

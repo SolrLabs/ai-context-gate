@@ -10,6 +10,7 @@ from datetime import date
 from fnmatch import fnmatch
 from pathlib import Path
 
+from govern.context import EXCLUDE_HINT
 from govern.decisions import mask_lines
 from govern.findings import Findings
 from govern.manifest import Param, check
@@ -48,6 +49,8 @@ def check_doc(ctx, params: dict, path: Path, label: str, f: Findings) -> None:
             msg += f"; doc_type is one of {', '.join(params['doc_types'])}"
         if "audience" in keys:
             msg += f"; audience is one of {', '.join(params['audiences'])}"
+        if ctx is None or ctx.hint_once("exclude"):
+            msg += f" \u2014 {EXCLUDE_HINT}"
         f.error(msg)
         return
     for key in params["required_keys"]:

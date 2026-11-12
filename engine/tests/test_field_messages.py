@@ -64,7 +64,8 @@ rules = [{self.RULE}]
     def hits(self, w: Workspace) -> list[str]:
         code, out, err = w.run("check")
         self.assertNotEqual(code, 2, err)
-        return [line.strip() for line in out.splitlines() if " × " in line]
+        return [line.strip().split(" \u2014 exclude a shipped or downloaded file")[0]
+                for line in out.splitlines() if " × " in line]
 
     def test_a_file_under_build_is_left_out_with_the_hint(self):
         w = self.rules_ws()
@@ -100,6 +101,17 @@ rules = [{self.RULE}]
         _, out, _ = w.run("check")
         self.assertIn(f"all left out {self.HINT}", out)
         self.assertEqual(self.hits(w), ["ERROR  notes/a.md: 1 × 'colour' (use 'color')"])
+
+    def test_the_hint_names_the_writing_rules_exclude_setting_once(self):
+        w = self.rules_ws()
+        w.write("notes/b.md", "The colour of it.\n")
+        _, out, _ = w.run("check")
+        hits = [line for line in out.splitlines() if " × " in line]
+        self.assertEqual(len(hits), 2, out)
+        self.assertIn('with [checks.writing-rules] exclude = ["<glob>"] in '
+                      ".context-gate/config.toml", hits[0])
+        self.assertNotIn("[projects] exclude", hits[0])
+        self.assertNotIn("exclude a shipped", hits[1])
 
 
 if __name__ == "__main__":

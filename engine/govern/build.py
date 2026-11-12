@@ -24,6 +24,7 @@ import re
 import shlex
 import shutil
 import stat
+import subprocess
 import sys
 import time
 import tomllib
@@ -49,7 +50,7 @@ FAR_BEHIND = 50
 RESERVED = ("review", "fix", "close")
 # File names the Write tool refuses a subagent: no brief names its report one of these.
 REFUSED_NAMES = ("report.md", "findings.md", "summary.md", "analysis.md")
-UNIT_KEYS = ("id", "title", "role", "status", "attempts", "branch", "commit", "note")
+UNIT_KEYS = ("id", "title", "role", "status", "attempts", "branch", "commit", "note", "base", "agent")
 HEADER = "The build ledger of one phase: written only by `govern build`."
 BOM = "﻿"
 REPLACE_TRIES = 10
@@ -85,6 +86,13 @@ REPORT_NOTE = "Write the report below before your final message, and answer your
 # Said directly above a brief's `Red:` and `Produces:` lines: a committed brief holds no path of
 # this machine, and an agent in a worktree of its own reads them from the root of that tree.
 PATHS_NOTE = "Paths on the lines below are from the repository root, in your own working tree."
+
+
+def scratch_note(ledger: "Ledger", name: str) -> str:
+    """The brief line that gives one agent its own scratch folder, so agents side by side never
+    delete each other's files."""
+    return (f"Scratch files go only in {BUILD_DIR}/{ledger.dir.name}/{name}/scratch/; create "
+            f"nothing elsewhere and delete only what you created.")
 
 
 def _rel(folder: Path, path: Path) -> str:
@@ -245,7 +253,7 @@ def render(ledger: Ledger) -> str:
         head["dropped"] = list(ledger.dropped)
     text = tomlw.dumps(head, HEADER)
     for unit in ledger.units:
-        text += "\n[[unit]]\n" + tomlw.dumps({k: unit[k] for k in UNIT_KEYS})
+        text += "\n[[unit]]\n" + tomlw.dumps({k: unit.get(k, "") if k in ("base", "agent") else unit[k] for k in UNIT_KEYS})
     return text
 
 
@@ -296,7 +304,7 @@ def _shape(data: dict, folder: str) -> str | None:
         attempts = unit.get("attempts", 0)
         if isinstance(attempts, bool) or not isinstance(attempts, int):
             return f"unit `{uid}` has an `attempts` that is not a number"
-        for key in ("title", "role", "branch", "commit", "note"):
+        for key in ("title", "role", "branch", "commit", "note", "base", "agent"):
             if not isinstance(unit.get(key, ""), str):
                 return f"unit `{uid}` has a `{key}` that is not text"
     return None
@@ -335,7 +343,8 @@ def parse(text: str, path: Path) -> Ledger:
     units = [{"id": u["id"], "title": u.get("title", ""), "role": u.get("role", CODE_ROLES[0]),
               "status": u["status"], "attempts": u.get("attempts", 0),
               "branch": u.get("branch", ""), "commit": u.get("commit", ""),
-              "note": u.get("note", "")} for u in data.get("unit", [])]
+              "note": u.get("note", ""), "base": u.get("base", ""),
+              "agent": u.get("agent", "")} for u in data.get("unit", [])]
     return Ledger(path=path, phase=data["phase"], branch=data["branch"], base=data["base"],
                   plan=data.get("plan", ""), origin=data.get("from", ""), high_risk=data.get("high_risk", False),
                   visual=data.get("visual", False),
@@ -694,7 +703,7 @@ def unit_brief(ledger: Ledger, unit: dict, red: bool, rules=()) -> str:
     return (f"# {ledger.phase} / {unit['id']} — {unit['title']}\n\n"
             + _sections(UNIT_SECTIONS)
             + _rules(rules)
-            + f"{REPORT_NOTE}\n{PATHS_NOTE}\n"
+            + f"{scratch_note(ledger, unit['id'])}\n{REPORT_NOTE}\n{PATHS_NOTE}\n"
             + (f"Red: {_from_root(ledger, unit['id'], 'red')}\n" if red else "")
             + f"Produces: {_from_root(ledger, unit['id'], ledger.report(unit).name)}\n")
 
@@ -721,7 +730,7 @@ def code_reviewer_brief(root: Path, ledger: Ledger) -> str:
             f"Review the phase `{ledger.phase}` as one diff; the paths below are relative to "
             f"the folder this brief is in.\n\n"
             + _material(root, ledger, ledger.dir / "review")
-            + f"{REPORT_NOTE}\n{PATHS_NOTE}\nProduces: {_from_root(ledger, 'review', 'code-reviewer-report.md')}\n")
+            + f"{scratch_note(ledger, 'review-code')}\n{REPORT_NOTE}\n{PATHS_NOTE}\nProduces: {_from_root(ledger, 'review', 'code-reviewer-report.md')}\n")
 
 
 def qa_engineer_brief(root: Path, ledger: Ledger) -> str:
@@ -730,8 +739,7 @@ def qa_engineer_brief(root: Path, ledger: Ledger) -> str:
             f"Verify the phase `{ledger.phase}` against its definition of done.\n\n"
             + _sections((DONE_SECTION,))
             + _material(root, ledger, review, diff=False)
-            + f"Scratch files go only in {_rel(review, review / 'scratch')}.\n\n"
-            + f"{REPORT_NOTE}\n{PATHS_NOTE}\nProduces: {_from_root(ledger, 'review', 'qa-engineer-report.md')}\n")
+            + f"{scratch_note(ledger, 'review-qa')}\n{REPORT_NOTE}\n{PATHS_NOTE}\nProduces: {_from_root(ledger, 'review', 'qa-engineer-report.md')}\n")
 
 
 def ux_reviewer_brief(root: Path, ledger: Ledger) -> str:
@@ -741,17 +749,20 @@ def ux_reviewer_brief(root: Path, ledger: Ledger) -> str:
             f"changed; the paths below are relative to the folder this brief is in.\n\n"
             + _material(root, ledger, review)
             + _sections(UX_SECTIONS)
-            + f"{REPORT_NOTE}\n{PATHS_NOTE}\nProduces: {_from_root(ledger, 'review', 'ux-reviewer-report.md')}\n")
+            + f"{scratch_note(ledger, 'review-ux')}\n{REPORT_NOTE}\n{PATHS_NOTE}\nProduces: {_from_root(ledger, 'review', 'ux-reviewer-report.md')}\n")
 
 
-def fix_brief(ledger: Ledger, role: str, number: int, rules=()) -> str:
+def fix_brief(ledger: Ledger, role: str, number: int, rules=(), unit: str = "") -> str:
     """The fix pass's brief; the `number`th pass names its report `<role>-report-<number>.md`
-    (the first has no number), so no pass overwrites another's."""
+    (the first has no number), so no pass overwrites another's. A pass for one `unit` says so on
+    a `Unit:` line under its title."""
     suffix = f"-{number}" if number > 1 else ""
-    return (f"# {ledger.phase} / fix — the fix pass{f' {number}' if number > 1 else ''}\n\n"
+    return (f"# {ledger.phase} / fix — the fix pass{f' {number}' if number > 1 else ''}\n"
+            + (f"Unit: {unit}\n" if unit else "") + "\n"
             + _sections(fix_sections(_from_root(ledger, "fix", f"red{suffix}")))
             + _rules(rules)
-            + f"{FIX_RUNNING_NOTE}\n\n{REPORT_NOTE}\n{PATHS_NOTE}\n"
+            + f"{scratch_note(ledger, f'fix-{number}')}\n\n"
+            f"{FIX_RUNNING_NOTE}\n\n{REPORT_NOTE}\n{PATHS_NOTE}\n"
             f"Red: {_from_root(ledger, 'fix', f'red{suffix}')}\n"
             f"Produces: {_from_root(ledger, 'fix', f'{role}-report{suffix}.md')}\n")
 
@@ -795,7 +806,7 @@ def close_brief(root: Path, ledger: Ledger) -> str:
             + ("## What landed\n\n" + landed + "\n" if landed else "")
             + (RULINGS_HEADING + "\n\n" + rulings + "\n" if rulings else "")
             + _sections((CLOSE_SECTION,))
-            + f"{AS_BUILT_NOTE}\n\n{REPORT_NOTE}\n{PATHS_NOTE}\nProduces: "
+            + f"{scratch_note(ledger, 'close')}\n\n{AS_BUILT_NOTE}\n\n{REPORT_NOTE}\n{PATHS_NOTE}\nProduces: "
             f"{_from_root(ledger, 'close', 'technical-writer-report.md')}\n")
 
 
@@ -927,7 +938,7 @@ def status_data(root: Path, ledger: Ledger | None, branch: str) -> dict:
                 "stage": None, "ledger": None, "rulings": [], "units": [], "done": 0,
                 "total": 0, "next": nothing_in_flight(branch), "unadded": []}
     planned = planned_units(root, ledger)
-    units = [{**{k: u[k] for k in UNIT_KEYS}, "brief": _posix(_base(root, ledger.brief(u["id"])), ledger.brief(u["id"])),
+    units = [{**{k: u[k] for k in UNIT_KEYS if k not in ("base", "agent")}, "brief": _posix(_base(root, ledger.brief(u["id"])), ledger.brief(u["id"])),
               "report": _posix(_base(root, ledger.report(u)), ledger.report(u))} for u in ledger.units]
     return {"phase": ledger.phase, "branch": ledger.branch, "base": ledger.base,
             "plan": ledger.plan or None, "high_risk": ledger.high_risk, "visual": ledger.visual, "stage": ledger.stage,
@@ -1226,8 +1237,13 @@ def start(ctx, name: str, plan: str | None, high_risk: bool, source: str | None 
     measure = ctx.cfg.checks.get("agent-measure")
     if measure is not None and measure.level != "off" and not again:
         logged = session or root
-        agent_runs.mark(ctx.home, logged, name)
-        lines.append(f"phase '{name}' started in {agent_runs.durable_path(ctx.home, logged)}")
+        try:
+            agent_runs.mark(ctx.home, logged, name)
+            lines.append(f"phase '{name}' started in {agent_runs.durable_path(ctx.home, logged)}")
+        except OSError as exc:
+            print(f"warning: run record not written: "
+                  f"{exc.filename or agent_runs.durable_path(ctx.home, logged)}: "
+                  f"{exc.strerror or exc}", file=sys.stderr)
     if taken:
         lines.insert(0, f"took over {name} from {taken}")
     _say(lines + [f"Next: {next_action(ledger, planned_units(root, ledger))}"])
@@ -1273,19 +1289,37 @@ def _exclude_state(root: Path) -> None:
         raise BuildError(f"cannot write {exclude}: {exc}") from exc
 
 
+def _ledger_ignored(root: Path, ledger: Ledger) -> str | None:
+    """The `source:line:pattern` of the rule that makes git ignore the ledger; None when git
+    would commit it (a `!` negation keeps it)."""
+    state = state_root(root)
+    repo = root if state == root else _state_repo(state)
+    res = phase._run(repo, "check-ignore", "-v", "--", str(ledger.path))
+    if res.returncode != 0:
+        return None
+    # `source:line:pattern<TAB>path`; a pattern starting `!` is a rule that keeps the file.
+    found = phase._out(res).split("\t", 1)[0]
+    return None if found.split(":", 2)[-1].startswith("!") else found
+
+
+def _ignored_refusal(found: str, then: str) -> BuildError:
+    """The refusal for a ledger git ignores, worded as `_keep_in_history`'s is; `then` is what
+    to run once the rule is fixed."""
+    return BuildError(
+        f"git ignores the ledger: {found} — a ledger git does not commit is lost on the next "
+        f"clone. Add the line `!{BUILD_DIR}/` after that rule in the file named, and {then} "
+        f"(a `build/` pattern also works if it becomes `/build/`, which matches only the "
+        f"top level); nothing was changed")
+
+
 def _keep_in_history(root: Path, ledger: Ledger, wrote: Path | None) -> None:
     """Ask git whether it would commit the ledger just written. A rule in a `.gitignore` above
     the build folder (`build/` is in the stock Python, Node, Gradle and CMake ones) ignores the
     whole folder, and the folder's own negations cannot undo that. If git ignores it, remove what
     `start` wrote and say which rule, in which file, and the line that fixes it."""
     state = state_root(root)
-    repo = root if state == root else _state_repo(state)
-    res = phase._run(repo, "check-ignore", "-v", "--", str(ledger.path))
-    if res.returncode != 0:
-        return
-    # `source:line:pattern<TAB>path`; a pattern starting `!` is a rule that keeps the file.
-    found = phase._out(res).split("\t", 1)[0]
-    if found.split(":", 2)[-1].startswith("!"):
+    found = _ledger_ignored(root, ledger)
+    if found is None:
         return
     ledger.path.unlink(missing_ok=True)
     if wrote is not None:
@@ -1355,7 +1389,7 @@ def unit_add(ctx, uid: str, title: str, role: str | None, red: bool,
         raise BuildError(f"{_local(_base(root, brief), brief)} is already there and no unit owns it: remove "
                          f"it, or pick another id")
     unit = {"id": uid, "title": title, "role": role, "status": "pending", "attempts": 0,
-            "branch": "", "commit": "", "note": ""}
+            "branch": "", "commit": "", "note": "", "base": "", "agent": ""}
     ledger.units.append(unit)
     save(ledger, [(brief, unit_brief(ledger, unit, red, _brief_lines(ctx)).encode("utf-8"))])
     _say([f"added unit {uid} for {role}: {title}", f"wrote {_local(_base(root, brief), brief)}",
@@ -1437,6 +1471,130 @@ def _copy_from_branch(root: Path, branch: str, folder: str, ignored_only: bool,
     return lines or [f"nothing to copy from the worktree of {branch}"]
 
 
+# Folders and files an ignored-file warning does not name: caches a tool rebuilds.
+_CACHE = ("__pycache__", "node_modules", ".pytest_cache")
+
+
+def _scope_paths(text: str) -> list[str]:
+    """The paths a report's `Scope:` line names, in order. Fenced code and comments are not read."""
+    lines = text.splitlines()
+    live = mask_lines(lines, Markers("\x00"))
+    for line, ok in zip(lines, live):
+        found = re.match(r"^[\s>*\-\d.]*`?scope`?\s*:`?\s*(.*)$", line, re.IGNORECASE) if ok else None
+        if not found:
+            continue
+        rest = found.group(1)
+        names = re.findall(r"`([^`]+)`", rest) or re.split(r"[,;\s]+", rest)
+        out = []
+        for name in names:
+            name = name.strip().strip("*").rstrip(".,;:").replace("\\", "/")
+            if name and ("/" in name or "." in name.strip(".")) and " " not in name:
+                out.append(name)
+        return out
+    return []
+
+
+def _handback(ctx, ledger: Ledger, unit: dict, branch: str) -> tuple[list[str], list[str]]:
+    """What stops a unit from being marked done on `branch`, and what only deserves a look.
+    Reads git and the worktree; changes nothing."""
+    root = ctx.root
+    base = unit.get("base") or ledger.base
+    short = base[:7]
+    refusals: list[str] = []
+    warnings: list[str] = []
+    if not phase._yes(root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"):
+        raise BuildError(f"there is no branch {branch} here: nothing was changed")
+    span = f"{base}..refs/heads/{branch}"
+    count = phase._ask(root, "rev-list", "--count", span)
+    if count == "0":
+        refusals.append(f"branch has no commit past its base {short}")
+    diff = phase._run(root, "diff", "--name-only", "-z", span)
+    if diff.returncode != 0:
+        raise BuildError(f"git diff failed: {phase._reason(diff)}")
+    changed = [n for n in diff.stdout.decode("utf-8", errors="replace").split("\0") if n]
+    if not changed:
+        refusals.append(f"branch changes nothing since its base {short}")
+    tree = _branch_tree(root, branch)
+    top = None
+    if tree is not None:
+        top = Path(phase._ask(tree, "rev-parse", "--show-toplevel"))
+        res = phase._run(tree, "status", "--porcelain", "-z", "--untracked-files=all")
+        if res.returncode != 0:
+            raise BuildError(f"git status failed in {tree}: {phase._reason(res)}")
+        dirty, skip = [], False
+        for entry in res.stdout.decode("utf-8", errors="replace").split("\0"):
+            if skip:
+                skip = False      # the old name of a rename or copy
+                continue
+            if len(entry) < 4:
+                continue
+            skip = entry[0] in "RC" or entry[1] in "RC"
+            path = entry[3:]
+            if not (path.startswith(f"{BUILD_DIR}/") or f"/{BUILD_DIR}/" in path):
+                dirty.append(path)
+        if dirty:
+            more = f" (and {len(dirty) - 10} more)" if len(dirty) > 10 else ""
+            refusals.append(f"uncommitted changes in {tree}: {', '.join(dirty[:10])}{more}")
+    found = _ledger_ignored(root, ledger)
+    if found is not None:
+        refusals.append(_ignored_refusal(found, "run this again").args[0])
+    patterns = roles.forbidden_trailers(ctx.cfg.checks[roles.CHECK].params)
+    if patterns and count != "0":
+        res = phase._run(root, "log", "--format=%h%x1f%B%x1e", span)
+        for entry in res.stdout.decode("utf-8", errors="replace").split("\x1e"):
+            sha, _, body = entry.strip("\n").partition("\x1f")
+            for rx in patterns:
+                hit = rx.search(body)
+                if hit:
+                    row = body[:hit.start()].count("\n")
+                    line = body.splitlines()[row] if row < len(body.splitlines()) else hit.group(0)
+                    refusals.append(f"commit {sha.strip()} carries a forbidden line "
+                                    f"({line.strip()}): rewrite the unpushed commit before "
+                                    f"merging")
+                    break
+    report = ledger.report(unit)
+    sources = [report]
+    if tree is not None and root.resolve() in report.resolve().parents:
+        sources.append(tree / report.resolve().relative_to(root.resolve()))
+    for source in sources:
+        try:
+            text = source.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        warnings += [f"the report's Scope names {name}, which the branch does not change"
+                     for name in _scope_paths(text) if name not in changed]
+        break
+    if top is not None:
+        folders = sorted({Path(n).parent.as_posix() for n in changed
+                          if Path(n).parent.as_posix() != "."})
+        res = phase._run(top, "ls-files", "--others", "--ignored", "--exclude-standard", "-z",
+                         "--", *folders) if folders else None
+        if res is not None and res.returncode == 0:
+            left = [n for n in res.stdout.decode("utf-8", errors="replace").split("\0")
+                    if n and not n.startswith(f"{BUILD_DIR}/")      # reports: `unit set` copies them
+                    and not any(part in _CACHE or part.endswith(".pyc")
+                                for part in Path(n).parts)]
+            if left:
+                warnings.append(f"git ignores {', '.join(left[:5])}"
+                                + (f" (and {len(left) - 5} more)" if len(left) > 5 else "")
+                                + " in a folder the branch changes")
+    return refusals, warnings
+
+
+def verify(ctx, uid: str, branch: str, project: str | None = None) -> int:
+    """Say whether `branch` could be marked done for unit `uid`; changes nothing. Exit 1 on a
+    refusal."""
+    ledger = _need(ctx, project)
+    unit = ledger.unit(uid)
+    if unit is None:
+        known = ", ".join(u["id"] for u in ledger.units) or "it has none yet"
+        raise BuildError(f"the phase {ledger.phase} has no unit {uid} ({known})")
+    refusals, warnings = _handback(ctx, ledger, unit, branch)
+    _say([f"refused: {r}" for r in refusals] + [f"warning: {w}" for w in warnings]
+         or [f"{branch} is ready to be marked done"])
+    return 1 if refusals else 0
+
+
 def collect(ctx, branch: str, project: str | None = None) -> int:
     """The files an agent that is not a unit left in its worktree, in this checkout."""
     ledger = _need(ctx, project)
@@ -1445,8 +1603,142 @@ def collect(ctx, branch: str, project: str | None = None) -> int:
     return 0
 
 
+GATE_RECORD = "gate/last.json"
+GATE_LOG = "gate/last.log"
+GATE_TAIL = 15
+AFTER_RED = ('run python3 .context-gate/bin/govern build gate and get it green, or pass '
+             '--accept-red "<reason>"')
+
+
+def _gate_params(ctx) -> dict:
+    check = ctx.cfg.checks.get(roles.CHECK)
+    return check.params if check is not None else {}
+
+
+def _full_gate(ctx) -> str:
+    return str(_gate_params(ctx).get("full_gate", "") or "").strip()
+
+
+def _unit_gate(ctx) -> str:
+    return _gate_params(ctx).get("unit_gate", "scoped")
+
+
+def _gate_record(ledger: Ledger) -> dict | None:
+    """What `build gate` last wrote for this phase; None when there is none or it is unreadable."""
+    try:
+        data = json.loads((ledger.dir / GATE_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _write_record(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="\n")
+    _replace(tmp, path)
+
+
+def _outside_build(root: Path, *args: str) -> list[str] | None:
+    """The lines git prints for `args`, less the build folder; None when git cannot say."""
+    try:
+        res = phase._run(root, *args, "--", ".", f":(exclude){BUILD_DIR}")
+    except phase.PhaseError:
+        return None
+    if res.returncode != 0:
+        return None
+    return [ln for ln in phase._out(res).splitlines() if ln.strip()]
+
+
+def _now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+def _head(root: Path) -> str:
+    try:
+        return phase._out(phase._run(root, "rev-parse", "HEAD"))
+    except phase.PhaseError:
+        return ""
+
+
+def gate(ctx, cmd: str | None = None, project: str | None = None) -> int:
+    """Run the project's full gate; record its exit status for this phase unless `cmd` is given."""
+    ledger = _need(ctx, project)
+    root = ctx.root
+    run_cmd = cmd or _full_gate(ctx)
+    if not run_cmd:
+        print("no full_gate set under [checks.agent-roles]; nothing was run")
+        return 1
+    record, log = ledger.dir / GATE_RECORD, ledger.dir / GATE_LOG
+    if not cmd:
+        _write_record(record, {"status": "running", "at": _now()})
+    log.parent.mkdir(parents=True, exist_ok=True)
+    # What the gate tests is the tree as it is when it starts: a commit made while it runs (a
+    # merge in the background) leaves the record stale, never recorded as tested.
+    head = _head(root)
+    changed = _outside_build(root, "status", "--porcelain")
+    dirty = changed is None or bool(changed)
+    started = time.monotonic()
+    with open(log, "wb") as out:
+        rc = subprocess.run(run_cmd, shell=True, cwd=root, stdin=subprocess.DEVNULL,
+                            stdout=out, stderr=subprocess.STDOUT).returncode
+    seconds = round(time.monotonic() - started)
+    if _head(root) != head:
+        dirty = True
+    if not cmd:
+        _write_record(record, {"status": "done", "rc": rc, "head": head,
+                               "dirty": dirty, "seconds": seconds,
+                               "at": _now(), "cmd": run_cmd})
+    lines = [f"gate {'green' if rc == 0 else 'red'} (rc {rc}, {seconds} s, head {head[:7]})",
+             f"log: {_local(_base(root, log), log)}"]
+    if rc != 0:
+        text = log.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines += text[-GATE_TAIL:]
+    _say(lines)
+    return 0 if rc == 0 else 1
+
+
+def _need_green(ctx, ledger: Ledger, step: str) -> str | None:
+    """Why `step` may not go on: the phase's last full gate is red, missing or stale; None when
+    it is green for this tree. Work under the build folder does not make a record stale."""
+    tail = f": {AFTER_RED}"
+    rec = _gate_record(ledger)
+    if rec is None or rec.get("status") != "done":
+        return f"cannot {step}: no full gate has run on this phase{tail}"
+    head = str(rec.get("head") or "")
+    short = head[:7]
+    if rec.get("rc") != 0:
+        return f"cannot {step}: the last full gate is red (rc {rec.get('rc')} at {short}){tail}"
+    if rec.get("dirty") is not False:
+        return (f"cannot {step}: the last full gate is stale: the tree had uncommitted changes "
+                f"at {short}{tail}")
+    moved = _outside_build(ctx.root, "diff", "--name-only", head, "HEAD") if head else None
+    if moved is None:
+        return (f"cannot {step}: the last full gate is stale: git cannot compare {short} with "
+                f"HEAD{tail}")
+    if moved:
+        return (f"cannot {step}: the last full gate is stale: {len(moved)} files changed since "
+                f"{short}{tail}")
+    return None
+
+
+def _gated(ctx, ledger: Ledger, step: str, accept_red: str | None,
+           project: str | None) -> Ledger:
+    """Refuse `step` unless the full gate is green; `accept_red` lets it through with a ruling.
+    Returns the ledger to go on with: reloaded when the ruling changed it."""
+    refusal = _need_green(ctx, ledger, step)
+    if refusal is None:
+        return ledger
+    if not accept_red or not accept_red.strip():
+        raise BuildError(refusal)
+    what = refusal.split(": ", 1)[1].rsplit(": " + AFTER_RED, 1)[0]
+    ruling(ctx, f"{step} accepted although {what}. Reason: {accept_red}", project)
+    return _need(ctx, project)
+
+
 def unit_set(ctx, uid: str, status: str, branch: str | None, commit: str | None,
-             note: str | None, role: str | None = None, project: str | None = None) -> int:
+             note: str | None, role: str | None = None, project: str | None = None,
+             accept_red: str | None = None, agent: str | None = None) -> int:
     ledger = _need(ctx, project)
     unit = ledger.unit(uid)
     if unit is None:
@@ -1455,13 +1747,25 @@ def unit_set(ctx, uid: str, status: str, branch: str | None, commit: str | None,
     if status not in STATUSES:
         raise BuildError(f"{status!r} is not a status: {', '.join(STATUSES)}")
     role = _code_role(ctx, role) if role else unit["role"]
+    if status == "done" and branch:
+        refusals, warnings = _handback(ctx, ledger, unit, branch)
+        if refusals:
+            raise BuildError(f"{branch} cannot be marked done for {uid}: " + "; ".join(refusals)
+                             + " — nothing was changed")
+        for w in warnings:
+            print(f"warning: {w}", file=sys.stderr)
+    if status == "done" and _full_gate(ctx) and _unit_gate(ctx) == "scoped":
+        ledger = _gated(ctx, ledger, f"mark {uid} done", accept_red, project)
+        unit = ledger.unit(uid)
     earlier, unit["role"] = unit["role"], role
     unit["status"] = status
     if status == "running":
         unit["attempts"] += 1
-    for key, value in (("branch", branch), ("commit", commit), ("note", note)):
+    for key, value in (("branch", branch), ("commit", commit), ("note", note), ("agent", agent)):
         if value is not None:
             unit[key] = _one_line(value)
+    if status in ("failed", "blocked"):
+        unit["agent"] = ""
     brief = ledger.brief(uid)
     old = new = brief.read_bytes() if brief.is_file() else b""
     if role != earlier:
@@ -1547,7 +1851,7 @@ def status(ctx, as_json: bool, project: str | None = None, team: bool = False) -
     return 0
 
 
-def review(ctx, project: str | None = None) -> int:
+def review(ctx, project: str | None = None, accept_red: str | None = None) -> int:
     root = ctx.root
     ledger = _need(ctx, project)
     if ledger.visual:
@@ -1557,6 +1861,11 @@ def review(ctx, project: str | None = None) -> int:
     waiting = [f"{u['id']} is {u['status']}" for u in ledger.units if u["status"] != "done"]
     if waiting:
         raise BuildError("not every unit is done: " + ", ".join(waiting))
+    found = _ledger_ignored(root, ledger)
+    if found is not None:
+        raise _ignored_refusal(found, "run review again")
+    if _full_gate(ctx):
+        ledger = _gated(ctx, ledger, "start review", accept_red, project)
     folder = ledger.dir / "review"
     ledger.stage = "review"
     reviewer, qa = folder / "code-reviewer-brief.md", folder / "qa-engineer-brief.md"
@@ -1593,9 +1902,12 @@ def _filled(brief: Path) -> bool:
     return not agent_runs.unfilled(brief.read_text(encoding="utf-8"))
 
 
-def fix(ctx, role: str | None = None, project: str | None = None) -> int:
+def fix(ctx, role: str | None = None, project: str | None = None, unit: str | None = None) -> int:
     root = ctx.root
     ledger = _need(ctx, project)
+    if unit is not None and ledger.unit(unit) is None:
+        known = ", ".join(u["id"] for u in ledger.units) or "it has none yet"
+        raise BuildError(f"the phase {ledger.phase} has no unit {unit} ({known})")
     if ledger.stage not in ("review", "fix", "closing"):
         raise BuildError(f"the phase {ledger.phase} is in stage {ledger.stage}: a fix pass "
                          f"follows its review, so run `{govern_build(ledger.project)} review` first")
@@ -1613,7 +1925,7 @@ def fix(ctx, role: str | None = None, project: str | None = None) -> int:
         raise BuildError(f"{_local(_base(root, brief), brief)} is not filled in yet: fill it in, or delete "
                          "it, before asking for another fix brief")
     ledger.stage = "fix"
-    save(ledger, [(brief, fix_brief(ledger, role, number, _brief_lines(ctx)).encode("utf-8"))])
+    save(ledger, [(brief, fix_brief(ledger, role, number, _brief_lines(ctx), unit or "").encode("utf-8"))])
     _say([f"wrote {_local(_base(root, brief), brief)}", _then("fix", "its ranked list", ledger.project)])
     return 0
 
@@ -1669,6 +1981,12 @@ def _fix_briefs(ledger: Ledger) -> list[Path]:
     return sorted((ledger.dir / "fix").glob("brief*.md"), key=lambda p: (len(p.name), p.name))
 
 
+def _fix_unit(text: str) -> str:
+    """The unit a fix brief is for: its `Unit:` line, directly under the title; else empty."""
+    lines = text.splitlines()
+    return lines[1][len("Unit: "):].strip() if len(lines) > 1 and lines[1].startswith("Unit: ") else ""
+
+
 def _covered(root: Path, ledger: Ledger, what: str) -> list[tuple[str, Path]]:
     """The (role, brief) pairs `build launch <what>` covers, each brief there."""
     first = what if what in RESERVED else ""
@@ -1708,6 +2026,14 @@ def _covered(root: Path, ledger: Ledger, what: str) -> list[tuple[str, Path]]:
 AGAIN = "every fix brief was launched before; this is the latest again:"
 
 
+def _no_index(folder: Path) -> None:
+    """Ask the desktop search indexer not to index `folder`; any failure is ignored."""
+    try:
+        (folder / ".metadata_never_index").touch()
+    except OSError:
+        pass
+
+
 def _agent_tree(member: Path, session: Path, project: str, slug: str, uid: str) -> Path:
     """The worktree of `member` an agent of unit `uid` works in, made if it is not there:
     `<session>/.claude/worktrees/<project>-<slug>-<uid>` on the branch `build/<slug>/<uid>`. One
@@ -1727,6 +2053,7 @@ def _agent_tree(member: Path, session: Path, project: str, slug: str, uid: str) 
                              "worktree, then launch")
         head = phase._ask(member, "rev-parse", "HEAD")
         path.parent.mkdir(parents=True, exist_ok=True)
+        _no_index(path.parent)
         res = phase._run(member, "worktree", "add", str(path), "-b", branch, head)
         if res.returncode != 0:
             raise BuildError(f"git worktree add {path} failed: {phase._reason(res)}")
@@ -1791,6 +2118,22 @@ def _retry_base(root: Path, ledger: Ledger, unit: dict, head: str) -> str:
     return new
 
 
+def _resumes(root: Path, ledger: Ledger, found: list[tuple[str, Path]]) -> dict[Path, str]:
+    """The fix briefs whose unit's builder is resumed, each with that agent: the unit is done and
+    has an agent, and the brief is among the first 3 fix briefs that name the unit."""
+    seen: dict[str, int] = {}
+    out = {}
+    for path in _fix_briefs(ledger):
+        uid = _fix_unit(_text(root, path))
+        unit = ledger.unit(uid) if uid else None
+        if unit is None:
+            continue
+        seen[uid] = seen.get(uid, 0) + 1
+        if seen[uid] <= 3 and unit["agent"] and unit["status"] == "done":
+            out[path] = unit["agent"]
+    return {brief: out[brief] for _, brief in found if brief in out}
+
+
 def launch(ctx, what: str, project: str | None = None, session: Path | None = None) -> int:
     """Check every brief `what` covers (filled in, committed at HEAD), mark a unit running, and
     print each launch prompt: the role, the brief's path from the repository root, and for a role
@@ -1800,6 +2143,9 @@ def launch(ctx, what: str, project: str | None = None, session: Path | None = No
     root = ctx.root
     ledger = _need(ctx, project)
     found = _covered(root, ledger, what)
+    ignored = _ledger_ignored(root, ledger)
+    if ignored is not None:
+        raise _ignored_refusal(ignored, "run launch again")
     state = state_root(root)
     moved = state != root
     # The brief's state is in the workspace's repository when `build_root` moved it.
@@ -1823,10 +2169,18 @@ def launch(ctx, what: str, project: str | None = None, session: Path | None = No
     again = what == "fix" and all(p.name in ledger.launched for p in _fix_briefs(ledger))
     if again:
         lines.append(AGAIN)
+    resume = _resumes(root, ledger, found) if what == "fix" else {}
     for role, brief in found:
-        lines += [f"launch {role} with the prompt:", launch_line(str(brief) if moved else prefix + _posix(root, brief))]
+        if brief in resume:
+            lines += [f"resume {resume[brief]} with SendMessage, the prompt:", f"Resume: {resume[brief]}",
+                      launch_line(str(brief) if moved else prefix + _posix(root, brief))]
+        else:
+            lines += [f"launch {role} with the prompt:",
+                      launch_line(str(brief) if moved else prefix + _posix(root, brief))]
         if role in WORKTREE_ROLES:
-            lines.append(f"Base: {base}")
+            if (root / ".claude" / "worktrees").is_dir():
+                _no_index(root / ".claude" / "worktrees")
+            lines += [f"Base: {base}", f"Phase branch: {ledger.branch}"]
             if project:
                 uid = what if what not in RESERVED else brief.parent.name \
                     + ("-" + brief.stem if what == "fix" else "")
@@ -1838,6 +2192,8 @@ def launch(ctx, what: str, project: str | None = None, session: Path | None = No
     if unit is not None:
         unit["status"] = "running"
         unit["attempts"] += 1
+        unit["base"] = base
+        unit["agent"] = ""
         save(ledger)
     elif what == "fix" and not again:
         ledger.launched += [brief.name for _, brief in found]
@@ -1895,23 +2251,28 @@ def run(ctx, args) -> int:
             if args.unit_cmd == "drop":
                 return unit_drop(ctx, args.id, project)
             return unit_set(ctx, args.id, args.status, args.branch, args.commit, args.note,
-                            args.role, project)
+                            args.role, project, args.accept_red, args.agent)
         if args.build_cmd == "launch":
             return launch(ctx, args.what, project, session)
         if args.build_cmd == "collect":
             return collect(ctx, args.branch, project)
+        if args.build_cmd == "verify":
+            return verify(ctx, args.id, args.branch, project)
+        if args.build_cmd == "gate":
+            return gate(ctx, args.gate_cmd, project)
         if args.build_cmd == "ruling":
             return ruling(ctx, " ".join(args.text), project)
         if args.build_cmd == "status":
             return status(ctx, args.as_json, project, args.team)
         if args.build_cmd == "review":
-            return review(ctx, project)
+            return review(ctx, project, args.accept_red)
         if args.build_cmd == "fix":
-            return fix(ctx, args.role, project)
+            return fix(ctx, args.role, project, args.unit)
         return close(ctx, project)
     except (BuildError, phase.PhaseError) as exc:
         print(f"error: {exc}", file=sys.stderr)
     except OSError as exc:
-        where = f"{exc.filename}: " if exc.filename else ""
-        print(f"error: {where}{exc.strerror or exc} — nothing was written", file=sys.stderr)
+        where = f" at {exc.filename}" if exc.filename else ""
+        print(f"error: stopped{where}: {exc.strerror or exc}; anything written before it "
+              "stays (python3 .context-gate/bin/govern build status shows it)", file=sys.stderr)
     return 1

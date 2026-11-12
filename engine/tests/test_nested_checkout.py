@@ -266,6 +266,38 @@ class NestedCheckout(Fixture):
         self.assertIn("link target does not exist: a.md — deleted in", out)
 
 
+class IgnoredClone(Fixture):
+    """A git clone inside a folder the governed folder's own repo ignores is not the
+    project's documentation, whatever its own (empty) ignore rules say."""
+
+    def clone(self, folder: str) -> None:
+        self.write(f"{NESTED}/{folder}/docs/x.md", "no frontmatter at all\n")
+        git(self.mod / folder, "init", "-q")
+
+    def test_a_clone_in_an_ignored_folder_is_not_governed(self):
+        self.write(f"{NESTED}/.gitignore", "docs/scratch.md\nscratch-clones/\n")
+        self.clone("scratch-clones/verify")
+        self.assertEqual(self.governed(), ["DECISIONS.md", "docs/INDEX.md", *self.DOCS])
+        code, out = self.run_cli("check")
+        self.assertNotIn("scratch-clones", out)
+
+    def test_a_clone_the_repo_does_not_ignore_is_still_governed(self):
+        self.clone("kept-clones/verify")
+        self.assertIn("kept-clones/verify/docs/x.md", self.governed())
+
+    def test_a_failing_git_keeps_the_clone_governed(self):
+        self.write(f"{NESTED}/.gitignore", "scratch-clones/\n")
+        self.clone("scratch-clones/verify")
+        real = subprocess.run
+
+        def failing(argv, *a, **kw):
+            if "check-ignore" in argv:
+                return subprocess.CompletedProcess(argv, 128, b"", b"fatal: lock")
+            return real(argv, *a, **kw)
+        with mock.patch("govern.context.subprocess.run", failing):
+            self.assertIn("scratch-clones/verify/docs/x.md", self.governed())
+
+
 class SnapshotIgnores(Fixture):
     """Under `check --path`, which snapshot files git ignores is asked of the snapshot's
     own repo (or `--history-from`'s), never of the root. The shape is the project's own CI: a

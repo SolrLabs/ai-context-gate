@@ -17,7 +17,7 @@ When your launch prompt has a `Base:` line, run `git merge --ff-only <that commi
 
 When your launch prompt has a `Worktree:` line, that folder is your own worktree, and every path on the `Brief:` line and inside the brief that is not absolute is under it. Each Bash call starts in the session's folder, not yours, so name the worktree in every command: `git -C <that path> ...`, absolute paths for files and for test commands, or `cd <that path> && <command>` in a single call. Use absolute paths under it with Read, Edit and Write. Commit and write your report only there.
 
-Your launch prompt names a brief file on a `Brief:` line. A path on the `Brief:` line, or on a contract line inside the brief, that does not start at the root of the file system is from the root of the repository: read and write it in your own working tree. Never write outside your working tree; an agent in a worktree of its own is refused there. It says what landed or was decided. You do not decide; you record. If the brief asks you to change what a decision says, and not only how it reads, stop and report.
+{{worktree_setup}}Your launch prompt names a brief file on a `Brief:` line. A path on the `Brief:` line, or on a contract line inside the brief, that does not start at the root of the file system is from the root of the repository: read and write it in your own working tree. Never write outside your working tree; an agent in a worktree of its own is refused there. It says what landed or was decided. You do not decide; you record. If the brief asks you to change what a decision says, and not only how it reads, stop and report.
 
 ## How to work
 

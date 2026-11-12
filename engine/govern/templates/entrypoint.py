@@ -331,6 +331,13 @@ def _place(engine: Path, version: str) -> None:
             pass
 
 
+def _publish_hint(version: str) -> str:
+    """What to try when a beta's tag is not at the public source: the tag may exist only on the
+    private repository."""
+    return (f"if this beta was tagged only on the private repository, publish it with "
+            f"python3 tools/release/publish.py v{version} --public <dir> --push")
+
+
 def bootstrap(version: str, source: str, then=None) -> Path:
     """Install one engine release from its source: the tag's engine/govern, read-only, copied
     beside its place and moved in whole (_place), so a copy that fails leaves no engine
@@ -354,8 +361,10 @@ def bootstrap(version: str, source: str, then=None) -> Path:
         except OSError as exc:              # no git to run
             die(f"could not fetch engine v{version} from {source}: {exc}")
         if res.returncode != 0:
+            hint = f" — {_publish_hint(version)}" if BETA_RE.fullmatch(version) else ""
             die(f"could not fetch engine v{version} from {source}: "
-                + "; ".join(line.strip() for line in res.stderr.splitlines() if line.strip()))
+                + "; ".join(line.strip() for line in res.stderr.splitlines() if line.strip())
+                + hint)
         engine = Path(tmp) / "engine" / "govern"
         try:
             carried = (engine / "__init__.py").read_text(encoding="utf-8")
@@ -754,10 +763,12 @@ def _missing(version: str) -> str | None:
     install it by hand; None when its engine and the local plugin both are."""
     if not (ENGINES / version / "govern" / "cli.py").is_file():
         return (f"engine {version} is not installed — from a clone of the repository, run: "
-                f"python3 tools/release/install-engine.py v{version}")
+                f"python3 tools/release/install-engine.py v{version} "
+                f"({_publish_hint(version)})")
     if _plugin_release() != f"v{version}":
         return (f"the local plugin is not {version} — from a clone of the repository, run: "
-                f"python3 tools/release/install-plugin.py v{version}")
+                f"python3 tools/release/install-plugin.py v{version} "
+                f"({_publish_hint(version)})")
     return None
 
 
@@ -876,60 +887,83 @@ def _beta_on(version: str) -> int:
     return 0
 
 
-def _own_settings(raw: bytes) -> list[str] | None:
-    """What local.toml holds besides its [governance] table, as the lines to show: its text
-    without that table's lines (the header through the line before the next table header, less
-    a run of comment lines directly above that header), or all of it when it does not parse or
-    when those lines do not parse to what the file holds besides [governance]. [] when nothing but comments is left; None when it is not
-    UTF-8 text. Never raises: `beta off` must work whatever the file holds."""
-    try:
-        lines = [line.rstrip("\r") for line in raw.decode("utf-8-sig").split("\n")]
-    except UnicodeDecodeError:
-        return None
+def _beta_keys_removed(raw: bytes) -> bytes | None:
+    """local.toml's bytes without the `engine` and `plugins_before` lines of its [governance]
+    table, and the table itself (its header through the line before the next header, less a run
+    of comment lines directly above that header) when nothing else is left in it; every other
+    byte as it was. None when the file does not parse, or when the edit does not parse to the
+    file less those two keys: a text edit understands only the plain one-line forms, so anything
+    else is the user's to edit."""
     try:
         parsed = tomllib.loads(raw.decode("utf-8"))
-    except (ValueError, RecursionError):
-        pass
-    else:
-        own = {k: v for k, v in parsed.items() if k != "governance"}
-        if not own:
-            return []
-        kept, inside, held = [], False, []
-        for line in lines:
-            if re.match(r"[ \t]*\[", line):
-                if inside:
-                    kept.extend(held)       # the comments directly above the next table are its own
-                held = []
-                inside = bool(re.fullmatch(r"[ \t]*\[[ \t]*governance[ \t]*\][ \t]*(?:#.*)?", line))
-            elif inside:
-                held = held + [line] if line.lstrip().startswith("#") else []
-            if not inside:
-                kept.append(line)
-        # The line filter is only trusted when what it keeps parses to what the file holds
-        # besides [governance] (less its sub-tables, which are shown): a header look-alike in a
-        # string or an array fools it.
-        try:
-            shown = tomllib.loads("\n".join(kept))
-        except (ValueError, RecursionError):
-            shown = None
-        sub = shown.pop("governance", {}) if shown is not None else {}   # [governance.x] tables
-        gov = parsed.get("governance")
-        same = shown == own and isinstance(gov, dict) and all(
-            k in gov and gov[k] == v for k, v in sub.items())
-        if same:
-            lines = kept
-    while lines and not lines[-1].strip():
-        lines.pop()
-    while lines and not lines[0].strip():
-        lines.pop(0)
-    return lines
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return None
+    lines = raw.split(b"\n")
+    gov_header = re.compile(rb"[ \t]*\[[ \t]*governance[ \t]*\][ \t]*(?:#.*)?\r?")
+    key = re.compile(rb"[ \t]*(?:engine|plugins_before)[ \t]*=.*")
+    out, region, inside = [], [], False
+
+    def close() -> bool:
+        """Add the region's lines to out; whether the table was dropped."""
+        keep = [x for x in region if not key.fullmatch(x)]
+        if any(x.strip() and not x.lstrip().startswith(b"#") for x in keep[1:]):
+            out.extend(keep)
+            return False
+        tail = []
+        for x in reversed(region):          # the comments directly above the next table are its
+            if not x.lstrip().startswith(b"#"):
+                break
+            tail.append(x)
+        out.extend(reversed(tail))
+        return True
+
+    for line in lines:
+        if re.match(rb"[ \t]*\[", line):
+            if inside:
+                close()
+            region, inside = [], bool(gov_header.fullmatch(line))
+        if inside:
+            region.append(line)
+        else:
+            out.append(line)
+    if inside and close():                  # the table was last: the blank lines before it go
+        while out and not out[-1].strip():
+            out.pop()
+        out.append(b"")
+    edited = b"\n".join(out)
+    gov = parsed.get("governance", {})
+    if not isinstance(gov, dict):
+        return None
+    gov = dict(gov)
+    gov.pop("engine", None)
+    gov.pop("plugins_before", None)
+    expect = {k: v for k, v in parsed.items() if k != "governance"}
+    if gov:
+        expect["governance"] = gov
+    try:
+        if tomllib.loads(edited.decode("utf-8")) != expect:
+            return None
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return None
+    return edited
 
 
 def _beta_off() -> int:
-    """Remove local.toml and put the two plugin keys back as beta on found them (a key it did
-    not find is deleted); needs no engine, and is idempotent. Whatever else the user kept in
-    local.toml goes with it, so it is printed for them to copy."""
+    """Take the beta out of local.toml and put the two plugin keys back as beta on found them (a
+    key it did not find is deleted); needs no engine, and is idempotent. Only the engine and
+    plugins_before lines of [governance] go: local.toml is deleted when nothing else is in it,
+    and a file that cannot be edited that way is left as it is, with exit 1."""
     if not LOCAL.is_file():
+        print("no beta is on in this project")
+        return 0
+    saved = _snapshot(LOCAL, SETTINGS_LOCAL)
+    kept = _beta_keys_removed(saved[LOCAL])
+    if kept is None:
+        print(f"{GOV_DIR.name}/local.toml could not be edited (it does not parse, or holds the "
+              "beta in a form this command does not edit): remove the engine and plugins_before "
+              "lines under [governance] by hand; nothing changed", file=sys.stderr)
+        return 1
+    if not _local_governance().keys() & {"engine", "plugins_before"}:
         print("no beta is on in this project")
         return 0
     data = _settings()
@@ -937,8 +971,6 @@ def _beta_off() -> int:
     before = _local_governance().get("plugins_before")
     before = before if isinstance(before, dict) else {}
     version = _local_engine()
-    saved = _snapshot(LOCAL, SETTINGS_LOCAL)
-    own = _own_settings(saved[LOCAL] or b"")
     changed = []
     try:
         for k in (OLD_BETA_PLUGIN, BETA_PLUGIN, STABLE_PLUGIN):
@@ -960,25 +992,21 @@ def _beta_off() -> int:
             del data["enabledPlugins"]
         if changed:
             _write_settings(data)
-        LOCAL.unlink()
+        if tomllib.loads(kept.decode("utf-8")):
+            _replace(LOCAL, kept)
+        else:
+            LOCAL.unlink()
     except OSError as exc:
         _put_back(saved, f"could not switch the beta off ({exc})")
     label = f"beta {version}" if isinstance(version, str) else "the beta"
     print(f"{label} off for this project, on this machine:")
-    print(f"  {GOV_DIR.name}/local.toml          removed")
+    print(f"  {GOV_DIR.name}/local.toml          "
+          + ("engine and plugins_before removed, the rest kept" if LOCAL.is_file() else "removed"))
     if changed:
         print(f"  .claude/settings.local.json       {' and '.join(changed)} put back")
     print("Back on the committed pin. Anything the beta installed outside this project (see its "
           "release\nnotes) is still installed. Restart the Claude Code session to load the stable "
           "plugin.")
-    if own is None:
-        print("local.toml was not UTF-8 text, so what it held cannot be shown.")
-    elif own:
-        shown = "\n".join(f"  {line}" if line else "" for line in own)
-        codec = sys.stdout.encoding or "utf-8"    # a console that cannot print it must not fail
-        print("local.toml held settings of your own, now removed. Copy what you want to keep into "
-              f"{GOV_DIR.name}/config.toml:\n"
-              + shown.encode(codec, "backslashreplace").decode(codec, "replace"))
     return 0
 
 

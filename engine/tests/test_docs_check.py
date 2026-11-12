@@ -34,7 +34,7 @@ class NoFrontmatter(unittest.TestCase):
             path.write_text("# Plain\n", encoding="utf-8")
             f = Findings()
             check_doc(None, params, path, "a.md", f)
-        return f.errors
+        return [e.split(" \u2014 exclude a shipped")[0] for e in f.errors]
 
     def test_no_frontmatter_names_the_keys_and_allowed_values(self):
         self.assertEqual(self.run_check(PARAMS), [
@@ -48,6 +48,20 @@ class NoFrontmatter(unittest.TestCase):
         aud = {**PARAMS, "required_keys": ["audience", "title"]}
         self.assertEqual(self.run_check(aud), [
             "a.md: no frontmatter \u2014 add audience, title; audience is one of agent, human"])
+
+    def test_the_exclude_hint_comes_once_per_run(self):
+        from govern.context import Context
+        ctx = SimpleNamespace(hint_once=Context.hint_once, _hinted=set())
+        ctx.hint_once = lambda key: Context.hint_once(ctx, key)
+        f = Findings()
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in ("a.md", "b.md"):
+                path = Path(tmp) / name
+                path.write_text("# Plain\n", encoding="utf-8")
+                check_doc(ctx, PARAMS, path, name, f)
+        hint = '[projects] exclude = ["<glob>"] in .context-gate/config.toml'
+        self.assertEqual([hint in e for e in f.errors], [True, False])
+        self.assertIn("exclude a shipped or downloaded file with " + hint, f.errors[0])
 
 
 def working(status: str, doc_type: str = "working") -> str:

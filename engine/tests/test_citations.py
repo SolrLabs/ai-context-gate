@@ -104,6 +104,46 @@ class Citations(Case):
         self.assertNotIn("gamma/src/g.py", out)
         self.assertNotIn("tools/t.py", out)
 
+    def test_a_marker_drops_its_ids_on_its_line_and_the_next(self):
+        w = self.solo(extra=ON)
+        doc(w, "docs/x.md", "<!-- decision-citations: allow P-42 -->\n"
+                            "Cites P-42 and P-7.\n\n"
+                            "Cites P-42 again. <!-- decision-citations: allow T-3, P-42 -->\n"
+                            "Cites P-42 and T-3 and T-4.\n")
+        out = self.check(w)
+        self.assertIn("docs/x.md:4: P-7 does not exist", out)
+        self.assertNotIn("docs/x.md:3:", out)
+        self.assertNotIn("P-42", out)
+        self.assertNotIn("T-3", out)
+        self.assertIn("docs/x.md:7: T-4 does not exist", out)
+
+    def test_a_marker_on_the_line_above_covers_only_the_next_line(self):
+        w = self.solo(extra=ON)
+        doc(w, "docs/x.md", "<!-- decision-citations: allow P-42 -->\n"
+                            "Cites P-42.\n"
+                            "Cites P-42 too.\n")
+        out = self.check(w)
+        self.assertNotIn("docs/x.md:4:", out)
+        self.assertIn("docs/x.md:5: P-42 does not exist", out)
+
+    def test_example_ids_are_dropped_everywhere(self):
+        w = self.solo(extra=ON + 'example_ids = ["P-42", "t-3"]\n')
+        doc(w, "docs/x.md", "Cites P-42, T-3 and P-7.\n")
+        out = self.check(w)
+        self.assertIn("docs/x.md:3: P-7 does not exist", out)
+        self.assertNotIn("P-42", out)
+        self.assertNotIn("T-3", out)
+
+    def test_a_non_string_example_id_is_a_config_problem_and_skipped(self):
+        w = self.solo(extra=ON + 'example_ids = [3, "P-42"]\n')
+        doc(w, "docs/x.md", "Cites P-42 and P-7.\n")
+        out = self.check(w)
+        self.assertNotIn("Traceback", out)
+        self.assertIn("[checks.decision-citations] example_ids[0] = 3: expected an id like P-1",
+                      out)
+        self.assertIn("docs/x.md:3: P-7 does not exist", out)
+        self.assertNotIn("P-42 does not exist", out)
+
     def test_off_reports_nothing(self):
         w = self.solo()
         doc(w, "docs/x.md", "See P-9.\n")

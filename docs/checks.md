@@ -285,6 +285,7 @@ Docs, agent definitions, build briefs and listed code files cite only decision a
 | Parameter | Type | Default | Looser when | Meaning |
 |---|---|---|---|---|
 | `code_globs` | list | `[]` | — | Code files whose comments cite ids, as globs relative to the governance root |
+| `example_ids` | list | `[]` | — | Ids written as examples, never reported (`T-3`); one place is marked with `decision-citations: allow <ids>` |
 
 ## Docs
 
@@ -797,12 +798,15 @@ The engine's agent roles and the coordinator's build rules are rendered into the
 | `operator_rules` | list | `[]` | — | Rules the operator gives every role, rendered above the project's own |
 | `handback_checks` | list | `[]` | — | Lines the operator adds to every role's hand-back checklist, each `Key: text` |
 | `brief_lines` | list | `[]` | — | Lines every brief that govern build writes carries, under ## Project rules |
+| `forbidden_trailers` | list | `[]` | — | Regular expressions; a commit message in a unit's branch with a line matching one is refused when the unit is marked done |
 | `commit_reports` | bool | `false` | — | Unit and review reports (*-report.md) are committed with the ledger, so a reviewer on another machine can read them |
 | `high_risk_paths` | list | `[]` | — | Paths that make a phase high-risk, so qa-engineer runs beside code-reviewer |
 | `visual_paths` | list | `[]` | — | Paths whose change means someone must look at the running product |
 | `escalate_after` | int | `2` | — | Failed or handed-back attempts by developer before a unit goes to senior-developer |
 | `unit_gate` | str | `"scoped"` | — | What a unit runs before it hands back: `scoped` (its own tests; the coordinator runs the full gate after the merge) or `full` |
 | `housekeeping` | bool | `true` | — | Whether the rules tell the coordinator to launch technical-writer and close the phase when a fix pass closes |
+| `fast_checks` | list | `[]` | — | Cheap whole-tree commands developer and senior-developer run once after their scoped tests and report; not rendered under `unit_gate = "full"` |
+| `worktree_setup` | str | `""` | — | One command the code and writing roles run in their worktree right after the Base merge, before the first edit |
 | `rules_file` | str | `".claude/rules/context-gate-build.md"` | — | Where the coordinator's build rules are rendered |
 
 ### `agent-references`
