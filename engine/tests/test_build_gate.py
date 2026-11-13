@@ -12,6 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import profile_guard  # noqa: E402,F401
 
 from build_support import *  # noqa: E402,F401,F403
+from base_support import BLOCK, decision, fm  # noqa: E402
+from test_build_workspace import Workspace  # noqa: E402
 
 
 def gated(cmd: str, unit_gate: str = "scoped") -> str:
@@ -152,6 +154,107 @@ class BuildGate(Build):
         with mock.patch.object(build, "_write_record", spy):
             self.go("gate")
         self.assertEqual(seen, ["running", "done"])
+
+BAD_DOC = "no frontmatter\n"
+
+
+class BuildGateCheck(Build):
+    """The gate also runs the project's own `govern check`."""
+
+    record = BuildGate.record
+    started_with = BuildGate.started_with
+    refused_done = BuildGate.refused_done
+
+    def test_a_document_error_turns_a_green_full_gate_red(self):
+        self.started_with("exit 0")
+        self.code("docs/bad.md", BAD_DOC)
+        code, out, err = self.go("gate")
+        self.assertEqual((code, err), (1, ""))
+        self.assertIn("gate red (rc 1, ", out)
+        self.assertIn("check: red (govern check)", out)
+        self.assertIn("docs/bad.md", out)
+        rec = self.record()
+        self.assertEqual((rec["rc"], rec["check_rc"]), (1, 1))
+        self.refused_done("the last full gate is red (rc 1 at")
+
+    def test_accept_red_still_passes_a_red_check(self):
+        self.started_with("exit 0")
+        self.code("docs/bad.md", BAD_DOC)
+        self.go("gate")
+        self.ok("unit", "set", "u1", "done", "--accept-red", "the doc is a fixture")
+        self.assertEqual(self.ledger()["unit"][0]["status"], "done")
+
+    def test_a_clean_tree_stays_green(self):
+        self.started_with("exit 0")
+        self.code()
+        self.ok("gate")
+        rec = self.record()
+        self.assertEqual((rec["rc"], rec["check_rc"]), (0, 0))
+
+    def test_a_red_full_gate_is_not_pushed_out_of_view_by_the_check(self):
+        self.started_with("echo boom && exit 3")
+        self.code("docs/bad.md", BAD_DOC)
+        code, out, err = self.go("gate")
+        self.assertEqual(code, 1, out)
+        self.assertIn("boom", out)
+        self.assertLess(out.index("boom"), out.index("check: red"))
+        self.assertIn("docs/bad.md", out)
+
+    def test_a_red_check_alone_names_the_offending_file(self):
+        self.started_with("exit 0")
+        self.code("docs/bad.md", BAD_DOC)
+        code, out, err = self.go("gate")
+        self.assertEqual(code, 1, out)
+        after = out.split("check: red", 1)[1]
+        self.assertIn("docs/bad.md", after)
+
+    def test_a_long_full_gate_output_does_not_hide_the_check_failure(self):
+        self.started_with("exit 0")
+        self.code("docs/bad.md", BAD_DOC)
+        for n in range(30):
+            self.code(f"docs/ok{n}.md", BAD_DOC)
+        code, out, err = self.go("gate")
+        self.assertEqual(code, 1, out)
+        self.assertLessEqual(len(out.splitlines()), 3 + 2 * build.GATE_TAIL)
+
+    def test_a_red_full_gate_keeps_its_own_rc(self):
+        self.started_with("exit 3")
+        self.code("docs/bad.md", BAD_DOC)
+        self.go("gate")
+        rec = self.record()
+        self.assertEqual((rec["rc"], rec["check_rc"]), (3, 1))
+
+    def test_gate_cmd_runs_no_check(self):
+        self.started_with("exit 0")
+        self.code("docs/bad.md", BAD_DOC)
+        code, out, err = self.go("gate", "--cmd", "exit 0")
+        self.assertEqual((code, err), (0, ""))
+        self.assertNotIn("check:", out)
+        self.assertFalse((self.dir() / "gate" / "last.json").exists())
+
+
+class BuildGateWorkspace(Workspace):
+    def test_in_a_workspace_only_the_member_is_checked(self):
+        w = self.space(extra=gated("exit 0"))
+        for n, num in (("alpha", 100), ("beta", 200)):
+            w.write(f"{n}/DECISIONS.md",
+                    fm() + "# Decisions\n" + decision(n[0].upper(), num) + "\n" + BLOCK)
+        w.run("index")
+        for n in ("alpha", "beta"):
+            w.commit("decisions", at=w.member(n), index=False)
+        for n in ("alpha", "beta"):
+            w.phase_branch(n)
+            self.ok("--project", n, "start", "p1")
+        w.write("beta/docs/bad.md", BAD_DOC)
+        w.commit("bad", at=w.member("beta"), index=False)
+        code, out, err = self.go("--project", "alpha", "gate")
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertNotIn("check:", out)
+        w.write("alpha/docs/bad.md", BAD_DOC)
+        w.commit("bad", at=w.member("alpha"), index=False)
+        code, out, err = self.go("--project", "alpha", "gate")
+        self.assertEqual((code, err), (1, ""))
+        self.assertIn("check: red (govern check --project alpha)", out)
 
 
 if __name__ == "__main__":

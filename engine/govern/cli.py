@@ -13,6 +13,7 @@ import functools
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -478,8 +479,17 @@ def cmd_index(ctx: Context) -> int:
     with none is still written — removing every doc or entry can be deliberate — but warned
     about by name: an empty block is more often every source going missing (a git-ignored
     checkout, a moved directory) than a project really emptied."""
-    pending, lines, changed, missing = render_index(ctx)
-    attrs = _attributes_update(ctx)
+    only = None
+    member = _worktree_member(ctx, Path.cwd())
+    if member:
+        scopes = ctx.registry.scopes
+        at = next(i for i, s in enumerate(scopes) if s.name == member[0])
+        scopes[at] = dataclasses.replace(scopes[at], gov=member[2])
+        only = scopes[at]
+        print(f"index: {member[0]} from the worktree {member[1]}; workspace blocks are left alone",
+              file=sys.stderr)
+    pending, lines, changed, missing = render_index(ctx, only)
+    attrs = None if only else _attributes_update(ctx)
     for path, text in pending.items():
         write(path, text)
     if attrs is not None:
@@ -509,14 +519,15 @@ def _attributes_update(ctx: Context) -> tuple[Path, str] | None:
     return path, ("\ufeff" if has_bom(path) else "") + new
 
 
-def render_index(ctx: Context) -> tuple[dict[Path, str], list[str], int, int]:
+def render_index(ctx: Context, scope=None) -> tuple[dict[Path, str], list[str], int, int]:
     """What `index` would write, built in memory and writing nothing: `(new text per file,
     report lines, blocks changed, blocks missing)`. Raises `Unreadable` for a file it cannot
-    read, before anything is written — `index` and `upgrade` both build first, then write."""
+    read, before anything is written — `index` and `upgrade` both build first, then write.
+    `scope` limits it to that one project's blocks."""
     changed, missing = 0, 0
     pending: dict[Path, str] = {}
     lines = []
-    for path, bid, build in blocks.targets(ctx):
+    for path, bid, build in blocks.targets(ctx, scope):
         rel = ctx.rel(path)
         if not path.exists():
             lines.append(f"  missing     {rel} :: {bid} (file)")
@@ -1118,6 +1129,38 @@ def main(argv: list[str] | None = None, root: Path | None = None,
         notice.emit(ctx)
 
 
+def _worktree_member(ctx: Context, cwd: Path) -> tuple[str, Path, Path] | None:
+    """`(member name, worktree top, worktree gov)` when `cwd` is in a linked git worktree of one
+    registry member's main checkout, else None. A single repo, a main checkout and any git
+    failure give None: the registry then names the checkout to read."""
+    if ctx.registry.single:
+        return None
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--show-toplevel", "--git-dir",
+             "--git-common-dir"], capture_output=True, text=True, encoding="utf-8")
+        if res.returncode != 0:
+            return None
+        lines = res.stdout.splitlines()
+        if len(lines) != 3:
+            return None
+        base = Path(cwd).resolve()
+        top, git_dir, common = (Path(line) for line in lines)
+        top, git_dir, common = (p if p.is_absolute() else base / p for p in (top, git_dir, common))
+        top, git_dir, common = top.resolve(), git_dir.resolve(), common.resolve()
+        if git_dir == common:
+            return None
+        main = common.parent
+        found = [s for s in ctx.registry.scopes if s.get("dir")
+                 and (ctx.root / s.get("dir")).resolve() == main]
+        if len(found) != 1 or found[0].gov is None:
+            return None
+        scope = found[0]
+        return scope.name, top, top / scope.gov.resolve().relative_to(main)
+    except (OSError, ValueError):
+        return None
+
+
 def dispatch(ctx: Context, args) -> int:
     if args.cmd == "index":
         return cmd_index(ctx)
@@ -1160,8 +1203,14 @@ def dispatch(ctx: Context, args) -> int:
     if args.cmd == "report":
         from govern import field_report
         return field_report.run(ctx, args)
-    code = cmd_check(ctx, getattr(args, "project", None), getattr(args, "path", None),
-                     getattr(args, "history_from", None), getattr(args, "workspace_only", False),
+    project, path = getattr(args, "project", None), getattr(args, "path", None)
+    history_from = getattr(args, "history_from", None)
+    if path is None and not getattr(args, "workspace_only", False):
+        member = _worktree_member(ctx, Path.cwd())
+        if member and project in (None, member[0]):
+            project, path, history_from = member[0], str(member[2]), str(member[1])
+            print(f"checking {member[0]} from the worktree {member[1]}", file=sys.stderr)
+    code = cmd_check(ctx, project, path, history_from, getattr(args, "workspace_only", False),
                      getattr(args, "base", None), getattr(args, "quiet", False))
     if getattr(args, "siblings", False):
         from govern import refs

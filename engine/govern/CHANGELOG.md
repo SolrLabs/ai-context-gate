@@ -4,6 +4,16 @@ Newest first. Each release says what changed and, under **Upgrading**, anything 
 do or decide. The upgrade report quotes every entry between the engine a project ran and the one
 it upgraded to.
 
+## 0.9.3 — 2026-11-13
+
+0.9.3 fixes two faults Starport reported on 0.9.2: the build gate skipped the document checks, and `build verify` warned about Scope entries that were not literal paths.
+
+**Upgrading:** nothing to configure. A document error already on a phase branch turns `build gate` red after the upgrade, and so blocks `build unit set <id> done` (scoped `unit_gate`) and `build review` until fixed or passed with `--accept-red`. Run `python3 .context-gate/bin/govern check --project <member>` (or `check` in a single repo) before upgrading in the middle of a build.
+
+- **Changed:** `govern build gate` (no `--cmd`) runs `full_gate`, then the project's `govern check` (`--project <member>` in a workspace), in process, appended to `gate/last.log` under `== govern check ==`. Red when either is red. The record gains `check_rc`; `rc` is full_gate's when non-zero, else 1 when the check failed. A red check prints `check: red (govern check [--project P])` and the check's error lines; a red full_gate prints its own last 15 lines. `--cmd` runs no check.
+- **Fixed:** `govern check` and `govern index` run in a linked git worktree of a workspace member act on that worktree (check: as `--project <member> --path <worktree gov> --history-from <worktree>`, ratchet keys at their real paths; index: only that member's blocks, written in the worktree, workspace blocks and the `.gitattributes` merge region left alone). Each says so on stderr. Single repos were already right.
+- **Fixed:** `build verify` reads Scope entries as patterns: `{a,b}` braces (spaces after commas allowed), `<stem>LO..HI<tail>` ranges (zero-padded, at most 1000), globs (`*`, `?`, `[...]` within a folder, `**` across), folders (a trailing `/`, or a path that is a changed file's folder). `**x**` bold is unwrapped; other stars kept. The comparison covers every file the branch's commits touched since the phase base, so earlier rounds count. An expanded entry with misses says `(n of m not changed: ...)`; unresolvable entries share one `could not resolve the report's Scope entries: ...` warning.
+
 ## 0.9.2 — 2026-11-12
 
 0.9.2 fixes the papercuts of the 2026-11-11 review: the build loop checks its own hand-backs, and checks stop flagging what they should not.
