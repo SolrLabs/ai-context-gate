@@ -1484,14 +1484,138 @@ def _scope_paths(text: str) -> list[str]:
         if not found:
             continue
         rest = found.group(1)
-        names = re.findall(r"`([^`]+)`", rest) or re.split(r"[,;\s]+", rest)
+        names = re.findall(r"`([^`]+)`", rest) or _split_outside_braces(rest)
         out = []
         for name in names:
-            name = name.strip().strip("*").rstrip(".,;:").replace("\\", "/")
+            name = re.sub(r",\s+(?=[^{}]*\})", ",", name.strip())
+            if len(name) > 4 and name.startswith("**") and name.endswith("**"):
+                name = name[2:-2]
+            name = name.rstrip(".,;:").replace("\\", "/")
             if name and ("/" in name or "." in name.strip(".")) and " " not in name:
                 out.append(name)
         return out
     return []
+
+
+def _split_outside_braces(text: str) -> list[str]:
+    """`text` split at commas, semicolons and whitespace that are not inside `{...}`."""
+    out, depth, cur = [], 0, []
+    for ch in text:
+        depth = max(0, depth + (ch == "{") - (ch == "}"))
+        if depth == 0 and (ch in ",;" or ch.isspace()):
+            out.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    out.append("".join(cur))
+    return [x for x in out if x]
+
+
+_RANGE_LIMIT = 1000
+_RANGE = re.compile(r"^(?P<stem>.*?)(?P<lo>\d+)\.\.(?:(?P=stem))?(?P<hi>\d+)(?P<tail>.*)$")
+
+
+def _braces(name: str) -> list[str] | None:
+    """`name` with each `{a,b}` group expanded, or None for nested or unbalanced braces."""
+    start = name.find("{")
+    if start < 0:
+        return None if "}" in name else [name]
+    end = name.find("}", start)
+    if end < 0 or "{" in name[start + 1:end]:
+        return None
+    rest = _braces(name[end + 1:])
+    if rest is None:
+        return None
+    return [name[:start] + part + tail for part in name[start + 1:end].split(",")
+            for tail in rest]
+
+
+def _glob_regex(pattern: str) -> re.Pattern:
+    """`*` and `?` within one path part, `**` across parts, `[...]` as fnmatch."""
+    out, i = [], 0
+    while i < len(pattern):
+        ch = pattern[i]
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif ch == "*":
+            out.append("[^/]*")
+            i += 1
+        elif ch == "?":
+            out.append("[^/]")
+            i += 1
+        elif ch == "[" and pattern.find("]", i + 2) > 0:
+            close = pattern.find("]", i + 2)
+            body = pattern[i + 1:close].replace("\\", "\\\\")
+            out.append("[" + ("^" + body[1:] if body.startswith("!") else body) + "]")
+            i = close + 1
+        else:
+            out.append(re.escape(ch))
+            i += 1
+    return re.compile("".join(out))
+
+
+def _range_names(name: str) -> list[str] | None:
+    """The names a `<stem><lo>..<hi><tail>` range in the last path part stands for."""
+    head, sep, last = name.rpartition("/")
+    found = _RANGE.match(last)
+    if not found or ".." in head:
+        return None
+    lo, hi = found.group("lo"), found.group("hi")
+    if int(lo) > int(hi) or int(hi) - int(lo) + 1 > _RANGE_LIMIT:
+        return None
+    return [f"{head}{sep}{found.group('stem')}{str(n).zfill(len(lo))}{found.group('tail')}"
+            for n in range(int(lo), int(hi) + 1)]
+
+
+def _parents(path: str) -> list[str]:
+    """The folders above `path`, as `a`, `a/b` for `a/b/c.py`."""
+    parts = path.split("/")[:-1]
+    return ["/".join(parts[:n]) for n in range(1, len(parts) + 1)]
+
+
+def _scope_check(token: str, changed: list[str]) -> tuple[int, list[str]] | None:
+    """How many names `token` stands for and which no changed file matches, or None."""
+    name = token.replace("\\", "/")
+    while name.startswith("./"):
+        name = name[2:]
+    groups = _braces(name)
+    if groups is None:
+        return None
+    names: list[str] = []
+    for group in groups:
+        if ".." in group:
+            expanded = _range_names(group)
+            if expanded is None:
+                return None
+            names += expanded
+        else:
+            names.append(group)
+    missing = []
+    for one in names:
+        if re.search(r"[*?\[]", one):
+            if one.endswith("/"):
+                rx = _glob_regex(one.rstrip("/"))
+                hit = any(rx.fullmatch(parent) for c in changed for parent in _parents(c))
+            else:
+                hit = any(_glob_regex(one).fullmatch(c) for c in changed)
+        elif one.endswith("/"):
+            hit = any(c.startswith(one) for c in changed)
+        else:
+            hit = one in changed or any(c.startswith(one + "/") for c in changed)
+        if not hit:
+            missing.append(one)
+    return len(names), missing
+
+
+def _scope_cover(token: str, changed: list[str]) -> list[str] | None:
+    """The expansions of a Scope `token` that no changed file matches ([] = covered), or None
+    when the token cannot be resolved. Understands `{a,b}`, `lo..hi` ranges, globs and folders."""
+    checked = _scope_check(token, changed)
+    return None if checked is None else checked[1]
 
 
 def _handback(ctx, ledger: Ledger, unit: dict, branch: str) -> tuple[list[str], list[str]]:
@@ -1561,8 +1685,25 @@ def _handback(ctx, ledger: Ledger, unit: dict, branch: str) -> tuple[list[str], 
             text = source.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        warnings += [f"the report's Scope names {name}, which the branch does not change"
-                     for name in _scope_paths(text) if name not in changed]
+        seen = set(changed)       # earlier rounds sit below a relaunched unit base: read the whole branch
+        log = phase._run(root, "log", "--name-only", "-z", "--format=",
+                         f"{ledger.base}..refs/heads/{branch}")
+        if log.returncode == 0:
+            seen.update(n.strip("\n") for n in log.stdout.decode("utf-8", errors="replace")
+                        .split("\0") if n.strip("\n"))
+        listed = sorted(seen)
+        lost = []
+        for name in _scope_paths(text):
+            checked = _scope_check(name, listed)
+            if checked is None:
+                lost.append(name)
+            elif checked[1]:
+                more = (f" ({len(checked[1])} of {checked[0]} not changed: "
+                        f"{', '.join(checked[1][:3])})" if checked[0] > 1 else "")
+                warnings.append(f"the report's Scope names {name}, which the branch does not "
+                                f"change{more}")
+        if lost:
+            warnings.append(f"could not resolve the report's Scope entries: {', '.join(lost)}")
         break
     if top is not None:
         folders = sorted({Path(n).parent.as_posix() for n in changed
@@ -1661,8 +1802,27 @@ def _head(root: Path) -> str:
         return ""
 
 
-def gate(ctx, cmd: str | None = None, project: str | None = None) -> int:
-    """Run the project's full gate; record its exit status for this phase unless `cmd` is given."""
+def _run_check(session: Path | None, ctx, project: str | None) -> tuple[int, str]:
+    """The project's own `govern check`, as `govern check [--project P]` runs it: its status and
+    its output. A failure to load or run it is a red check, the message its output."""
+    import contextlib
+    import io
+    from govern import cli
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            wctx = cli.load_context(session or ctx.root, ctx.prog)
+            rc = cli.cmd_check(wctx, project)
+    except Exception as exc:  # noqa: BLE001 - any failure of the check is a red check
+        out.write(f"{type(exc).__name__}: {exc}\n")
+        rc = 1
+    return (rc or 0), out.getvalue()
+
+
+def gate(ctx, cmd: str | None = None, project: str | None = None,
+         session: Path | None = None) -> int:
+    """Run the project's full gate and its `govern check`; record the result for this phase
+    unless `cmd` is given, which runs only that command."""
     ledger = _need(ctx, project)
     root = ctx.root
     run_cmd = cmd or _full_gate(ctx)
@@ -1682,18 +1842,29 @@ def gate(ctx, cmd: str | None = None, project: str | None = None) -> int:
     with open(log, "wb") as out:
         rc = subprocess.run(run_cmd, shell=True, cwd=root, stdin=subprocess.DEVNULL,
                             stdout=out, stderr=subprocess.STDOUT).returncode
+    gate_rc = rc
+    gate_out = log.read_text(encoding="utf-8", errors="replace").splitlines()
+    check_rc, check_text = 0, ""
+    if not cmd:
+        check_rc, check_text = _run_check(session, ctx, project)
+        with open(log, "ab") as out:
+            out.write(b"\n== govern check ==\n" + check_text.encode("utf-8"))
+        rc = rc or (1 if check_rc else 0)
     seconds = round(time.monotonic() - started)
     if _head(root) != head:
         dirty = True
     if not cmd:
-        _write_record(record, {"status": "done", "rc": rc, "head": head,
+        _write_record(record, {"status": "done", "rc": rc, "check_rc": check_rc, "head": head,
                                "dirty": dirty, "seconds": seconds,
                                "at": _now(), "cmd": run_cmd})
-    lines = [f"gate {'green' if rc == 0 else 'red'} (rc {rc}, {seconds} s, head {head[:7]})",
-             f"log: {_local(_base(root, log), log)}"]
-    if rc != 0:
-        text = log.read_text(encoding="utf-8", errors="replace").splitlines()
-        lines += text[-GATE_TAIL:]
+    lines = [f"gate {'green' if rc == 0 else 'red'} (rc {rc}, {seconds} s, head {head[:7]})"]
+    lines.append(f"log: {_local(_base(root, log), log)}")
+    if gate_rc:
+        lines += gate_out[-GATE_TAIL:]
+    if check_rc:
+        lines.append("check: red (govern check" + (f" --project {project}" if project else "") + ")")
+        wrong = [ln for ln in check_text.splitlines() if re.search(r"error|ERROR|FAIL", ln)]
+        lines += wrong[:GATE_TAIL] if wrong else check_text.splitlines()[-GATE_TAIL:]
     _say(lines)
     return 0 if rc == 0 else 1
 
@@ -2259,7 +2430,7 @@ def run(ctx, args) -> int:
         if args.build_cmd == "verify":
             return verify(ctx, args.id, args.branch, project)
         if args.build_cmd == "gate":
-            return gate(ctx, args.gate_cmd, project)
+            return gate(ctx, args.gate_cmd, project, session)
         if args.build_cmd == "ruling":
             return ruling(ctx, " ".join(args.text), project)
         if args.build_cmd == "status":

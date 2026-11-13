@@ -164,6 +164,91 @@ class Handback(Build):
         found = roles.problems(defaults(forbidden_trailers=[3]))
         self.assertIn("forbidden_trailers[0] = 3", found[0])
 
+    def commit_files(self, tree: Path, *names: str) -> None:
+        for name in names:
+            (tree / name).parent.mkdir(parents=True, exist_ok=True)
+            (tree / name).write_text("x\n", encoding="utf-8")
+        self.w.git("add", "-A", at=tree)
+        self.w.git("commit", "-qm", "more", at=tree)
+
+    def scope_warnings(self, scope: str) -> list[str]:
+        (self.dir() / "u1" / "developer-report.md").write_text(f"Scope: {scope}\n",
+                                                               encoding="utf-8")
+        out = self.ok("verify", "u1", "--branch", BRANCH)
+        return [ln for ln in out.splitlines() if ln.startswith("warning:")]
+
+    def test_scope_patterns_covering_the_branch_do_not_warn(self):
+        tree = self.ready()
+        self.commit_files(tree, *(f"rnd/runlog/issues/I-000{n}.json" for n in (1, 2, 3)),
+                          "rnd/tests/fixtures/runlog/run-full/a.json",
+                          "rnd/tests/fixtures/runlog/run-bare/b.json",
+                          "rnd/runlog/runs/2026/r.json", "rnd/runlog/games/g.json")
+        (self.dir() / "u1" / "developer-report.md").write_text(
+            "Scope: `rnd/runlog/issues/I-0001..I-0003.json`, "
+            "`rnd/tests/fixtures/runlog/{run-full/, run-bare/}`, `rnd/runlog/runs/2026/`, "
+            "`rnd/runlog/games/*.json`\n", encoding="utf-8")
+        out = self.ok("verify", "u1", "--branch", BRANCH)
+        self.assertIn("is ready to be marked done", out)
+        self.assertNotIn("warning:", out)
+
+    def test_a_missing_range_member_is_named(self):
+        tree = self.ready()
+        self.commit_files(tree, *(f"rnd/runlog/issues/I-000{n}.json" for n in (1, 2, 3)))
+        found = self.scope_warnings("`rnd/runlog/issues/I-0001..I-0004.json`")
+        self.assertEqual(found, ["warning: the report's Scope names "
+                                 "rnd/runlog/issues/I-0001..I-0004.json, which the branch does "
+                                 "not change (1 of 4 not changed: rnd/runlog/issues/I-0004.json)"])
+
+    def test_a_plain_path_the_branch_does_not_change_still_warns(self):
+        self.ready()
+        found = self.scope_warnings("`src/a.py`, `src/missing.py`")
+        self.assertEqual(found, ["warning: the report's Scope names src/missing.py, which the "
+                                 "branch does not change"])
+
+    def test_a_file_an_earlier_round_changed_still_counts(self):
+        tree = self.ready()
+        self.commit_files(tree, "src/x.py")
+        led = self.dir() / build.LEDGER
+        text = led.read_text(encoding="utf-8")
+        led.write_text(text.replace('base = ""', f'base = "{self.head(BRANCH)}"', 1),
+                       encoding="utf-8")
+        self.commit_files(tree, "src/y.py")
+        self.assertEqual(self.scope_warnings("src/x.py, src/y.py"), [])
+
+    def test_an_unresolvable_entry_is_one_line(self):
+        self.ready()
+        found = self.scope_warnings("`a{b/c.py`, `x/1..y.py`")
+        self.assertEqual(found, ["warning: could not resolve the report's Scope entries: "
+                                 "a{b/c.py, x/1..y.py"])
+
+    def test_glob_stars_in_a_scope_are_not_stripped_as_bold(self):
+        tree = self.ready()
+        self.commit_files(tree, "engine/tests/test_x.py", "README.md")
+        self.assertEqual(self.scope_warnings("`**/test_*.py`, `*.md`"), [])
+        self.assertEqual(build._scope_paths("Scope: `**src/a.py**`, `**/t_*.py`, `*.md`"),
+                         ["src/a.py", "**/t_*.py", "*.md"])
+
+    def test_a_glob_ending_in_a_slash_covers_a_folder_it_matches(self):
+        cover = build._scope_cover
+        self.assertEqual(cover("rnd/*/", ["rnd/runlog/a.json"]), [])
+        self.assertEqual(cover("rnd/*/", ["other/a.json"]), ["rnd/*/"])
+
+    def test_scope_cover_globs_folders_and_limits(self):
+        cover = build._scope_cover
+        self.assertEqual(cover("a/**/b.py", ["a/b.py"]), [])
+        self.assertEqual(cover("a/**/b.py", ["a/x/y/b.py"]), [])
+        self.assertEqual(cover("a/*.py", ["a/x/b.py"]), ["a/*.py"])
+        self.assertEqual(cover("rnd/runlog", ["rnd/runlog/x"]), [])
+        self.assertEqual(cover("rnd/run", ["rnd/runlog/x"]), ["rnd/run"])
+        self.assertEqual(cover("./a\\b.py", ["a/b.py"]), [])
+        self.assertEqual(cover("{a,b}/{c,d}.py", ["a/c.py", "b/d.py"]), ["a/d.py", "b/c.py"])
+        self.assertIsNone(cover("{a,{b,c}}/x.py", []))
+        self.assertIsNone(cover("a{b", []))
+        self.assertIsNone(cover("1..y.py", []))
+        self.assertIsNone(cover("I-0009..I-0001.json", []))
+        self.assertEqual(len(cover("I-0001..I-1000.json", [])), 1000)
+        self.assertIsNone(cover("I-0001..I-1001.json", []))
+
 
 if __name__ == "__main__":
     unittest.main()
