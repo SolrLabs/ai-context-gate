@@ -100,6 +100,8 @@ GATE_SCOPED = ("the command you ran for your unit's tests and its result line (t
                "zero). The coordinator runs the full gate.")
 FILTER_NOTE = "A filter that matches nothing prints a pass: check the total is not zero."
 NO_FULL_GATE = "Do not run the full gate: the coordinator runs it once your unit is merged."
+READING = ("Read a large file by search or line range, never whole; a log by grep or its tail; an "
+           "image only when the task needs to see it, one at a time, cropped where a tool can crop it.")
 NO_RULES = "- This project has added no rules of its own."
 NO_TRIGGERS = "- nothing configured: `senior_triggers` names no trigger"
 NO_HIGH_RISK = ("- nothing configured: no phase is high-risk until `high_risk_paths` names its "
@@ -281,6 +283,7 @@ def slots(role: str, params: dict, inserts: str = "") -> dict[str, str]:
         "senior_triggers": _bullets(params["senior_triggers"], NO_TRIGGERS),
         "high_risk_paths": _bullets(params["high_risk_paths"], NO_HIGH_RISK),
         "escalate_after": str(params["escalate_after"]),
+        "reading": READING,
     }
     scoped = params.get("unit_gate", "scoped") == "scoped"
     if role == RULES:

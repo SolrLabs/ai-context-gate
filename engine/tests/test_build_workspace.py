@@ -272,6 +272,29 @@ class Lines(Workspace):
                      "launch", "review")
 
 
+class Notes(Workspace):
+    """Every brief's paths note names the member's checkout in a workspace."""
+
+    def briefs(self) -> dict:
+        self.space()
+        root = self.w.member("alpha")
+        led = ledger(root / BUILD, ("u1", "done"), project="alpha")
+        return {"unit": build.unit_brief(led, led.units[0], False),
+                "fix": build.fix_brief(led, "developer", 1),
+                "code-reviewer": build.code_reviewer_brief(root, led),
+                "qa-engineer": build.qa_engineer_brief(root, led),
+                "ux-reviewer": build.ux_reviewer_brief(root, led),
+                "close": build.close_brief(root, led)}
+
+    def test_each_brief_kind_holds_the_workspace_note_with_the_member_name(self):
+        want = build.PATHS_NOTE_WORKSPACE.format(project="alpha")
+        self.assertIn("a checkout of `alpha`; the workspace repository is not in it.", want)
+        for kind, text in self.briefs().items():
+            with self.subTest(kind=kind):
+                self.assertIn(f"\n{want}\n", text)
+                self.assertNotIn(build.PATHS_NOTE, text)
+
+
 class Single(Build):
     def test_start_status_and_close_print_no_project_flag(self):
         self.project()
@@ -297,6 +320,13 @@ class Single(Build):
         self.refused("--project applies only in a workspace: this project has no [registry]",
                      "--project", "alpha", "start", "p1")
         self.assertFalse(self.dir().exists())
+
+    def test_a_unit_brief_keeps_the_repository_root_note(self):
+        self.project()
+        led = ledger(self.w.root / BUILD, ("u1", "done"))
+        text = build.unit_brief(led, led.units[0], False)
+        self.assertIn(f"\n{build.PATHS_NOTE}\n", text)
+        self.assertNotIn("checkout of", text)
 
 
 if __name__ == "__main__":

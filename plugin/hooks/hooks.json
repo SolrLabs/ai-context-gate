@@ -4,7 +4,7 @@
       {"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/session_start.py\"", "timeout": 15}]}
     ],
     "PreToolUse": [
-      {"matcher": "Agent|SendMessage|Bash", "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/agents.py\"", "timeout": 5}]}
+      {"matcher": "Agent|SendMessage|Bash|Read", "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/agents.py\"", "timeout": 5}]}
     ],
     "PostToolUse": [
       {"matcher": "*", "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/usage.py\"", "timeout": 5}]},

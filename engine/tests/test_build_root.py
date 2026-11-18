@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -18,6 +20,7 @@ import profile_guard  # noqa: E402,F401
 
 from base_support import Case, Solo  # noqa: E402
 from test_build_workspace import Space  # noqa: E402
+from test_build_worktree import close_cleanup  # noqa: E402
 from govern import __version__, agent_runs, build, layout, manifest, phase, profile  # noqa: E402
 
 PARAMS = {"required_keys": ["name", "dir", "tier"], "tiers": ["full", "registered"]}
@@ -257,6 +260,11 @@ class Cycle(Started):
     def state(self) -> Path:
         return self.w.root.resolve() / "planning" / "state"
 
+    def ok(self, *argv: str) -> str:
+        code, out, err = self.go(*argv)
+        self.assertEqual((code, err), (0, ""), out)
+        return out
+
     def fill(self, folder: Path) -> None:
         for brief in folder.rglob("*brief*.md"):
             text = brief.read_text(encoding="utf-8")
@@ -355,6 +363,120 @@ class Cycle(Started):
         self.assertEqual(got["in_brief"]["produces"], [[str(brief.parent / rel), rel]])
         self.assertEqual(agent_runs.where(got, "produces", str(brief.parent / rel))[0],
                          tree / rel)
+
+    def test_the_workspace_writers_report_path_is_under_the_state_folder_of_the_workspace(self):
+        self.unit()
+        self.commit("brief")
+        self.go("--project", "alpha", "unit", "set", "u1", "done")
+        (self.alpha / "code.txt").write_text("x\n", encoding="utf-8")
+        self.w.git("add", "code.txt", at=self.alpha)
+        self.w.git("commit", "-qm", "code", at=self.alpha)
+        for step in ("review", "close"):
+            self.go("--project", "alpha", step)
+            self.fill(self.ledger.parent / step)
+            self.commit(step)
+        folder = self.ledger.parent / "close"
+        text = (folder / "workspace-brief.md").read_text(encoding="utf-8")
+        report = "planning/state/.context-gate/build/p1/close/technical-writer-workspace-report.md"
+        self.assertIn(f"\nProduces: {report}\n", text)
+        root = self.w.root.resolve()
+        self.assertEqual((root / report).parent, folder.resolve())
+        # The member's own writer reports from the member's root, as before.
+        self.assertIn("\nProduces: .context-gate/build/p1/close/technical-writer-report.md\n",
+                      (folder / "brief.md").read_text(encoding="utf-8"))
+
+    def test_a_fresh_fix_agent_in_a_workspace_passes_the_red_gate_from_a_subfolder(self):
+        self.unit()
+        self.commit("brief")
+        self.go("--project", "alpha", "unit", "set", "u1", "done")
+        (self.alpha / "code.txt").write_text("x\n", encoding="utf-8")
+        self.w.git("add", "code.txt", at=self.alpha)
+        self.w.git("commit", "-qm", "code", at=self.alpha)
+        for step in ("review", "fix"):
+            code, out, err = self.go("--project", "alpha", step)
+            self.assertEqual((code, err), (0, ""), out)
+            self.fill(self.ledger.parent / step)
+            self.commit(step)
+        code, out, err = self.go("--project", "alpha", "launch", "fix")
+        self.assertEqual((code, err), (0, ""), out)
+        tree = Path(next(l for l in out.splitlines() if l.startswith("Worktree: "))[10:])
+        brief = (self.ledger.parent / "fix" / "brief.md").resolve()
+        got = agent_runs.contract(f"{build.launch_line(brief)}\nWorktree: {tree}", str(self.alpha))
+        red_rel = next(l for l in brief.read_text(encoding="utf-8").splitlines()
+                       if l.startswith("Red: "))[5:]
+        self.assertEqual(got["in_brief"]["red"][0][1], red_rel)
+        launch = {"t": time.time() - 100, "red": got["red"], "produces": [],
+                  "in_brief": got["in_brief"], "worktree": got["worktree"]}
+        # Nothing saved yet: the gate looks in the worktree, not beside the brief.
+        self.assertEqual(agent_runs.missing(launch, [], "", False), [
+            f"{tree / red_rel} holds no files. Run the test against the code before your fix "
+            "and save its real output there."])
+        out_file = tree / red_rel / "sub" / "out.txt"
+        out_file.parent.mkdir(parents=True)
+        out_file.write_text("FAILED\n", encoding="utf-8")
+        edit = [{"tool": "Edit", "t": time.time() + 5}]
+        self.assertEqual(agent_runs.missing(launch, edit, "", False), [])
+
+    def test_a_workspace_close_launches_a_writer_in_a_worktree_of_the_workspace_repository(self):
+        self.unit()
+        self.commit("brief")
+        self.go("--project", "alpha", "unit", "set", "u1", "done")
+        (self.alpha / "code.txt").write_text("x\n", encoding="utf-8")
+        self.w.git("add", "code.txt", at=self.alpha)
+        self.w.git("commit", "-qm", "code", at=self.alpha)
+        for step in ("review", "close"):
+            code, out, err = self.go("--project", "alpha", step)
+            self.assertEqual((code, err), (0, ""), out)
+            self.fill(self.ledger.parent / step)
+            self.commit(step)
+        folder = self.ledger.parent / "close"
+        self.assertTrue((folder / "workspace-brief.md").is_file())
+        code, out, err = self.go("--project", "alpha", "launch", "close")
+        self.assertEqual((code, err), (0, ""), out)
+        lines = out.splitlines()
+        self.assertEqual(lines.count("launch technical-writer with the prompt:"), 2)
+        second = lines[lines.index("launch technical-writer with the prompt:",
+                                   lines.index("launch technical-writer with the prompt:") + 1):]
+        brief = (folder / "workspace-brief.md").resolve()
+        tree = self.w.root / ".claude" / "worktrees" / "alpha-p1-close-workspace"
+        self.assertEqual(second[1:], [
+            build.launch_line(brief),
+            f"Base: {self.w.git('rev-parse', 'HEAD').strip()}",
+            f"Workspace branch: {self.w.git('rev-parse', '--abbrev-ref', 'HEAD').strip()}",
+            f"Worktree: {tree}", "launch it without isolation: the worktree is made"])
+        self.assertEqual(self.w.git("rev-parse", "--abbrev-ref", "HEAD", at=tree).strip(),
+                         "build/p1/close-workspace")
+        # The writer's report, written at its `Produces:` path in that worktree, is found by
+        # the agent gates.
+        got = agent_runs.contract("\n".join(second), str(self.alpha))
+        rel = f"planning/state/{build.BUILD_DIR}/p1/close/technical-writer-workspace-report.md"
+        self.assertEqual(got["in_brief"]["produces"][0][1], rel)
+        self.assertEqual(agent_runs.where(got, "produces", got["in_brief"]["produces"][0][0])[0],
+                         tree / rel)
+
+
+    def test_the_printed_cleanup_removes_the_workspace_writers_worktree_and_branch(self):
+        self.unit()
+        self.commit("brief")
+        self.go("--project", "alpha", "unit", "set", "u1", "done")
+        (self.alpha / "code.txt").write_text("x\n", encoding="utf-8")
+        self.w.git("add", "code.txt", at=self.alpha)
+        self.w.git("commit", "-qm", "code", at=self.alpha)
+        for step in ("review", "close"):
+            self.ok("--project", "alpha", step)
+            self.fill(self.ledger.parent / step)
+            self.commit(step)
+        out = self.ok("--project", "alpha", "close")
+        tree = self.w.root.resolve() / ".claude" / "worktrees" / "alpha-p1-close-workspace"
+        self.assertIn("fill in the briefs, commit it", out)
+        self.assertIn(f"git -C planning/state worktree remove {shlex.quote(str(tree))}", out)
+        self.assertIn("git -C planning/state branch -d build/p1/close-workspace", out)
+        report = "planning/state/.context-gate/build/p1/close/technical-writer-workspace-report.md"
+        made = close_cleanup(self, self.w, out, report)
+        self.assertFalse(made.exists())
+        self.assertNotIn("build/p1/close-workspace", phase._worktrees(self.w.root))
+        self.assertNotIn("build/p1/close-workspace",
+                         self.w.git("branch", "--format=%(refname:short)").split())
 
 
 class HygieneRefusal(Base):

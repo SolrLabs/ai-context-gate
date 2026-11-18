@@ -141,8 +141,7 @@ If nothing stands, skip to 5.
    A brief whose findings meet a `senior-developer` trigger is made with
    `build fix --role senior-developer`. Commit the ledger and the briefs.
 2. `python3 .context-gate/bin/govern build launch fix` prints a launch prompt for each fix brief.
-   Launch a fresh agent for each, in a worktree of its own; when it prints `Resume:`, send that
-   agent its lines with `SendMessage` instead. Check and merge its work as in
+   Launch a fresh agent for each, in a worktree of its own. Check and merge its work as in
    step 2.5, then `python3 .context-gate/bin/govern build collect <its branch>` to bring its
    report into this checkout.
 3. The fix is not reviewed again. The gate and your own reading of the fix diff close it. The one
@@ -184,9 +183,10 @@ If nothing stands, skip to 5.
 When the config has a `[registry]`, every `govern build` command takes `--project <name>`. Cut and
 switch the phase branch with `git -C <member folder>`, and start the phase `--from` the member's
 integration branch. Launch each agent with the lines
-`build launch` prints, `Worktree:` included, and without isolation: the worktree is already made.
+`build launch` prints, `Worktree:` included, without isolation: the worktree is already made.
+A close prints two writer launches; merge the second's branch in the workspace repository.
 The gate is the member's own (its registry entry's `runtime_gate`, or what the plan names). Close
-with `phase close --path <member folder>`. A project with no registry ignores this section.
+with `phase close --path <member folder>`. No registry: ignore this section.
 
 ## Carrying on
 

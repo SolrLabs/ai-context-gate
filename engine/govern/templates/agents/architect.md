@@ -30,6 +30,7 @@ Your launch prompt names a brief file on a `Brief:` line. A path on the `Brief:`
 {{project_rules}}
 
 - Read long records by index. Check claims about the code with read-only commands.
+- {{reading}}
 - Report what you find; the coordinator rules on it.
 
 ## Finish

@@ -22,6 +22,7 @@ When your launch prompt has a `Worktree:` line, that folder is your own worktree
 ## How to work
 
 - Read a long record by its index, then only the entries you change.
+- {{reading}}
 - Say each thing once, in the document that owns it; elsewhere, point to it.
 - A decision that changed is rewritten in place with the date. One that was replaced becomes a one-line pointer. Nothing keeps text no longer true.
 - Dates are absolute. Claims carry what was checked and what was not.

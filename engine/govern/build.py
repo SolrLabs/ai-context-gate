@@ -86,6 +86,19 @@ REPORT_NOTE = "Write the report below before your final message, and answer your
 # Said directly above a brief's `Red:` and `Produces:` lines: a committed brief holds no path of
 # this machine, and an agent in a worktree of its own reads them from the root of that tree.
 PATHS_NOTE = "Paths on the lines below are from the repository root, in your own working tree."
+PATHS_NOTE_WORKSPACE = (
+    "Paths on the lines below are from the root of the worktree your launch prompt names on its "
+    "`Worktree:` line, a checkout of `{project}`; the workspace repository is not in it.")
+
+
+PATHS_NOTE_WORKSPACE_REPO = (
+    "Paths on the lines below are from the root of the worktree your launch prompt names on its "
+    "`Worktree:` line, a checkout of the workspace repository (not of `{project}`).")
+
+
+def _paths_note(ledger: "Ledger") -> str:
+    """Where a brief's contract paths are from: in a workspace, the member's worktree."""
+    return PATHS_NOTE_WORKSPACE.format(project=ledger.project) if ledger.project else PATHS_NOTE
 
 
 def scratch_note(ledger: "Ledger", name: str) -> str:
@@ -132,6 +145,8 @@ def fix_sections(red: str) -> tuple:
                   f"(its failing output is saved in {red}), then the change"),
         ("Out of scope", "the findings ruled out or left for later, and anything else this pass "
                          "must leave alone"),
+        ("Tests", "the command that runs only the tests these fixes touch; the full gate runs "
+                  "once, at the end"),
     )
 
 
@@ -703,7 +718,7 @@ def unit_brief(ledger: Ledger, unit: dict, red: bool, rules=()) -> str:
     return (f"# {ledger.phase} / {unit['id']} — {unit['title']}\n\n"
             + _sections(UNIT_SECTIONS)
             + _rules(rules)
-            + f"{scratch_note(ledger, unit['id'])}\n{REPORT_NOTE}\n{PATHS_NOTE}\n"
+            + f"{scratch_note(ledger, unit['id'])}\n{REPORT_NOTE}\n{_paths_note(ledger)}\n"
             + (f"Red: {_from_root(ledger, unit['id'], 'red')}\n" if red else "")
             + f"Produces: {_from_root(ledger, unit['id'], ledger.report(unit).name)}\n")
 
@@ -730,7 +745,7 @@ def code_reviewer_brief(root: Path, ledger: Ledger) -> str:
             f"Review the phase `{ledger.phase}` as one diff; the paths below are relative to "
             f"the folder this brief is in.\n\n"
             + _material(root, ledger, ledger.dir / "review")
-            + f"{scratch_note(ledger, 'review-code')}\n{REPORT_NOTE}\n{PATHS_NOTE}\nProduces: {_from_root(ledger, 'review', 'code-reviewer-report.md')}\n")
+            + f"{scratch_note(ledger, 'review-code')}\n{REPORT_NOTE}\n{_paths_note(ledger)}\nProduces: {_from_root(ledger, 'review', 'code-reviewer-report.md')}\n")
 
 
 def qa_engineer_brief(root: Path, ledger: Ledger) -> str:
@@ -739,7 +754,7 @@ def qa_engineer_brief(root: Path, ledger: Ledger) -> str:
             f"Verify the phase `{ledger.phase}` against its definition of done.\n\n"
             + _sections((DONE_SECTION,))
             + _material(root, ledger, review, diff=False)
-            + f"{scratch_note(ledger, 'review-qa')}\n{REPORT_NOTE}\n{PATHS_NOTE}\nProduces: {_from_root(ledger, 'review', 'qa-engineer-report.md')}\n")
+            + f"{scratch_note(ledger, 'review-qa')}\n{REPORT_NOTE}\n{_paths_note(ledger)}\nProduces: {_from_root(ledger, 'review', 'qa-engineer-report.md')}\n")
 
 
 def ux_reviewer_brief(root: Path, ledger: Ledger) -> str:
@@ -749,7 +764,7 @@ def ux_reviewer_brief(root: Path, ledger: Ledger) -> str:
             f"changed; the paths below are relative to the folder this brief is in.\n\n"
             + _material(root, ledger, review)
             + _sections(UX_SECTIONS)
-            + f"{scratch_note(ledger, 'review-ux')}\n{REPORT_NOTE}\n{PATHS_NOTE}\nProduces: {_from_root(ledger, 'review', 'ux-reviewer-report.md')}\n")
+            + f"{scratch_note(ledger, 'review-ux')}\n{REPORT_NOTE}\n{_paths_note(ledger)}\nProduces: {_from_root(ledger, 'review', 'ux-reviewer-report.md')}\n")
 
 
 def fix_brief(ledger: Ledger, role: str, number: int, rules=(), unit: str = "") -> str:
@@ -762,7 +777,7 @@ def fix_brief(ledger: Ledger, role: str, number: int, rules=(), unit: str = "") 
             + _sections(fix_sections(_from_root(ledger, "fix", f"red{suffix}")))
             + _rules(rules)
             + f"{scratch_note(ledger, f'fix-{number}')}\n\n"
-            f"{FIX_RUNNING_NOTE}\n\n{REPORT_NOTE}\n{PATHS_NOTE}\n"
+            f"{FIX_RUNNING_NOTE}\n\n{REPORT_NOTE}\n{_paths_note(ledger)}\n"
             f"Red: {_from_root(ledger, 'fix', f'red{suffix}')}\n"
             f"Produces: {_from_root(ledger, 'fix', f'{role}-report{suffix}.md')}\n")
 
@@ -790,7 +805,24 @@ def _with_rulings(text: str, ledger: Ledger, markers) -> str:
     return "".join(lines)
 
 
-def close_brief(root: Path, ledger: Ledger) -> str:
+def _close_produces(root: Path, ledger: Ledger, workspace: bool) -> str:
+    """The close writer's `Produces:` path, from the root of its own worktree. The workspace
+    writer works in the workspace repository, so when the build state lives there (`build_root`)
+    the path is the state folder's place in that repository."""
+    if not workspace:
+        return _from_root(ledger, "close", "technical-writer-report.md")
+    state = state_root(root)
+    if state == root:
+        return _from_root(ledger, "close", "technical-writer-workspace-report.md")
+    repo = _state_repo(state).resolve()
+    report = ledger.dir.resolve() / "close" / "technical-writer-workspace-report.md"
+    return report.relative_to(repo).as_posix()
+
+
+def close_brief(root: Path, ledger: Ledger, workspace: bool = False) -> str:
+    """The technical writer's close brief: the member's own documents, or with `workspace` the
+    workspace repository's (its handoff, decision log and roadmap), in a worktree of that
+    repository."""
     landed = "".join(
         f"- Unit {u['id']}, {u['title']}"
         + (f" (commit {u['commit']})" if u["commit"] else "")
@@ -803,11 +835,18 @@ def close_brief(root: Path, ledger: Ledger) -> str:
             + (f"Phase owner: {ledger.owner}. When the project keeps one handoff per owner, "
                f"update only the handoff whose frontmatter owner is this email.\n\n"
                if ledger.owner else "")
+            + (f"This brief is for the workspace repository's own documents: its handoff, decision log "
+               f"and roadmap. `{ledger.project}`'s own documents have their own brief. Commit your "
+               f"report on your branch together with your document changes; if git says the "
+               f"report is ignored, leave it uncommitted and do not force it.\n\n"
+               if workspace else "")
             + ("## What landed\n\n" + landed + "\n" if landed else "")
             + (RULINGS_HEADING + "\n\n" + rulings + "\n" if rulings else "")
             + _sections((CLOSE_SECTION,))
-            + f"{scratch_note(ledger, 'close')}\n\n{AS_BUILT_NOTE}\n\n{REPORT_NOTE}\n{PATHS_NOTE}\nProduces: "
-            f"{_from_root(ledger, 'close', 'technical-writer-report.md')}\n")
+            + f"{scratch_note(ledger, 'close')}\n\n{AS_BUILT_NOTE}\n\n{REPORT_NOTE}\n"
+            + (PATHS_NOTE_WORKSPACE_REPO.format(project=ledger.project) if workspace
+               else _paths_note(ledger))
+            + "\nProduces: " + _close_produces(root, ledger, workspace) + "\n")
 
 
 # ---------------------------------------------------------------------------- status
@@ -2107,24 +2146,31 @@ def close(ctx, project: str | None = None) -> int:
     if ledger.stage not in ("review", "fix", "closing"):
         raise BuildError(f"the phase {ledger.phase} is in stage {ledger.stage}: it closes "
                          f"after its review, so run `{govern_build(ledger.project)} review` first")
-    brief = ledger.dir / "close" / "brief.md"
     ledger.stage = "closing"
-    if brief.exists():
-        old = brief.read_bytes()
-        try:
-            text = old.decode("utf-8")
-        except UnicodeDecodeError:
-            text = None
-        new = _with_rulings(text, ledger, ctx.markers) if text is not None else None
-        if new is not None and new != text:
-            save(ledger, [(brief, new.encode("utf-8"))])
-            lines = [f"kept {_local(_base(root, brief), brief)}, with its rulings brought up to date"]
+    # A workspace build also has a brief for the workspace repository's own documents.
+    kinds = [(ledger.dir / "close" / "brief.md", False)]
+    if ledger.project:
+        kinds.append((ledger.dir / "close" / "workspace-brief.md", True))
+    writes: list[tuple[Path, bytes]] = []
+    lines = []
+    for brief, workspace in kinds:
+        shown = _local(_base(root, brief), brief)
+        if brief.exists():
+            old = brief.read_bytes()
+            try:
+                text = old.decode("utf-8")
+            except UnicodeDecodeError:
+                text = None
+            new = _with_rulings(text, ledger, ctx.markers) if text is not None else None
+            if new is not None and new != text:
+                writes.append((brief, new.encode("utf-8")))
+                lines.append(f"kept {shown}, with its rulings brought up to date")
+            else:
+                lines.append(f"kept {shown} as it is (delete it to have it written again)")
         else:
-            save(ledger)
-            lines = [f"kept {_local(_base(root, brief), brief)} as it is (delete it to have it written again)"]
-    else:
-        save(ledger, [(brief, close_brief(root, ledger).encode("utf-8"))])
-        lines = [f"wrote {_local(_base(root, brief), brief)}"]
+            writes.append((brief, close_brief(root, ledger, workspace).encode("utf-8")))
+            lines.append(f"wrote {shown}")
+    save(ledger, writes)
     folder = f"{BUILD_DIR}/{ledger.phase}"
     state = state_root(root)
     if state != root:
@@ -2132,9 +2178,27 @@ def close(ctx, project: str | None = None) -> int:
         git = f"git -C {shlex.quote(_posix(where, state))}"
     else:
         git = f"git -C {shlex.quote(ledger.folder)}" if ledger.project else "git"
-    _say([*lines, *_rulings(ledger), _then("close", project=ledger.project),
-          "once its branch is merged, run:", f"{git} rm -r -q {folder}",
-          f'{git} commit -m "Close phase {ledger.phase}: remove its build folder"',
+    removal = [f"{git} rm -r -q {folder}",
+               f'{git} commit -m "Close phase {ledger.phase}: remove its build folder"']
+    if ledger.project:
+        top = config.find_root(root.resolve().parent)
+        if state == root and top is not None:
+            # The workspace writer's report is committed in the workspace repository, which the
+            # member's cleanup does not reach.
+            wgit = f"git -C {shlex.quote(_posix(top.resolve(), _state_repo(top).resolve()) )}"
+            removal += [f"{wgit} rm -r -q --ignore-unmatch {folder}",
+                        f'{wgit} commit -m "Close phase {ledger.phase}: remove its build folder"']
+        else:
+            wgit = git
+        if state != root or top is not None:
+            # The workspace writer's worktree and branch, which `launch close` made.
+            tree = (top or root) / ".claude" / "worktrees" \
+                / f"{ledger.project}-{ledger.dir.name}-close-workspace"
+            removal += [f"{wgit} worktree remove {shlex.quote(str(tree))}",
+                        f"{wgit} branch -d build/{ledger.dir.name}/close-workspace"]
+    fill = "the briefs" if len(kinds) > 1 else "the brief"
+    _say([*lines, *_rulings(ledger), _then("close", fill, ledger.project),
+          "once its branch is merged, run:", *removal,
           phase_close(ledger.project, ledger.folder)])
     return 0
 
@@ -2150,12 +2214,6 @@ def _text(root: Path, brief: Path) -> str:
 def _fix_briefs(ledger: Ledger) -> list[Path]:
     """The fix briefs, in number order."""
     return sorted((ledger.dir / "fix").glob("brief*.md"), key=lambda p: (len(p.name), p.name))
-
-
-def _fix_unit(text: str) -> str:
-    """The unit a fix brief is for: its `Unit:` line, directly under the title; else empty."""
-    lines = text.splitlines()
-    return lines[1][len("Unit: "):].strip() if len(lines) > 1 and lines[1].startswith("Unit: ") else ""
 
 
 def _covered(root: Path, ledger: Ledger, what: str) -> list[tuple[str, Path]]:
@@ -2179,6 +2237,8 @@ def _covered(root: Path, ledger: Ledger, what: str) -> list[tuple[str, Path]]:
         first = "fix"
     elif what == "close":
         found = [("technical-writer", ledger.dir / "close" / "brief.md")]
+        if ledger.project and (ledger.dir / "close" / "workspace-brief.md").is_file():
+            found.append(("technical-writer", ledger.dir / "close" / "workspace-brief.md"))
     else:
         unit = ledger.unit(what)
         if unit is None:
@@ -2289,22 +2349,6 @@ def _retry_base(root: Path, ledger: Ledger, unit: dict, head: str) -> str:
     return new
 
 
-def _resumes(root: Path, ledger: Ledger, found: list[tuple[str, Path]]) -> dict[Path, str]:
-    """The fix briefs whose unit's builder is resumed, each with that agent: the unit is done and
-    has an agent, and the brief is among the first 3 fix briefs that name the unit."""
-    seen: dict[str, int] = {}
-    out = {}
-    for path in _fix_briefs(ledger):
-        uid = _fix_unit(_text(root, path))
-        unit = ledger.unit(uid) if uid else None
-        if unit is None:
-            continue
-        seen[uid] = seen.get(uid, 0) + 1
-        if seen[uid] <= 3 and unit["agent"] and unit["status"] == "done":
-            out[path] = unit["agent"]
-    return {brief: out[brief] for _, brief in found if brief in out}
-
-
 def launch(ctx, what: str, project: str | None = None, session: Path | None = None) -> int:
     """Check every brief `what` covers (filled in, committed at HEAD), mark a unit running, and
     print each launch prompt: the role, the brief's path from the repository root, and for a role
@@ -2340,15 +2384,23 @@ def launch(ctx, what: str, project: str | None = None, session: Path | None = No
     again = what == "fix" and all(p.name in ledger.launched for p in _fix_briefs(ledger))
     if again:
         lines.append(AGAIN)
-    resume = _resumes(root, ledger, found) if what == "fix" else {}
     for role, brief in found:
-        if brief in resume:
-            lines += [f"resume {resume[brief]} with SendMessage, the prompt:", f"Resume: {resume[brief]}",
-                      launch_line(str(brief) if moved else prefix + _posix(root, brief))]
-        else:
-            lines += [f"launch {role} with the prompt:",
-                      launch_line(str(brief) if moved else prefix + _posix(root, brief))]
-        if role in WORKTREE_ROLES:
+        workspace = project and what == "close" and brief.name == "workspace-brief.md"
+        lines += [f"launch {role} with the prompt:",
+                  launch_line(str(brief) if moved or workspace else prefix + _posix(root, brief))]
+        if workspace:
+            # The writer of the workspace repository's own documents: a worktree of that
+            # repository, from its HEAD, on the branch it has checked out.
+            repo = where if moved else session or root
+            tree = _agent_tree(repo, session or root, project, ledger.dir.name, "close-workspace")
+            on = checked_out(repo)
+            if not on:
+                short = phase._ask(repo, "rev-parse", "--short", "HEAD")
+                on = f"none (detached at {short}): merge the writer's branch by hand"
+            lines += [f"Base: {phase._ask(repo, 'rev-parse', 'HEAD')}",
+                      f"Workspace branch: {on}",
+                      f"Worktree: {tree}", "launch it without isolation: the worktree is made"]
+        elif role in WORKTREE_ROLES:
             if (root / ".claude" / "worktrees").is_dir():
                 _no_index(root / ".claude" / "worktrees")
             lines += [f"Base: {base}", f"Phase branch: {ledger.branch}"]

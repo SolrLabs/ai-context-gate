@@ -689,7 +689,7 @@ class AgentHooks(Plugin):
 
     def test_hooks_json_registers_every_event_the_agent_hooks_act_on(self):
         hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
-        wanted = {"PreToolUse": "Agent|SendMessage|Bash", "PostToolUse": "*",
+        wanted = {"PreToolUse": "Agent|SendMessage|Bash|Read", "PostToolUse": "*",
                   "PostToolUseFailure": "*", "SubagentStart": None, "SubagentStop": None,
                   "UserPromptSubmit": None}
         for event, matcher in wanted.items():
@@ -710,6 +710,7 @@ class AgentHooks(Plugin):
         got = self.resolved()
         self.assertEqual(got["gates"], {"briefed": ["developer", "senior-developer"],
                                         "claims": True, "deny_push": True, "max_refusals": 2,
+                                        "deny_resume": True, "read_lines": 400,
                                         "checklist": False, "checklist_keys": {},
                                     "checklist_texts": {}})
         self.assertIsNone(got["measure"])
