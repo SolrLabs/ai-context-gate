@@ -16,7 +16,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from govern import coordinator_runs, drive_log
+import govern
+from govern import coordinator_runs, drive_log, versions
 from govern.build import _say as _say_raw
 
 PROMPT = Path(__file__).resolve().parent / "templates" / "drive-prompt.md"
@@ -111,6 +112,27 @@ def _status(ctx, project: str | None) -> tuple[str, dict] | None:
     if res.returncode != 0 or not isinstance(data, dict):
         return None
     return res.stdout, data
+
+
+def skill_command(plan: str) -> str:
+    """The session's first argument: the build skill of the plugin this engine ships with."""
+    name = "context-gate-beta" if versions.is_beta(govern.__version__) else "context-gate"
+    return f"/{name}:build {plan}"
+
+
+def _roles_stale(ctx) -> str | None:
+    """None when `agents render --check` passes; else the reason, its last output line if any."""
+    argv = [sys.executable, str(ctx.root / ".context-gate" / "bin" / "govern"), "agents",
+            "render", "--check"]
+    try:
+        res = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", cwd=str(ctx.root))
+    except OSError:
+        return ""
+    if res.returncode == 0:
+        return None
+    lines = [ln.strip() for ln in (res.stdout + res.stderr).splitlines() if ln.strip()]
+    return lines[-1] if lines else ""
 
 
 def _exit_line(result: dict | None) -> str | None:
@@ -252,9 +274,17 @@ def _run(ctx, plan, cap, hours, max_sessions, compact_pct, permission_mode, clau
     if first is None:
         print("error: `govern build status --json` failed", file=sys.stderr)
         return 1
+    stale = _roles_stale(ctx)
+    if stale is not None:
+        print("error: agent roles are stale: run python3 .context-gate/bin/govern agents "
+              "render, commit, and start the driver again", file=sys.stderr)
+        if stale:
+            print(stale, file=sys.stderr)
+        return 1
     folder = None
     prompt = PROMPT.read_text(encoding="utf-8")
-    env = {**os.environ, "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": str(pct)}
+    env = {**os.environ, "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": str(pct),
+           "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "0"}
     deadline = None if hours is None else time.time() + float(hours) * 3600
     readings: list[float] = []
 
@@ -293,7 +323,7 @@ def _run(ctx, plan, cap, hours, max_sessions, compact_pct, permission_mode, clau
             folder.mkdir(parents=True, exist_ok=True)
         before_next = str(data.get("next", ""))
         started = time.time()
-        argv = _argv(claude, "-p", f"/context-gate:build {plan}", "--output-format",
+        argv = _argv(claude, "-p", skill_command(plan), "--output-format",
                      "stream-json", "--verbose", "--permission-mode", permission_mode,
                      "--append-system-prompt", prompt)
         lines, killed = _session(argv, env, ctx.root, folder / f"{n}.jsonl",

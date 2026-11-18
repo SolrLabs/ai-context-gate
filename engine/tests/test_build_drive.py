@@ -27,7 +27,8 @@ script = json.load(open(os.environ["FAKE_SCRIPT"], encoding="utf-8"))
 log = os.environ["FAKE_LOG"]
 with open(log, "a", encoding="utf-8") as fh:
     fh.write(json.dumps({"argv": sys.argv[1:], "pid": os.getpid(),
-                         "pct": os.environ.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE")}) + "\\n")
+                         "pct": os.environ.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"),
+                         "ceiling": os.environ.get("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS")}) + "\\n")
 n = sum(1 for _ in open(log, encoding="utf-8")) - 1
 entry = script[min(n, len(script) - 1)]
 if entry.get("ruling"):
@@ -95,6 +96,44 @@ class Drive(Build):
 
     def rows(self) -> list[dict]:
         return drive_log.rows(self.w.home)
+
+    def test_session_env_lifts_background_ceiling(self):
+        code, out, calls = self.drive([entry(pct=40), entry("x\nLOOP: plan-done", end=True)])
+        self.assertEqual(code, 0, out)
+        sessions = calls[1:]
+        self.assertTrue(sessions)
+        self.assertEqual({c["ceiling"] for c in sessions}, {"0"})
+
+    def test_skill_name_follows_the_engine(self):
+        with mock.patch("govern.__version__", "0.9.5"):
+            self.assertEqual(drive.skill_command("p.md"), "/context-gate:build p.md")
+        with mock.patch("govern.__version__", "0.9.5-beta.2"):
+            self.assertEqual(drive.skill_command("p.md"), "/context-gate-beta:build p.md")
+        code, out, calls = self.drive([entry(pct=40), entry("x\nLOOP: plan-done", end=True)])
+        argv = calls[1]["argv"]
+        self.assertEqual(argv[argv.index("-p") + 1], "/context-gate:build plan.md")
+
+    def test_stale_roles_exit_1_before_any_session(self):
+        err = io.StringIO()
+        real = subprocess.run
+
+        def fail_check(argv, *a, **kw):
+            if "render" in argv:
+                return subprocess.CompletedProcess(argv, 1, "", "roles differ\n")
+            return real(argv, *a, **kw)
+
+        with mock.patch.object(drive.subprocess, "run", fail_check), \
+                contextlib.redirect_stderr(err):
+            code, out, calls = self.drive([entry(pct=40)])
+        self.assertEqual(code, 1)
+        self.assertIn("error: agent roles are stale", err.getvalue())
+        self.assertIn("roles differ", err.getvalue())
+        self.assertEqual(calls, [])
+
+    def test_prompt_says_the_driver_owns_the_build(self):
+        text = drive.PROMPT.read_text(encoding="utf-8")
+        self.assertIn("not rival coordinators", text)
+        self.assertIn("installed.toml", text)
 
     def test_plan_done_after_two_steps(self):
         code, out, calls = self.drive([

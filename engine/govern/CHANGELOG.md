@@ -4,6 +4,15 @@ Newest first. Each release says what changed and, under **Upgrading**, anything 
 do or decide. The upgrade report quotes every entry between the engine a project ran and the one
 it upgraded to.
 
+## 0.9.5-beta.2 — 2026-11-18
+
+Four driver faults found in the first overnight run.
+
+- **Fixed:** each driver session sets `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0`. Without it `claude -p` stopped background agents 10 minutes after its last turn, killing an agent mid-unit.
+- **Fixed:** the session runs `/context-gate-beta:build` when the engine is a beta, and `/context-gate:build` otherwise.
+- **Fixed:** before the usage probe the driver runs `govern agents render --check` and exits 1 with `error: agent roles are stale: ...` when it fails. Stale roles after `beta on` stopped the first run.
+- **Fixed:** the drive prompt says the driver owns the build: other Claude sessions, including those a listing tool shows, are not rival coordinators, and `.context-gate/installed.toml` is never hand-edited.
+
 ## 0.9.5-beta.1 — 2026-11-17
 
 Overnight driver: `govern build drive` runs a plan unattended, one fresh coordinator session per build step, with a weekly usage cap and compaction hooks.
