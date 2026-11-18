@@ -23,6 +23,10 @@ ENGINE = Path(__file__).resolve().parent.parent
 PLUGIN = ENGINE.parent / "plugin"
 sys.path.insert(0, str(ENGINE))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import profile_guard  # noqa: E402,F401
+
 from govern import agent_runs, layout  # noqa: E402
 from test_options import repo  # noqa: E402
 

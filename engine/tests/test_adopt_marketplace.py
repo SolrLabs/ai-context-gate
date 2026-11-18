@@ -32,6 +32,8 @@ REPO = ENGINE.parent
 sys.path.insert(0, str(ENGINE))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import profile_guard  # noqa: E402,F401
+
 from govern import __version__, installer, layout, profile  # noqa: E402
 from test_measure import BODY, FM, commit, put  # noqa: E402
 

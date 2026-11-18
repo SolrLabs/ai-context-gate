@@ -5,9 +5,10 @@ side effect of running a maintenance command.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
-from govern.checks.working import handoff_path, handoff_words
-from govern.text import parse_frontmatter, read, word_count, write
+from govern.checks.working import handoff_is_glob, handoff_paths, handoff_words
+from govern.text import has_bom, parse_frontmatter, read, word_count, write
 
 
 class BaselineUnreadable(Exception):
@@ -86,11 +87,17 @@ def compute(ctx, scope=None) -> dict[str, int]:
                 wc = word_count(body, ctx.markers)
                 if wc > limit:
                     breaches[working_words_key(ctx, path)] = wc
-        path = handoff_path(ctx, s)
-        if on("handoff-words") and path is not None and path.exists():
-            wc = handoff_words(ctx, path)
-            if wc > checks["handoff-words"].params["max_words"]:
-                breaches[f"handoff_words:{s.name}"] = wc
+        if on("handoff-words"):
+            glob = handoff_is_glob(s)
+            for path in handoff_paths(ctx, s):
+                if not path.exists():
+                    continue
+                wc = handoff_words(ctx, path)
+                if wc > checks["handoff-words"].params["max_words"]:
+                    key = f"handoff_words:{s.name}"
+                    if glob:
+                        key += f":{ctx.rel(path).replace(chr(92), '/')}"
+                    breaches[key] = wc
     return breaches
 
 
@@ -115,8 +122,11 @@ def owns(ctx, scope, key: str) -> bool:
         # `rest` is `label:ident`; split from the right — an id never contains ':', but a scope
         # name (`label`) might, so splitting from the left would cut it apart.
         label = rest.rsplit(":", 1)[0]
+    elif kind == "handoff_words":
+        # `label`, or `label:path` for one file of a glob.
+        return rest == scope.name or rest.startswith(scope.name + ":")
     else:
-        # governed_docs / handoff_words: `rest` is the label alone.
+        # governed_docs: `rest` is the label alone.
         label = rest
     return label == scope.name
 
@@ -145,3 +155,53 @@ def write_baseline(ctx, entries: dict[str, int]) -> None:
     path = ctx.baseline_path
     path.parent.mkdir(parents=True, exist_ok=True)
     write(path, json.dumps(dict(sorted(entries.items())), indent=2, sort_keys=True) + "\n")
+
+
+def reasons_path(ctx) -> Path:
+    """Why each raised or added breach was accepted: a flat key -> text file by the baseline."""
+    return ctx.baseline_path.with_name("baseline-reasons.json")
+
+
+def arg(key: str) -> str:
+    """A key as a command-line word: quoted when it holds a space."""
+    return f'"{key}"' if " " in key else key
+
+
+def parse_reasons(text: str) -> dict[str, str]:
+    """A reasons file's entries; ValueError (or JSONDecodeError) when it is not one."""
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("not a JSON object")
+    return {str(k): str(v) for k, v in data.items()}
+
+
+def load_reasons(ctx) -> dict[str, str]:
+    """The recorded reasons, read leniently (a BOM is fine); a missing or unreadable file holds
+    none. `govern baseline`, which rewrites the file, reads it with `load_reasons_strict`."""
+    try:
+        return parse_reasons(reasons_path(ctx).read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return {}
+
+
+def load_reasons_strict(ctx) -> dict[str, str]:
+    """The recorded reasons. A file that exists and does not parse raises
+    `BaselineUnreadable`: treating it as empty would let the next raise delete every other
+    reason."""
+    path = reasons_path(ctx)
+    if not path.exists():
+        return {}
+    try:
+        return parse_reasons(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise BaselineUnreadable(f"{ctx.rel(path)} is not a valid reasons file ({exc})") from exc
+
+
+def write_reasons(ctx, reasons: dict[str, str]) -> None:
+    path = reasons_path(ctx)
+    if not reasons:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    bom = "\ufeff" if has_bom(path) else ""
+    write(path, bom + json.dumps(dict(sorted(reasons.items())), indent=2, sort_keys=True) + "\n")

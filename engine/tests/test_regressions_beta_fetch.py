@@ -12,7 +12,10 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import profile_guard  # noqa: E402,F401
+
 from regressions_support import *  # noqa: E402,F401,F403
+from fixture_cache import copy_of  # noqa: E402
 
 class BetaFetch(Base):
     """`govern beta on` installs what is missing from the project's `[governance] source`: the
@@ -25,14 +28,28 @@ class BetaFetch(Base):
 
     def setUp(self) -> None:
         super().setUp()
-        w = self.ws()
+
+        def build(template: Path) -> None:
+            """The real install, run once per process in a directory of its own."""
+            self.tmp, outer = template, self.tmp
+            try:
+                w = self.ws()
+                _, env = self._installed(w)
+                subprocess.run(["git", "init", "-q", str(w.root)], env=env, check=True,
+                               capture_output=True)
+                (w.root / ".claude").mkdir()
+            finally:
+                self.tmp = outer
+
+        copy_of(("beta-fetch", "installed"), self.tmp, build)
+        w = Workspace.__new__(Workspace)   # the tree is on disk: attach, write nothing
+        w.root, w.home = self.tmp / "ws", self.tmp / "home"
         self.w = w
-        self.entry, self.env = self._installed(w)
+        self.entry = w.root / layout.ENTRYPOINT
+        self.env = {k: v for k, v in os.environ.items() if k != "GOVERN_ENGINE"}
+        self.env["HOME"] = str(w.home)
         self.root, self.home = w.root, w.home
         self.env = {**self.env, "XDG_CONFIG_HOME": str(self.home)}
-        subprocess.run(["git", "init", "-q", str(self.root)], env=self.env, check=True,
-                       capture_output=True)
-        (self.root / ".claude").mkdir()
         self.settings = self.root / ".claude" / "settings.local.json"
         self.engines = layout.engines_dir(self.home)
         self.skills = self.home / ".claude" / "skills"
@@ -91,7 +108,8 @@ class BetaFetch(Base):
 
     def run_beta(self, *args: str, env=None) -> subprocess.CompletedProcess:
         return subprocess.run([sys.executable, str(self.entry), "beta", *args],
-                              env=env or self.env, capture_output=True, text=True)
+                              env=env or self.env, capture_output=True, text=True,
+                              cwd=self.root)
 
     def state(self) -> dict:
         """Every file in the project, its bytes, git's exclude included."""
@@ -146,7 +164,7 @@ class BetaFetch(Base):
         for stamp in (self.home / ".local" / "state" / "context-gate").glob("beta-notice-*"):
             stamp.unlink()              # the probe above said the line already
         gate = subprocess.run([sys.executable, str(self.entry), "check"], env=self.env,
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, cwd=self.root)
         self.assertEqual(gate.returncode, 0, gate.stdout + gate.stderr)
         self.assertIn(f"context-gate: running beta {BETA} on this machine", gate.stderr)
         self.assertNotIn("installing", gate.stderr)
@@ -164,19 +182,24 @@ class BetaFetch(Base):
         self.assertEqual(res.stderr, "")
         self.assertEqual((self.state(), tree_of(self.engines), tree_of(self.skills)), once)
 
+    HINT = (f"if this beta was tagged only on the private repository, publish it with python3 "
+            f"tools/release/publish.py v{BETA} --public <dir> --push")
+
     def test_without_a_source_a_missing_beta_is_refused_as_before(self):
         before = self.state()
         res = self.run_beta("on", BETA)
         self.assertEqual(res.returncode, 2, res.stdout)
         self.assertEqual(res.stderr.strip(),
                          f"error: engine {BETA} is not installed — from a clone of the "
-                         f"repository, run: python3 tools/release/install-engine.py v{BETA}")
+                         f"repository, run: python3 tools/release/install-engine.py v{BETA} "
+                         f"({self.HINT})")
         self.installed(BETA, plugin=False)
         res = self.run_beta("on", BETA)
         self.assertEqual(res.returncode, 2, res.stdout)
         self.assertEqual(res.stderr.strip(),
                          f"error: the local plugin is not {BETA} — from a clone of the "
-                         f"repository, run: python3 tools/release/install-plugin.py v{BETA}")
+                         f"repository, run: python3 tools/release/install-plugin.py v{BETA} "
+                         f"({self.HINT})")
         self.assertEqual(self.state(), before)
 
     def test_a_source_without_the_tag_changes_nothing(self):
@@ -192,6 +215,7 @@ class BetaFetch(Base):
         self.assertEqual(len(said), 2, res.stderr)
         self.assertTrue(said[1].startswith(
             f"error: could not fetch engine v{BETA} from {src.as_posix()}: "), said[1])
+        self.assertTrue(said[1].endswith(f" — {self.HINT}"), said[1])
         self.assertEqual((self.state(), tree_of(self.engines), tree_of(self.skills)), before)
 
     def test_a_fetch_with_no_git_to_run_is_refused_in_one_line(self):
@@ -248,7 +272,8 @@ class BetaFetch(Base):
         self.assertEqual(res.stderr.splitlines(),
                          [f"context-gate: installing engine {BETA} from {src.as_posix()}",
                           f"error: the local plugin is not {BETA} — from a clone of the "
-                          f"repository, run: python3 tools/release/install-plugin.py v{BETA}"])
+                          f"repository, run: python3 tools/release/install-plugin.py v{BETA} "
+                          f"({self.HINT})"])
         self.assertEqual(self.engines_installed(), [BETA])
         self.assertEqual((self.state(), tree_of(self.skills)), (before, {}))
 
@@ -506,7 +531,7 @@ class BetaFetch(Base):
         wtext(self.root / layout.LOCAL, f'[governance]\nengine = "{BETA}"\n')
         env = {k: v for k, v in self.env.items() if k != notice.NO_UPDATE_CHECK}
         gate = subprocess.run([sys.executable, str(self.entry), "check"], env=env,
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, cwd=self.root)
         self.assertEqual(gate.returncode, 0, gate.stdout + gate.stderr)
         self.assertIn(f"context-gate: beta {BETA} is not installed, running the committed pin "
                       f"{__version__}", gate.stderr)
@@ -523,7 +548,7 @@ class BetaFetch(Base):
         self.assertNotIn(BETA, hook.stdout)
         upgrade = subprocess.run([sys.executable, str(self.root / layout.GOV_DIR / "bin" /
                                                       "upgrade")], env=env, capture_output=True,
-                                 text=True)
+                                 text=True, cwd=self.root)
         self.assertEqual(upgrade.stdout.strip(), f"already on context-gate {__version__}")
         self.assertEqual(self.engines_installed(), [__version__])
         self.assertFalse(self.skills.exists())
@@ -531,7 +556,7 @@ class BetaFetch(Base):
     def test_a_project_with_no_local_toml_never_fetches_a_beta(self):
         self.source(__version__, BETA)
         gate = subprocess.run([sys.executable, str(self.entry), "check"], env=self.env,
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, cwd=self.root)
         self.assertEqual(gate.returncode, 0, gate.stdout + gate.stderr)
         self.assertNotIn("beta", gate.stderr)
         self.assertEqual(self.run_beta().stdout, "no beta in this project\n")

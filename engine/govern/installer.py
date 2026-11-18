@@ -31,7 +31,8 @@ reverses exactly that before deleting the directory:
   line a teammate's Claude Code reads. For a marketplace plugin, the marketplace goes in
   `extraKnownMarketplaces` beside it (the public repository, or `--marketplace OWNER/REPO` on
   `adopt` and `enable-plugin`); `context-gate-beta@skills-dir`, how development loads the plugin
-  from ~/.claude/skills/, writes no marketplace. Uninstall restores each setting as it was.
+  from the Claude profile's skills/ folder (~/.claude, or $CLAUDE_CONFIG_DIR), writes no
+  marketplace. Uninstall restores each setting as it was.
   `enable-plugin` does the same for an existing install.
 - Rendered agent roles (`govern agents render`, with the `agent-roles` option on): each file
   written is recorded with the sha256 of its text. Uninstall removes one still as rendered, and
@@ -75,7 +76,7 @@ import govern.checks  # noqa: F401  (registers the built-in checks the config re
 from govern import __version__, config, layout, migrate, notice, ratchet, registry, releases, report
 from govern.checks import repo
 from govern.context import Context
-from govern.text import Unreadable, write
+from govern.text import Unreadable, has_bom, read, write
 
 TEMPLATES = Path(__file__).resolve().parent / "templates"
 TOOL_FILES = layout.TOOL_FILES
@@ -226,19 +227,29 @@ def _gate_env() -> dict:
 SETTINGS = ".claude/settings.json"
 
 
-def _read_settings(root: Path) -> dict:
-    path = root / SETTINGS
+def user_settings(home: Path) -> Path:
+    return layout.claude_dir(home) / "settings.json"
+
+
+def _read_settings_file(path: Path, label: str) -> dict:
     if not path.exists():
         return {}
     data = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(data, dict):
-        raise ValueError(f"{SETTINGS} is not a JSON object")
+        raise ValueError(f"{label} is not a JSON object")
     return data
 
 
+def _read_settings(root: Path) -> dict:
+    return _read_settings_file(root / SETTINGS, SETTINGS)
+
+
 def _write_settings(root: Path, data: dict) -> None:
+    _write_settings_file(root / SETTINGS, data)
+
+
+def _write_settings_file(path: Path, data: dict) -> None:
     """Write the settings as JSON, keeping an existing file's BOM and CRLF line endings."""
-    path = root / SETTINGS
     bom, newline = "", "\n"
     if path.exists():
         raw = path.read_bytes()
@@ -300,8 +311,8 @@ def marketplace_entry(repo: str) -> dict:
 def marketplace_for(plugin_id: str, repo: str | None) -> tuple[str, str] | None:
     """The marketplace an opt-in to `plugin_id` registers, as (name, owner/repo): `repo` when
     given (a fork), the public repository for the public plugin id, and none otherwise (a
-    plugin under ~/.claude/skills/, which is how development runs it). ValueError when
-    `plugin_id` or `repo` cannot mean a marketplace."""
+    plugin under the Claude profile's skills/ folder (~/.claude, or $CLAUDE_CONFIG_DIR), which is
+    how development runs it). ValueError when `plugin_id` or `repo` cannot mean a marketplace."""
     name = plugin_id.partition("@")[2]
     if not name:
         raise ValueError(f"plugin id '{plugin_id}' is not name@marketplace")
@@ -310,7 +321,8 @@ def marketplace_for(plugin_id: str, repo: str | None) -> tuple[str, str] | None:
     if not REPO_RE.match(repo):
         raise ValueError(f"marketplace '{repo}' is not a GitHub owner/repo")
     if plugin_id == layout.SKILLS_DIR_PLUGIN_ID:
-        raise ValueError(f"{plugin_id} is loaded from ~/.claude/skills/, not a marketplace")
+        raise ValueError(f"{plugin_id} is loaded from the Claude profile's skills/ folder "
+                         "(~/.claude, or $CLAUDE_CONFIG_DIR), not a marketplace")
     return name, repo
 
 
@@ -795,6 +807,9 @@ def upgrade(root: Path, with_report: bool = True) -> int:
                   f"{', '.join(v for v, _ in notes)}")
         if opts:
             print(f"  options      {len(opts)} to review: {', '.join(o.id for o in opts)}")
+    behind = notice.plugin_behind(root, layout.home())
+    if behind:
+        print(behind)
     return 0
 
 
@@ -924,6 +939,28 @@ def _rendered(root: Path) -> tuple[list[str], list[str], list[str]]:
     return ours, edited, replaced
 
 
+def _remove_merge_region(root: Path) -> None:
+    """Take the merge driver's region out of .gitattributes, and the file when nothing else is
+    left in it. A file that cannot be read is left as it is."""
+    from govern import merging
+    path = root / ".gitattributes"
+    if not path.is_file():
+        return
+    try:
+        text = read(path)
+        left = merging.attributes_without(text)
+        if left is None:
+            return
+        if left.strip():
+            write(path, ("\ufeff" if has_bom(path) else "") + left)
+        else:
+            path.unlink()
+    except (Unreadable, OSError) as exc:
+        print(f"  left         the merge region in .gitattributes ({exc})")
+        return
+    print("  removed      .gitattributes merge region")
+
+
 def uninstall(root: Path, force: bool = False) -> int:
     """Reverse an install. Every conflict is found before anything changes: if one exists (an
     entry-point stub edited since install, a path to restore that is occupied, a rendered agent
@@ -1008,6 +1045,7 @@ def uninstall(root: Path, force: bool = False) -> int:
     except (roles.GitFailed, Unreadable, OSError) as exc:
         print(f"  left         the {layout.DISPLAY_NAME} lines in the repository's exclude file "
               f"({exc})")
+    _remove_merge_region(root)
     shutil.rmtree(root / layout.GOV_DIR)
     print(f"uninstalled {layout.DISPLAY_NAME} from {root}")
     return 0

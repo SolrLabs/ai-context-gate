@@ -21,6 +21,10 @@ from unittest import mock
 ENGINE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ENGINE))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import profile_guard  # noqa: E402,F401
+
 from govern import installer, measure, profile  # noqa: E402
 
 FM = ("---\ndoc_type: reference\npurpose: test\naudience: agent\nload_when: test\n"

@@ -27,6 +27,10 @@ ENGINE = Path(__file__).resolve().parent.parent
 REPO = ENGINE.parent
 sys.path.insert(0, str(ENGINE))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import profile_guard  # noqa: E402,F401
+
 from govern import __version__, cli, config, installer, layout, manifest, notice  # noqa: E402
 from govern import ratchet, registry, text  # noqa: E402
 from govern.profile import rmtree as profile_rmtree  # noqa: E402

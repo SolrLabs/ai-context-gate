@@ -31,7 +31,8 @@ from govern import layout
 from govern.config import REGISTRY_KEYS, RENAMED_FACTS
 from govern.context import ALWAYS_EXCLUDED_DIRS, git, repo_of
 from govern.decisions import mask_lines
-from govern.migrate import BULLET_RE, INDEX_HEADING_RE, INDEX_ITEM_RE
+from govern.migrate import (BULLET_RE, ENTRY_RE, INDEX_HEADING_RE, INDEX_ITEM_RE,
+                            LOOSE_ENTRY_RE)
 from govern.registry import dig
 from govern.text import Markers, parse_frontmatter, read_text
 
@@ -44,6 +45,7 @@ class DecisionLog:
     prefixes: list[str]       # most common first
     named: bool               # file is DECISIONS.md (any case) or holds a decision-index pair
     lowest: int | None = None  # lowest entry number under the most common prefix
+    loose: int = 0            # entries counted above whose heading is `## X1: Title`; migrate rewrites them
 
 
 @dataclass
@@ -87,8 +89,6 @@ class MeasureError(Exception):
     """Measurement cannot be trusted: a git call failed, so what git ignores is unknown."""
 
 
-# A decision entry: a hyphenated id at level 2 or 3, then a dash.
-ENTRY_RE = re.compile(r"^(#{2,3}) ([A-Z]+)-(\d+)\s*[—–-] ")
 # Any heading that opens with an id, hyphenated or not (`### D7` counts toward `D`).
 HEADING_ID_RE = re.compile(r"^#{1,6}\s+([A-Z]+)-?(\d+)\b")
 # A trap body under a heading (`## T-4 - Title`); bullet bodies are migrate's BULLET_RE.
@@ -340,19 +340,27 @@ def _decision_log(doc: _Doc) -> DecisionLog | None:
     levels: Counter[int] = Counter()
     prefixes: Counter[str] = Counter()
     lows: dict[str, int] = {}
+    loose = 0
+    named = doc.path.name.lower() == "decisions.md" or doc.has_pair("decision-index")
+    # Loose headings (`## Q1: Goals`) are ordinary in other docs: count them only in a file
+    # that is a decision log by name or by its index.
+    loosely = named or "decision" in doc.path.name.lower()
     for _, line in doc.live_lines():
         m = ENTRY_RE.match(line)
+        if not m and loosely:
+            m = LOOSE_ENTRY_RE.match(line)
+            loose += bool(m)
         if m:
             levels[len(m.group(1))] += 1
             prefixes[m.group(2)] += 1
             lows[m.group(2)] = min(lows.get(m.group(2), int(m.group(3))), int(m.group(3)))
-    named = doc.path.name.lower() == "decisions.md" or doc.has_pair("decision-index")
     entries = sum(levels.values())
     if not entries and not named:
         return None
     return DecisionLog(path=doc.rel, entries=entries, level=3 if levels[3] > levels[2] else 2,
                        prefixes=[p for p, _ in prefixes.most_common()], named=named,
-                       lowest=lows[prefixes.most_common(1)[0][0]] if prefixes else None)
+                       lowest=lows[prefixes.most_common(1)[0][0]] if prefixes else None,
+                       loose=loose)
 
 
 def _index_numbers(doc: _Doc) -> set[int] | None:

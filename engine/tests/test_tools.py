@@ -13,7 +13,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import profile_guard  # noqa: E402,F401
+
+REPO =Path(__file__).resolve().parent.parent.parent
 RELEASE = REPO / "tools" / "release"
 
 
@@ -64,7 +68,8 @@ class ReleaseInstallers(unittest.TestCase):
     def run_tool(self, tool: str, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run([sys.executable, str(self.repo / "tools" / "release" / tool), *args],
                               capture_output=True, text=True, encoding="utf-8",
-                              env={**os.environ, "HOME": str(self.home)}, timeout=60)
+                              env={**os.environ, "HOME": str(self.home)}, timeout=60,
+                              cwd=str(self.home))
 
     def test_a_tag_whose_layout_names_no_tool_is_refused(self):
         self.release("1.2.3", None, "tag-plugin")
@@ -109,7 +114,8 @@ class ReleaseInstallers(unittest.TestCase):
             return subprocess.run(
                 [sys.executable, str(clone / "tools" / "release" / tool), "v1.3.0-beta.1"],
                 capture_output=True, text=True, encoding="utf-8",
-                env={**os.environ, "HOME": str(self.home)}, timeout=60)
+                env={**os.environ, "HOME": str(self.home)}, timeout=60,
+                cwd=str(self.home))
 
         res = run("install-engine.py")
         self.assertEqual(res.returncode, 0, res.stderr)

@@ -1,6 +1,9 @@
 """The registry itself: entries match the configuration, and ID ranges never overlap."""
 from __future__ import annotations
 
+from pathlib import Path
+
+from govern.context import git
 from govern.findings import Findings
 from govern.manifest import Param, check
 
@@ -32,7 +35,34 @@ def registry(ctx, params) -> Findings:
             f.error(f"registry: '{s.name}' tier '{tier}' is not one of {tuple(params['tiers'])}")
         if tier in governed and s.gov is not None and not (s.id_prefix and s.get("id_range")):
             f.error(f"registry: '{s.name}' keeps a decision log, so it needs id_prefix and id_range")
+        build_root = s.get("build_root")
+        if build_root:
+            _check_build_root(ctx, f, s, str(build_root))
     return f
+
+
+def _inside(path: Path, folder: Path) -> bool:
+    return path == folder or folder in path.parents
+
+
+def _check_build_root(ctx, f: Findings, s, value: str) -> None:
+    """`build_root` is where a member's build state lives: in the workspace, outside the
+    member's own folder, and in a git repository."""
+    root = ctx.root.resolve()
+    target = (root / value).resolve()
+    name = f"registry: '{s.name}' build_root '{value}'"
+    if not _inside(target, root):
+        f.error(f"{name} is outside the workspace")
+        return
+    where = s.get("dir")
+    if where and _inside(target, (root / where).resolve()):
+        f.error(f"{name} is inside the project's own folder")
+        return
+    near = target
+    while not near.exists() and near != near.parent:
+        near = near.parent
+    if git(near, "rev-parse", "--show-toplevel") is None:
+        f.error(f"{name} is not in a git repository")
 
 
 @check("id-ranges", scope="workspace", since="0.4.0",

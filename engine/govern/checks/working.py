@@ -5,10 +5,10 @@ from datetime import datetime
 from fnmatch import fnmatch
 from pathlib import Path
 
-from govern.checks.docs import all_ticked, status_keyword
+from govern.checks.docs import all_ticked, owner_name, status_keyword
 from govern.findings import Findings
 from govern.manifest import Param, check
-from govern.text import parse_frontmatter, read, word_count
+from govern.text import Unreadable, parse_frontmatter, read, word_count
 
 
 @check("working-file-count", scope="project", since="0.4.0", applies="governed", default="warn",
@@ -19,6 +19,9 @@ from govern.text import parse_frontmatter, read, word_count
            "max_files": Param("int", 12, "Files directly under the working dir",
                               looser="higher"),
            "extensions": Param("list", ["*.md", "*.html", "*.pdf"], "Which files count"),
+           "per_owner_max": Param("int", 0, "Owned files (frontmatter owner) each owner may "
+                                  "hold in the working dir; 0 counts every file against "
+                                  "max_files", looser="higher"),
        })
 def working_file_count(ctx, params, scope) -> Findings:
     f = Findings()
@@ -26,10 +29,34 @@ def working_file_count(ctx, params, scope) -> Findings:
     if not wf.is_dir():
         return f
     files = [p for ext in params["extensions"] for p in wf.glob(ext)]
+    per_owner = params["per_owner_max"]
+    if per_owner > 0:
+        owned: dict[str, int] = {}
+        unowned = []
+        for p in files:
+            owner = _file_owner(p)
+            if owner:
+                owned[owner] = owned.get(owner, 0) + 1
+            else:
+                unowned.append(p)
+        for owner in sorted(owned):
+            if owned[owner] > per_owner:
+                f.error(f"{scope.name}: owner '{owner}' holds {owned[owner]} files in "
+                        f"{wf.name}/, exceeds working-file-count per_owner_max={per_owner}")
+        files = unowned
     if len(files) > params["max_files"]:
         f.error(f"{scope.name}: {len(files)} files in {wf.name}/ exceeds "
                 f"working-file-count max_files={params['max_files']}")
     return f
+
+
+def _file_owner(path) -> str:
+    """The frontmatter `owner` of a file, or "" when it has none (or is not readable text)."""
+    try:
+        fm, _ = parse_frontmatter(read(path))
+    except Unreadable:
+        return ""
+    return owner_name(fm.get("owner"))
 
 
 def _finished_scan(ctx, params, scope):
@@ -108,6 +135,28 @@ def handoff_path(ctx, scope):
     return ctx.root / rel if rel else None
 
 
+def handoff_is_absolute(scope) -> bool:
+    rel = scope.get("handoff") or ""
+    return rel.startswith(("/", "\\")) or Path(rel).is_absolute()
+
+
+def handoff_is_glob(scope) -> bool:
+    return "*" in (scope.get("handoff") or "")
+
+
+def handoff_paths(ctx, scope) -> list[Path]:
+    """Every HANDOFF a scope names: none without the fact, each match (sorted) when the fact
+    holds a `*`, else the one path, whether or not it exists."""
+    rel = scope.get("handoff")
+    if not rel:
+        return []
+    if "*" in rel:
+        if handoff_is_absolute(scope):
+            return []   # `Path.glob` refuses an absolute pattern; `handoff-words` says why
+        return sorted(p for p in ctx.root.glob(rel) if p.is_file())
+    return [ctx.root / rel]
+
+
 def handoff_words(ctx, path) -> int:
     _, body = parse_frontmatter(read(path))
     return word_count(body, ctx.markers)
@@ -120,11 +169,15 @@ def handoff_words(ctx, path) -> int:
        params={"max_words": Param("int", 1500, "Words in a HANDOFF", looser="higher")})
 def handoff(ctx, params, scope) -> Findings:
     f = Findings()
-    path = handoff_path(ctx, scope)
-    if path is None or not path.exists():
-        return f
-    wc = handoff_words(ctx, path)
-    if wc > params["max_words"]:
-        f.warn(f"{scope.name}: {path.name} is {wc} words, over handoff-words max_words="
-               f"{params['max_words']} — current state only, not a log of sessions")
+    glob = handoff_is_glob(scope)
+    if glob and handoff_is_absolute(scope):
+        f.warn(f"{scope.name}: handoff glob {scope.get('handoff')} must be relative to the root")
+    for path in handoff_paths(ctx, scope):
+        if not path.exists():
+            continue
+        wc = handoff_words(ctx, path)
+        if wc > params["max_words"]:
+            name = ctx.rel(path) if glob else path.name
+            f.warn(f"{scope.name}: {name} is {wc} words, over handoff-words max_words="
+                   f"{params['max_words']} — current state only, not a log of sessions")
     return f

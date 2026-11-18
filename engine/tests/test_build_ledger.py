@@ -11,6 +11,8 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import profile_guard  # noqa: E402,F401
+
 from build_support import *  # noqa: E402,F401,F403
 
 class NextAction(unittest.TestCase):
@@ -59,7 +61,7 @@ class NextAction(unittest.TestCase):
 
     def test_every_unit_done_in_the_build_stage_is_reviewed(self):
         said = self.say(("u1", "done"), ("u2", "done"))
-        self.assertEqual(said, f"Every unit is done: run `{roles.GOVERN} build review`.")
+        self.assertEqual(said, f"Every added unit is done: run `{roles.GOVERN} build review`.")
 
     def test_the_review_stage_goes_to_a_fix_or_straight_to_the_close(self):
         said = self.say(("u1", "done"), stage="review")
@@ -369,7 +371,8 @@ class Units(Build):
         brief = self.dir() / "u1" / "brief.md"
         self.assertEqual(self.ledger()["unit"], [{
             "id": "u1", "title": "Session token store", "role": "developer",
-            "status": "pending", "attempts": 0, "branch": "", "commit": "", "note": ""}])
+            "status": "pending", "attempts": 0, "branch": "", "commit": "", "note": "", "base": "",
+            "agent": ""}])
         text = w.read((BUILD / "p1" / "u1" / "brief.md").as_posix())
         lines = text.splitlines()
         self.assertEqual(lines[0], "# p1 / u1 — Session token store")
@@ -444,6 +447,8 @@ class Units(Build):
         self.started()
         self.unit("u1")
         self.unit("u2")
+        self.code()
+        self.w.git("branch", "unit/u1")
         self.assertIn("unit u1 is done", self.ok(
             "unit", "set", "u1", "done", "--branch", "unit/u1", "--commit", "abc1234"))
         self.ok("unit", "set", "u1", "done", "--note", "merged")
@@ -568,6 +573,7 @@ class Collect(Build):
 
     def test_a_branch_with_no_worktree_is_said_in_one_line_and_the_unit_is_still_set(self):
         self.tree()
+        self.w.git("branch", "unit/elsewhere")          # a branch no worktree has checked out
         out = self.ok("unit", "set", "u1", "done", "--branch", "unit/elsewhere")
         self.assertIn("no worktree has unit/elsewhere checked out; nothing copied", out)
         self.assertEqual(self.ledger()["unit"][0]["status"], "done")
@@ -685,6 +691,28 @@ class LedgerFile(Build):
         self.assertEqual(text.count("[[unit]]"), 2)
         self.assertEqual(build.load(made.path), made)
 
+    def test_a_unit_without_a_base_reads_as_an_empty_one_and_a_non_text_base_is_refused(self):
+        self.started()
+        self.unit("u1")
+        good = (self.dir() / build.LEDGER).read_text(encoding="utf-8")
+        self.assertIn('base = ""', good)
+        old = "\n".join(line for line in good.splitlines() if line != 'base = ""') + "\n"
+        self.assertEqual(build.parse(old, self.dir() / build.LEDGER).units[0]["base"], "")
+        path = self.dir() / build.LEDGER
+        path.write_bytes(good.replace('base = ""', "base = 3", 1).encode("utf-8"))
+        err = self.refused("not a build ledger: ", "status")
+        self.assertIn("unit `u1` has a `base` that is not text", err)
+        self.assertIn(str(path), err)
+
+    def test_launch_stores_the_base_it_prints_and_names_the_phase_branch(self):
+        import test_build_worktree as wt
+        self.started()
+        wt.fill(self.unit("u1"))
+        self.w.commit("briefs", at=self.w.top, index=False)
+        out = self.ok("launch", "u1").splitlines()
+        self.assertEqual(out[-2:], [f"Base: {self.head()}", "Phase branch: phase/p1"])
+        self.assertEqual(self.ledger()["unit"][0]["base"], self.head())
+
     def test_a_ledger_that_is_not_toml_is_an_error_naming_the_file(self):
         path = self.broken(b"phase = \n")
         for argv in (("status",), ("status", "--json"), ("unit", "set", "u1", "done"),
@@ -775,7 +803,7 @@ class LedgerFile(Build):
         self.started()
         self.unit("u1")
         with mock.patch.object(build, "_replace", side_effect=PermissionError(13, "denied")):
-            err = self.refused("nothing was written", "unit", "add", "u2", "--title", "T")
+            err = self.refused("anything written before it stays", "unit", "add", "u2", "--title", "T")
         self.assertIn("denied", err)
         self.assertFalse((self.dir() / "u2" / "brief.md").exists())
         self.assertEqual([u["id"] for u in self.ledger()["unit"]], ["u1"])
@@ -841,6 +869,8 @@ class ExpectedStatus(Build):
         self.ok("start", "p1-login", "--plan", "docs/plan-login.md", "--high-risk")
         self.ok("unit", "add", "u1", "--title", "Session token store")
         self.ok("unit", "set", "u1", "running")
+        self.code()
+        self.w.git("branch", "unit/u1")
         self.ok("unit", "set", "u1", "done", "--branch", "unit/u1", "--commit", "3f2a9c1",
                 "--note", "merged")
         self.ok("unit", "add", "u2", "--title", "Token refresh", "--role", "senior-developer")
@@ -856,7 +886,7 @@ class ExpectedStatus(Build):
         some = json.loads((EXPECTED / "build-status.json").read_text(encoding="utf-8"))
         none = json.loads((EXPECTED / "build-status-none.json").read_text(encoding="utf-8"))
         keys = ["phase", "branch", "base", "plan", "high_risk", "visual", "stage", "ledger", "rulings",
-                "units", "done", "total", "next"]
+                "units", "done", "total", "next", "unadded"]
         self.assertEqual((list(some), list(none)), (keys, keys))
         self.assertEqual(list(some["units"][0]), ["id", "title", "role", "status", "attempts",
                                                   "branch", "commit", "note", "brief", "report"])

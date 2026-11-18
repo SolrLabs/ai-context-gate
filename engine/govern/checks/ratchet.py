@@ -53,16 +53,17 @@ def check_ratchet(ctx, params, scope=None) -> Findings:
                 f.error(f"ratchet: '{key}' is a new breach at {val} {unit} ({held_by}), "
                         f"not in {name} — {remedy}; "
                         f"to accept a file that predates the gate, run "
-                        f"`{ctx.prog} baseline --allow-raise`", breach=key)
+                        f"`{ctx.prog} baseline --allow-raise {ratchet.arg(key)} --reason \"<why>\"`", breach=key)
             else:
                 f.error(f"ratchet: '{key}' is a new breach at {val}, not in {name} — "
                         f"fix it, or if it is accepted for now run "
-                        f"`{ctx.prog} baseline --allow-raise`{could_go_for(key)}", breach=key)
+                        f"`{ctx.prog} baseline --allow-raise {ratchet.arg(key)} --reason \"<why>\"`{could_go_for(key)}", breach=key)
         elif val > base:
             grew = f"{val} {unit} ({held_by}, baseline {base})" if setting \
                 else f"{val} (baseline {base})"
             f.error(f"ratchet: '{key}' grew to {grew} — fix it, or "
-                    f"`{ctx.prog} baseline --allow-raise` to accept the new size{could_go_for(key)}", breach=key)
+                    f"`{ctx.prog} baseline --allow-raise {ratchet.arg(key)} --reason \"<why>\"` "
+                    f"to accept the new size{could_go_for(key)}", breach=key)
         elif val < base:
             f.warn(f"ratchet: '{key}' shrank to {val} (baseline {base}) — "
                    f"run `{ctx.prog} baseline` to lower it")

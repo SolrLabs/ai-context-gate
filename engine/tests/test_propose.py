@@ -17,6 +17,10 @@ from pathlib import Path
 ENGINE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ENGINE))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import profile_guard  # noqa: E402,F401
+
 from govern import __version__, config, tomlw  # noqa: E402
 from govern.measure import DecisionLog, Measurement, ScopeMeasure, TrapSet  # noqa: E402
 from govern.propose import (FRONTMATTER_ONLY, GOVERN_THEM, LEAVE_OUT, SINGLE,  # noqa: E402

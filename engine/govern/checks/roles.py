@@ -40,6 +40,16 @@ from govern.text import read
            "handback_checks": Param("list", [],
                                     "Lines the operator adds to every role's hand-back "
                                     "checklist, each `Key: text`"),
+           "brief_lines": Param("list", [],
+                                "Lines every brief that govern build writes carries, under "
+                                "## Project rules"),
+           "forbidden_trailers": Param("list", [],
+                                       "Regular expressions; a commit message in a unit's "
+                                       "branch with a line matching one is refused when the "
+                                       "unit is marked done"),
+           "commit_reports": Param("bool", False,
+                                   "Unit and review reports (*-report.md) are committed with the "
+                                   "ledger, so a reviewer on another machine can read them"),
            "high_risk_paths": Param("list", [],
                                     "Paths that make a phase high-risk, so qa-engineer runs "
                                     "beside code-reviewer"),
@@ -55,6 +65,13 @@ from govern.text import read
            "housekeeping": Param("bool", True,
                                  "Whether the rules tell the coordinator to launch "
                                  "technical-writer and close the phase when a fix pass closes"),
+           "fast_checks": Param("list", [],
+                                "Cheap whole-tree commands developer and senior-developer run "
+                                "once after their scoped tests and report; not rendered under "
+                                "`unit_gate = \"full\"`"),
+           "worktree_setup": Param("str", "",
+                                   "One command the code and writing roles run in their worktree "
+                                   "right after the Base merge, before the first edit"),
            "rules_file": Param("str", roles.RULES_FILE,
                                "Where the coordinator's build rules are rendered"),
        })

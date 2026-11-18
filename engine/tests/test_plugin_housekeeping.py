@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import profile_guard  # noqa: E402,F401
+
 from plugin_support import *  # noqa: E402,F401,F403
 
 
@@ -69,7 +71,7 @@ class LinesOtherFilesAdd(unittest.TestCase):
     def test_options_skill_names_the_sweep_setting(self) -> None:
         text = flat(PLUGIN / "skills" / "options" / "SKILL.md")
         self.assertIn("`[sweep] auto_remove`", text)
-        self.assertIn("older than 0.7.0-beta.16", text)
+        self.assertIn("older than 0.7.0", text)
 
     def test_options_skill_says_to_check_before_restarting(self) -> None:
         text = flat(PLUGIN / "skills" / "options" / "SKILL.md")

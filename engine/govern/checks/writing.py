@@ -24,7 +24,7 @@ from pathlib import Path
 
 from govern import config, layout, manifest
 from govern.decisions import FENCE, INLINE_CODE_RE, LIVE, line_kinds
-from govern.context import default_exclude, glob_matches
+from govern.context import WRITING_EXCLUDE_HINT, default_exclude, glob_matches
 from govern.findings import Findings
 from govern.manifest import Param, check
 from govern.profile import PRINCIPLES
@@ -37,8 +37,8 @@ OUTWARD = ("README.md", "CONTRIBUTING.md", "docs")
 NAME_CHARS = frozenset(string.ascii_letters + string.digits + "_-")
 
 # `writing-rules: allow licence, licences`, keywords in any case: the texts run to the end of the
-# line, or to the end of the comment the marker sits in (`-->`, `*/`).
-ALLOW_RE = re.compile(r"writing-rules:\s*allow\s+(.*?)\s*(?:-->|\*/|$)", re.IGNORECASE)
+# line, or to the end of the comment the marker sits in (`-->`, `*/`, `--}}`).
+ALLOW_RE = re.compile(r"writing-rules:\s*allow\s+(.*?)\s*(?:-->|\*/|--\}\}|$)", re.IGNORECASE)
 
 
 def vocabulary() -> set[str]:
@@ -167,6 +167,9 @@ def _selected(ctx, params) -> tuple[list[Path], list[str]]:
     So is one git ignores, asked of the repo that holds each file (`_ignored`, as for governed
     docs), unless `include_ignored` names it: drafts kept out of git are still checked there.
     An entry whose every file `Path.glob` found is spelled otherwise on disk warns, naming one."""
+    # Under `check --path` in a single repo the files are the snapshot's; `ctx.rel` maps a
+    # finding back to the real path.
+    base = ctx.snapshot if ctx.snapshot is not None else ctx.root
     exclude = [_pattern(x) for x in params["exclude"]]
     include = [_pattern(x) for x in params["include_ignored"]]
     include_excluded = [_pattern(x) for x in params["include_excluded"]]
@@ -178,12 +181,12 @@ def _selected(ctx, params) -> tuple[list[Path], list[str]]:
     for entry in params["files"]:
         pattern = _pattern(entry)
         found[entry], why[entry], matched[entry], other[entry] = [], set(), 0, []
-        for p in ctx.root.glob(pattern):
+        for p in base.glob(pattern):
             if not p.is_file():
                 continue
-            rel = unicodedata.normalize("NFC", p.relative_to(ctx.root).as_posix())
-            if not (glob_matches(pattern, rel) and _on_disk(ctx.root, rel, listed)):
-                other[entry].append(_spelled(ctx.root, rel, listed) or rel)
+            rel = unicodedata.normalize("NFC", p.relative_to(base).as_posix())
+            if not (glob_matches(pattern, rel) and _on_disk(base, rel, listed)):
+                other[entry].append(_spelled(base, rel, listed) or rel)
                 continue
             matched[entry] += 1
             if default_exclude(rel) is not None and (
@@ -291,5 +294,7 @@ def writing_rules(ctx, params) -> Findings:
                 msg += f" (use '{rule['use']}')"
             if rule.get("why"):
                 msg += f" — {rule['why']}"
+            if ctx.hint_once("exclude"):
+                msg += f" \u2014 {WRITING_EXCLUDE_HINT}"
             (f.warn if rule.get("level") == "warn" else f.error)(msg)
     return f

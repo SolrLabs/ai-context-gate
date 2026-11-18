@@ -19,9 +19,10 @@ When your launch prompt has a `Worktree:` line, the project you review is in tha
 
 - Launch only an isolated copy: temporary folders and test data, never the owner's real settings, data or accounts. If the brief does not say how to isolate it, stop and report.
 - Close what you launched, even after a failed run.
-- Look at real output (a screenshot, a captured page), not at the code that should produce it.
+- Look at real output (a screenshot, a captured page), not at the code behind it.
 - Mark each finding as a fault in the product or a fault in your own script.
 - Scratch files go only in the folder your brief names.
+- {{reading}}
 - Measure what a screenshot cannot settle (positions, widths, overflow, text that touches), and open every screenshot you take.
 
 ## Rules

@@ -25,7 +25,10 @@ from pathlib import Path, PurePath
 from govern.layout import TOOL
 
 GATE_DEFAULTS = {"briefed": ["developer", "senior-developer"], "claims": True,
-                 "deny_push": True, "max_refusals": 2, "checklist": False}
+                 "deny_push": True, "max_refusals": 2, "checklist": False,
+                 "deny_resume": True, "read_lines": 400}
+# Files `Read` shows as images, pages or cells: a line count means nothing for them.
+READ_EXEMPT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".pdf", ".ipynb"}
 MEASURE_DEFAULTS = {"notice": True}
 SESSION_STATE_DAYS = 30     # per-session state untouched this long is swept at session start
 HELD_BRIEF_SECONDS = 30     # a held brief older than this belongs to a launch that never started
@@ -526,30 +529,103 @@ def on_launch_failed(home, sid, data) -> None:
             pending.unlink(missing_ok=True)
 
 
-def on_pre_resume(home, sid, data) -> None:
+def on_pre_resume(home, sid, data, gates=None) -> dict | None:
     """A message to an agent this session launched resumes it. Its contract is the message's
-    own `Produces:` and `Red:` lines, never the first brief's again."""
+    own `Produces:` and `Red:` lines, never the first brief's again. A message to an agent that
+    has finished is denied with `deny_resume`: a fresh agent with a tight brief is cheaper."""
     inp = data.get("tool_input") or {}
     to = inp.get("to")
     if not _safe(to):
-        return
+        return None
     d = state_dir(home, sid)
-    if (d / f"launch-{to}.json").is_file():
+    launch = d / f"launch-{to}.json"
+    if launch.is_file():
+        if gates and gates.get("deny_resume", GATE_DEFAULTS["deny_resume"]):
+            record = read_json(launch, {})
+            if isinstance(record, dict) and record.get("ended"):
+                return _deny(f"{to} has finished. A finished agent re-reads its whole history on "
+                             "every turn: launch a fresh agent with a brief that names the file, "
+                             "the lines, the input that shows the fault, and the branch with the "
+                             "earlier attempt.")
         write_json(d / f"resume-{to}.json", contract(inp.get("message") or "", data.get("cwd")))
     else:
         # Addressed by name, which no launch record holds: the next start of an agent that
         # already has one claims it (see `on_start`).
         write_json(d / "resume-by-name.json",
                    {**contract(inp.get("message") or "", data.get("cwd")), "t": time.time()})
-
-
-def on_pre_bash(gates, data) -> dict | None:
-    if gates and gates["deny_push"] and data.get("agent_id") \
-            and pushes((data.get("tool_input") or {}).get("command") or ""):
-        return _deny("Pushing is the coordinator's job, not a subagent's. Do not run `git push`: "
-                     "commit your work, and say in your final message that it is committed and "
-                     "ready to push.")
     return None
+
+
+def on_pre_read(gates, data) -> dict | None:
+    """Deny a whole-file `Read` of a file longer than `read_lines`. Silent on any doubt: a file
+    that cannot be opened, a binary or an image, a read with `offset` or `limit`, any error."""
+    try:
+        limit = gates.get("read_lines", GATE_DEFAULTS["read_lines"]) if gates else 0
+        inp = data.get("tool_input") or {}
+        if (not isinstance(limit, int) or isinstance(limit, bool) or limit < 1
+                or inp.get("offset") is not None or inp.get("limit") is not None):
+            return None
+        name = inp.get("file_path")
+        if not isinstance(name, str) or not name:
+            return None
+        path = Path(name)
+        if path.suffix.lower() in READ_EXEMPT:
+            return None
+        if not path.is_absolute() and isinstance(data.get("cwd"), str) and data["cwd"]:
+            path = Path(data["cwd"]) / path
+        lines = 0
+        with open(path, "rb") as f:
+            if b"\0" in f.read(8192):
+                return None
+            f.seek(0)
+            last = b"\n"
+            while lines <= limit:
+                chunk = f.read(65536)
+                if not chunk:
+                    lines += last != b"\n"      # a last line with no newline counts
+                    break
+                lines += chunk.count(b"\n")
+                last = chunk[-1:]
+            if lines > limit:
+                return _deny(f"{path} has more than {limit} lines. Grep for what you need, or "
+                             "Read it with offset/limit, in parts if you need all of it.")
+    except Exception:
+        return None
+    return None
+
+
+def _red_gate(root) -> str | None:
+    """The refusal for a coordinator's push when the current phase's last full gate is red at
+    HEAD; None when there is no record, it is still running, it is for another head, or anything
+    cannot be read: a push is never blocked on a guess."""
+    try:
+        from govern import build, phase     # not at the top: the hook imports this on every event
+        top = Path(root)
+        branch = build.checked_out(top)
+        ledger = build.current(top, branch) if branch else None
+        rec = build._gate_record(ledger) if ledger is not None else None
+        if not rec or rec.get("status") != "done" or rec.get("rc") in (0, None):
+            return None
+        head = phase._out(phase._run(top, "rev-parse", "HEAD"))
+        if not head or rec.get("head") != head:
+            return None
+        return (f"push refused: the last full gate on this phase is red (rc {rec['rc']} at "
+                f"{head[:7]}). Run python3 .context-gate/bin/govern build gate.")
+    except Exception:
+        return None
+
+
+def on_pre_bash(gates, data, root=None) -> dict | None:
+    if not gates or not pushes((data.get("tool_input") or {}).get("command") or ""):
+        return None
+    if data.get("agent_id"):
+        if gates["deny_push"]:
+            return _deny("Pushing is the coordinator's job, not a subagent's. Do not run `git "
+                         "push`: commit your work, and say in your final message that it is "
+                         "committed and ready to push.")
+        return None
+    red = _red_gate(root) if root else None
+    return _deny(red) if red else None
 
 
 def on_start(home, sid, data) -> None:
@@ -853,13 +929,15 @@ def missing(launch: dict, tools: list[dict], final: str, claims: bool,
     edits = [r["t"] for r in tools if r.get("tool") in EDIT_TOOLS and not r.get("failed")]
     for raw in launch.get("red") or []:
         paths = where(launch, "red", raw)
-        found = [[f for f in q.glob("*") if f.is_file() and f.stat().st_size
-                  and f.stat().st_mtime >= since - 1] if q.is_dir() else [] for q in paths]
+        every = [[f for f in q.rglob("*") if f.is_file() and f.stat().st_size]
+                 if q.is_dir() else [] for q in paths]
+        found = [[f for f in fs if f.stat().st_mtime >= since - 1] for fs in every]
         files = next((f for f in found if f), [])
         if not files:
-            problems.append(f"{paths[0]} holds no failing-test output from this run. Run the "
-                            "test against the code before your fix and save its real output "
-                            "there.")
+            what = ("holds only files from before this run" if any(every)
+                    else "holds no files")
+            problems.append(f"{paths[0]} {what}. Run the test against the code before your "
+                            "fix and save its real output there.")
         elif edits and min(f.stat().st_mtime for f in files) > max(edits):
             problems.append(f"the output in {paths[0]} was saved after your last edit, so it "
                             "does not show the test failing before the change.")
@@ -1087,9 +1165,11 @@ def handle(home: Path, resolved: dict, data: dict) -> dict | None:
         if tool == "Agent":
             return on_pre_launch(home, sid, gates, data)
         if tool == "SendMessage":
-            on_pre_resume(home, sid, data)
-        elif tool == "Bash":
-            return on_pre_bash(gates, data)
+            return on_pre_resume(home, sid, data, gates)
+        if tool == "Bash":
+            return on_pre_bash(gates, data, root)
+        if tool == "Read":
+            return on_pre_read(gates, data)
         return None
     if event in ("PostToolUse", "PostToolUseFailure"):
         out = None
@@ -1114,14 +1194,20 @@ def mark(home: Path, root, name: str, now: float | None = None) -> Path:
 
 def load_runs(home: Path, root, everything: bool = False) -> tuple[list[dict], str | None]:
     """The project's runs since the last mark (all of them with `everything`), and that mark's
-    label (None when there is none or `everything`)."""
-    runs, name, models = [], None, {}
+    label (None when there is none or `everything`). The coordinator's rows come after the agents'
+    and are kept apart: the newest per session and phase, and without `everything` only those of
+    the current mark's phase, wherever in the file they were written."""
+    runs, name, models, coord = [], None, {}, {}
     for row in read_json_lines(durable_path(home, root)):
         if "mark" in row:
             if not everything:
                 runs, name = [], row["mark"]
         elif "model_for" in row:
             models[(row.get("session"), row["model_for"])] = row.get("model")
+        elif row.get("coordinator"):
+            key = (row.get("session"), row.get("phase"))
+            if key not in coord or float(row.get("t") or 0) >= float(coord[key].get("t") or 0):
+                coord[key] = row
         elif "agent" in row:
             runs.append(row)
     later = set()
@@ -1136,7 +1222,14 @@ def load_runs(home: Path, root, everything: bool = False) -> tuple[list[dict], s
     for r in runs:
         if not r.get("model"):
             r["model"] = models.get((r.get("session"), r.get("agent")))
+    runs += [r for r in coord.values() if everything or name is None or r.get("phase") == name]
     return runs, name
+
+
+def _row_tokens(row: dict) -> int:
+    """All four token counts of a coordinator row, which holds them at the top level."""
+    return sum(int(row.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens",
+                                              "cache_read_input_tokens", "output_tokens"))
 
 
 def _all_tokens(row: dict) -> int:
@@ -1145,9 +1238,43 @@ def _all_tokens(row: dict) -> int:
                                                 "cache_read_input_tokens", "output_tokens"))
 
 
+def _coordinator_report(rows: list[dict]) -> dict:
+    """The coordinator's rows summed per phase ("" is planning), in the order first seen."""
+    out = {}
+    for r in rows:
+        slot = out.setdefault(r.get("phase") or "", {
+            "requests": 0, "input_tokens": 0, "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0, "output_tokens": 0, "peak_context": 0,
+            "compactions": 0, "owner_turns": 0, "handbacks": 0, "largest": []})
+        for k in ("requests", "input_tokens", "cache_creation_input_tokens",
+                  "cache_read_input_tokens", "output_tokens", "compactions", "owner_turns",
+                  "handbacks"):
+            slot[k] += int(r.get(k) or 0)
+        slot["peak_context"] = max(slot["peak_context"], int(r.get("peak_context") or 0))
+        slot["largest"] += [x for x in r.get("largest") or [] if isinstance(x, dict)]
+    for slot in out.values():
+        slot["largest"] = sorted(slot["largest"], key=lambda x: -float(x.get("kb") or 0))[:5]
+    return out
+
+
 def build_report(runs: list[dict]) -> dict:
     by_role, by_tool = {}, {}
     for r in runs:
+        if r.get("coordinator"):
+            if not r.get("requests"):
+                continue        # no request, so no model: it shows in the Coordinator section only
+            slot = by_role.setdefault(f"coordinator ({r.get('model')})", {
+                "runs": 0, "tokens": 0, "new_input": 0, "cached_reread": 0, "output": 0,
+                "tool_calls": 0, "wall_s": 0.0})
+            slot["runs"] += 1
+            slot["new_input"] += int(r.get("input_tokens") or 0) \
+                + int(r.get("cache_creation_input_tokens") or 0)
+            slot["cached_reread"] += int(r.get("cache_read_input_tokens") or 0)
+            slot["output"] += int(r.get("output_tokens") or 0)
+            slot["tokens"] += _row_tokens(r)
+            slot["tool_calls"] += sum(int(t.get("calls") or 0)
+                                      for t in (r.get("tools") or {}).values())
+            continue
         slot = by_role.setdefault(f"{r.get('type')} ({r.get('model')})", {
             "runs": 0, "tokens": 0, "new_input": 0, "cached_reread": 0, "output": 0,
             "tool_calls": 0, "wall_s": 0.0})
@@ -1164,11 +1291,13 @@ def build_report(runs: list[dict]) -> dict:
             agg = by_tool.setdefault(name, {"calls": 0, "ms": 0, "bytes": 0, "failed": 0})
             for k in agg:
                 agg[k] += int(t.get(k) or 0)
+    agents = [r for r in runs if not r.get("coordinator")]
     largest = sorted((dict(x, agent=r.get("agent"), type=r.get("type"))
-                      for r in runs for x in r.get("largest") or []),
+                      for r in agents for x in r.get("largest") or []),
                      key=lambda x: -x["bytes"])[:5]
     return {"runs": runs, "by_role": by_role, "by_tool": by_tool, "largest": largest,
-            "suggestions": suggestions(runs)}
+            "coordinator": _coordinator_report([r for r in runs if r.get("coordinator")]),
+            "suggestions": suggestions(agents)}
 
 
 def suggestions(runs: list[dict]) -> list[str]:
@@ -1185,7 +1314,8 @@ def suggestions(runs: list[dict]) -> list[str]:
         cached = sum(int((r.get("tokens") or {}).get("cache_read_input_tokens") or 0)
                      for r in resumed)
         out.append(f"{len(resumed)} runs were resumed and re-read {cached:,} cached tokens "
-                   "between them: prefer a fresh agent with a short brief.")
+                   "between them: resume a unit's builder only for its own fix, and launch a fresh agent "
+                   "from the fourth round.")
     commands = {}
     for r in runs:
         for c in {x["command"] for x in r.get("repeated") or []}:
@@ -1216,8 +1346,9 @@ def suggestions(runs: list[dict]) -> list[str]:
 
 
 def render_report(report: dict, name: str | None, everything: bool) -> str:
-    runs = report["runs"]
-    scope = "all runs" if everything else f"since mark '{name}'" if name else "no mark yet"
+    runs = [r for r in report["runs"] if not r.get("coordinator")]
+    scope = ("all runs" if everything else "planning, since the last phase closed" if name == ""
+             else f"since mark '{name}'" if name else "no mark yet")
     out = [f"{len(runs)} agent runs ({scope}).", ""]
     out += [one_line(r).replace("[agent run] ", "- ") for r in runs]
     if report["by_role"]:
@@ -1234,6 +1365,21 @@ def render_report(report: dict, name: str | None, everything: bool) -> str:
         out += ["", "Largest results (each is re-read on every later turn of its agent):"]
         out += [f"- {x['bytes'] / 1024:.1f} KB {x['tool']} {str(x.get('label'))[-70:]}"
                 for x in report["largest"]]
+    if report.get("coordinator"):
+        out += ["", "Coordinator (requests, tokens: new input, cached re-read, output; peak "
+                    "context; compactions; owner turns; hand-backs):"]
+        big = []
+        for phase, v in report["coordinator"].items():
+            out.append(f"- {phase or 'planning'}: {v['requests']}, "
+                       f"{v['input_tokens'] + v['cache_creation_input_tokens']:,}, "
+                       f"{v['cache_read_input_tokens']:,}, {v['output_tokens']:,}; "
+                       f"{v['peak_context']:,}; {v['compactions']}; {v['owner_turns']}; "
+                       f"{v['handbacks']}")
+            big += v["largest"]
+        big = sorted(big, key=lambda x: -float(x.get("kb") or 0))[:5]
+        if big:
+            out += ["Largest coordinator results:"]
+            out += [f"- {x.get('kb')} KB {x.get('tool')}" for x in big]
     unfinished = [r for r in runs if r.get("unfinished")]
     if unfinished:
         out += [""] + [f"- {r.get('type') or 'an agent'}: blocked on its contract and never ended"

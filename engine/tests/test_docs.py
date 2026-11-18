@@ -17,7 +17,12 @@ ENGINE = Path(__file__).resolve().parent.parent
 REPO = ENGINE.parent
 sys.path.insert(0, str(ENGINE))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import profile_guard  # noqa: E402,F401
+
 from govern import __version__, config, layout  # noqa: E402
+import govern.checks  # noqa: E402,F401  registers the built-in checks the config examples name
 
 DOCS = REPO / "docs"
 RENDER = REPO / "tools" / "render-checks.py"

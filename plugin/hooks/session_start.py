@@ -15,6 +15,28 @@ import time
 from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+_INPUT: bytes | None = None     # this hook's stdin, read once: `main` and `_usage` both need it
+
+
+def _input() -> bytes:
+    """The hook's stdin bytes, read once; empty when run by hand or when it cannot be read."""
+    global _INPUT
+    if _INPUT is None:
+        try:
+            _INPUT = b"" if sys.stdin is None or sys.stdin.isatty() else sys.stdin.buffer.read()
+        except Exception:
+            _INPUT = b""
+    return _INPUT
+
+
+def _source() -> str:
+    """The `source` of this start ("startup", "compact", ...); "" when unreadable."""
+    try:
+        data = json.loads(_input().decode("utf-8") or "{}")
+        src = data.get("source") if isinstance(data, dict) else ""
+        return src if isinstance(src, str) else ""
+    except Exception:
+        return ""
 
 
 def main() -> None:
@@ -35,14 +57,40 @@ def main() -> None:
                               "hookSpecificOutput": {"hookEventName": "SessionStart",
                                                      "additionalContext": left}}))
         return
-    msgs = [notice.for_project(root, home), notice.both_plugins_warning(root, home), left,
-            differs]
+    msgs = [notice.for_project(root, home), notice.both_plugins_warning(root, home),
+            notice.plugin_behind(root, home), left, differs]
     msgs.extend(_usage(root, home))
+    msgs.append(_driver_missing(root))
+    if _source() == "compact":
+        # After a compact the build's state comes back word for word (see compact.py).
+        try:
+            from govern import build
+            msgs.append(build.compact_text(root))
+        except Exception:
+            pass
     msg = "\n".join(m for m in msgs if m)
     if msg:
         print(json.dumps({"systemMessage": msg,
                           "hookSpecificOutput": {"hookEventName": "SessionStart",
                                                  "additionalContext": msg}}))
+
+
+def _driver_missing(root: Path) -> str | None:
+    """This project's `.gitattributes` assigns the merge driver (the `merge-driver` check is on),
+    but this clone's git config does not define it. Read from the file, not the config, because
+    this process does not load the project's config. Never raises."""
+    try:
+        text = (root / ".gitattributes").read_text(encoding="utf-8")
+        if "merge=context-gate" not in text:
+            return None
+        res = subprocess.run(["git", "config", "--get", "merge.context-gate.driver"],
+                             cwd=str(root), capture_output=True, text=True, timeout=3)
+        if res.returncode != 1 or res.stdout.strip():
+            return None     # defined, or git could not say: nothing to add
+        return ("This clone merges decision logs without context-gate's driver: run python3 "
+                ".context-gate/bin/govern merge-driver install")
+    except Exception:
+        return None
 
 
 def _beta_left_behind(root: Path) -> str | None:
@@ -122,6 +170,37 @@ def _mentions_usage(root: Path) -> bool:
     return bool((data.get("governance") or {}).get("profile"))
 
 
+def _siblings(root: Path, home: Path, sid: str) -> list:
+    """For a team (more than one author on this branch in the last 90 days), the ids this branch
+    added that another fetched branch also added with a different title: up to three lines,
+    then up to ten lines (and a tail) naming the decisions and traps teammates changed on the
+    default branch since this developer's last session. Finding them loads the project's config, so it runs in `siblings.py`, a child process with
+    its output discarded and a short timeout, and hands its lines back in a file this process
+    named, read once and removed. A solo developer pays one `git log` call (`team_size`) per
+    start and no child process. Never raises; any failure says nothing."""
+    try:
+        from govern import agent_runs, refs
+        if refs.team_size(root) <= 1:
+            return []
+        out = agent_runs.agents_dir(home) / f"{sid}.siblings.json"
+        try:
+            subprocess.run([sys.executable, str(PLUGIN_ROOT / "hooks" / "siblings.py"),
+                            str(root), str(out)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=7)
+        except Exception:
+            pass
+        said = agent_runs.read_json(out)
+        try:
+            out.unlink(missing_ok=True)
+        except OSError:
+            pass
+        if isinstance(said, list):
+            return [m for m in said if isinstance(m, str) and m]
+    except Exception:
+        pass
+    return []
+
+
 def _usage(root: Path, home: Path) -> list:
     """Resolve the usage option for this session, and re-wrap the statusline if another tool
     replaced it; and, when the project has a build folder, say which build is in flight on the
@@ -138,11 +217,12 @@ def _usage(root: Path, home: Path) -> list:
     try:
         if sys.stdin is None or sys.stdin.isatty():
             return msgs        # run by hand, not by Claude Code: no hook input to wait for
-        data = json.loads(sys.stdin.buffer.read() or b"{}")
+        data = json.loads(_input() or b"{}")
         sid = data.get("session_id")
         if not isinstance(sid, str) or not sid or "/" in sid or "\\" in sid:
             return msgs
         from govern import layout
+        msgs.extend(_siblings(root, home, sid))
         # `build/.gitignore` outlives every phase: only a ledger one level down is a build.
         building = any((root / layout.GOV_DIR / "build").glob("*/ledger.toml"))
         if not building and not _mentions_usage(root):

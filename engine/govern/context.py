@@ -50,6 +50,15 @@ def git(repo: Path, *args: str) -> str | None:
     return res.stdout.decode("utf-8", errors="replace").strip()
 
 
+# Said once per run on the first finding about a file that is not the project's to govern (no
+# frontmatter, a forbidden word): a shipped or downloaded file is left out, not fixed.
+EXCLUDE_HINT = (f'exclude a shipped or downloaded file with [projects] exclude = ["<glob>"] '
+                f'in {layout.CONFIG}')
+# The same for writing-rules, which is scoped by its own `exclude` param, not `[projects] exclude`.
+WRITING_EXCLUDE_HINT = (f'exclude a shipped or downloaded file with [checks.writing-rules] '
+                        f'exclude = ["<glob>"] in {layout.CONFIG}')
+
+
 def repo_of(path: Path) -> Path | None:
     """The git repo that contains `path`: the nearest directory above it holding `.git` (a
     directory, or a file in a linked worktree or submodule), or None when none does. Never
@@ -140,6 +149,11 @@ class Context:
     # run: one `git check-ignore --stdin` call per repo per batch of files not already answered,
     # not one per file and not one per call site.
     _ignore_cache: dict = field(default_factory=dict, repr=False, compare=False)
+    # Which nested checkouts inside a governed folder the repo holding that folder ignores
+    # (`_ignored_checkouts`), asked once per checkout per run.
+    _checkout_cache: dict = field(default_factory=dict, repr=False, compare=False)
+    # The one-time hints a finding carried already in this run (`hint_once`).
+    _hinted: set = field(default_factory=set, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self.markers = Markers(self.cfg.dialect["markers"])
@@ -260,7 +274,9 @@ class Context:
         anything git ignores, sorted by path. A vendored or build tree is never a project's own
         documentation in any project; a file git ignores is excluded the same way — unless
         git itself cannot answer (missing, no repo, a lock), when it is kept rather than hidden
-        from the gate silently."""
+        from the gate silently. A file inside a nested checkout (a folder with its own `.git`,
+        strictly inside `gov`) is left out too when the repo holding `gov` ignores that
+        checkout's folder: a scratch clone is not the project's documentation."""
         if not gov.is_dir():
             return []
         patterns = self.projects("docs", ["**/*.md"])
@@ -274,7 +290,9 @@ class Context:
                 if not doc_excluded(rel, exclude):
                     candidates[rel] = p
         ignored = self._ignored(list(candidates.values()))
-        return sorted((rel, p) for rel, p in candidates.items() if p not in ignored)
+        inside = self._ignored_checkouts(gov, list(candidates.values()))
+        return sorted((rel, p) for rel, p in candidates.items()
+                      if p not in ignored and self._checkout_of(gov, p) not in inside)
 
     def workspace_docs(self) -> list[Path]:
         """The workspace's own docs: every file its `[workspace] docs` globs match under the
@@ -328,6 +346,57 @@ class Context:
                 for r, line in lines.items():
                     self._ignore_cache[r] = line in hits
         return {p for p, r in resolved.items() if self._ignore_cache.get(r, False)}
+
+    def hint_once(self, key: str) -> bool:
+        """True the first time `key` is asked in this run, False after: a hint that belongs on
+        the first finding of its kind, not on every one."""
+        if key in self._hinted:
+            return False
+        self._hinted.add(key)
+        return True
+
+    @staticmethod
+    def _checkout_of(gov: Path, path: Path) -> Path | None:
+        """The outermost nested checkout `path` lies in: a folder with its own `.git` strictly
+        inside `gov` and strictly above `path`. None when it lies in none."""
+        gov = gov.resolve()
+        real = path.resolve()
+        if not real.is_relative_to(gov):
+            return None
+        for d in reversed(real.parents):
+            if d != gov and d.is_relative_to(gov) and (d / ".git").exists():
+                return d
+        return None
+
+    def _ignored_checkouts(self, gov: Path, paths: list[Path]) -> set:
+        """Which of the nested checkouts `paths` lie in (`_checkout_of`) the repo holding `gov`
+        ignores — one batched `git check-ignore --stdin` call for those not already answered,
+        cached on the context. The files inside belong to the checkout's own repo, which cannot
+        say its own folder is ignored. A failing git call, no repo around `gov`, or a `--path`
+        snapshot (its checkouts are not where git can be asked) answers "not ignored". A
+        workspace member's own checkout is `gov` itself, never strictly inside it."""
+        if self.snapshot is not None and gov.is_relative_to(self.snapshot):
+            return set()
+        resolved = gov.resolve()
+        repo = resolved if (resolved / ".git").exists() else repo_of(resolved)
+        if repo is None:
+            return set()
+        dirs = {d for p in paths if (d := self._checkout_of(gov, p)) is not None}
+        todo = sorted(d for d in dirs if (repo, d) not in self._checkout_cache)
+        if todo:
+            lines = {d: d.relative_to(repo).as_posix() + "/" for d in todo}
+            try:
+                res = subprocess.run(["git", "-C", str(repo), "check-ignore", "--stdin"],
+                                     input="\n".join(lines.values()).encode("utf-8"),
+                                     capture_output=True, timeout=20, env=git_env())
+            except (OSError, subprocess.SubprocessError):
+                res = None
+            hits = set()
+            if res is not None and res.returncode in (0, 1):
+                hits = set(res.stdout.decode("utf-8", errors="replace").splitlines())
+            for d, line in lines.items():
+                self._checkout_cache[(repo, d)] = line in hits
+        return {d for d in dirs if self._checkout_cache.get((repo, d), False)}
 
     def _snapshot_repo(self, path: Path) -> tuple[Path, str] | None:
         """`(repo, rel)` to ask what git ignores about `path`, a file inside a `--path`

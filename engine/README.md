@@ -31,6 +31,7 @@ setting in [configuration](../docs/configuration.md), and every check in
 | `decisions.py` | Decision-log and trap parsing under a named heading grammar |
 | `base.py` | Comparing against a base: what a file held at a commit (`files`, `exists`, `read`, `since`, `renames`, `resolve`, `merge_base`, `ls`), with absence read off the commit's tree so a failed read is never a new log, a log under another name found by the rename git reads or else by the ids it holds, and `compare`, both sides of every decision log and trap file per repository, with each repository that could not be compared and why. `match` pairs the two sides by id, and returns the copies of an id that pairs more than one way as left over |
 | `changes.py` | The report `diff` prints, built from `base.compare`: one line per changed decision (`removed`, `added`, `superseded`, `moved`, `revised`, `status`, `changed`), trap and baseline number (or `unreadable` for a baseline that cannot be read), and the commit each repository was compared with. Its text layout and JSON keys are a contract, held byte for byte in `tests/expected/` |
+| `seen.py` | What teammates changed in governance since this clone's last session, for session start in a team: up to ten `since your last session` lines, each with its author, from refs this clone already holds (nothing is fetched), with the commit last seen kept per project under `~/.local/state/context-gate/seen/` |
 | `migrate.py` | Moving a project's decision logs and traps from other common shapes onto the standard mechanically |
 | `measure.py` | Reading a project's layout before it adopts: registry, scopes, decision logs, traps, working dir, docs, markers, nested checkouts (read-only, no config) |
 | `adopt.py` | `measure`, then `propose`, then with `--apply` install, create logs, migrate, index, baseline and check in one step, reported in `adopt-report.md` |
@@ -44,7 +45,7 @@ setting in [configuration](../docs/configuration.md), and every check in
 | `agent_runs.py` | Agent gates and measurement at run time: briefs and their contracts, the gates, per-run totals from a transcript, the run logs, `govern runs mark` and `report`; standard library only, so the plugin's hook can import it |
 | `field_report.py` | `govern report draft`, `check` and `send`: a field report on context-gate itself in `.context-gate/reports/` (ignored by git), refused while it holds a path, a name the machine or git knows the project by, an address, a secret's shape or a term from `.context-gate/report-private.txt`, and opened as a new-issue page on the public repository for the person to submit. It never calls the network |
 | `phase.py` | `govern phase close`: push the phase branch, confirm the remote holds it, remove the local branches and worktrees it contains |
-| `local_plugin.py` | The local plugin, assembled from one release's tree and swapped into `~/.claude/skills/`: what `tools/release/install-plugin.py` installs. `govern beta on` runs it from the beta it fetched; standard library, `layout` and `profile.rmtree` only |
+| `local_plugin.py` | The local plugin, assembled from one release's tree and swapped into the `skills/` folder of the Claude profile folder (`~/.claude`, or `$CLAUDE_CONFIG_DIR` when set): what `tools/release/install-plugin.py` installs. `govern beta on` runs it from the beta it fetched; standard library, `layout` and `profile.rmtree` only |
 | `usage_setup.py` | Usage alerts, set up: install the statusline capture, uninstall it, re-wrap it when another tool replaces `statusLine`, and resolve a project's option and alerts file |
 | `checks/` | The built-in checks, one module per concern |
 
@@ -113,7 +114,7 @@ After any command, the gate prints one line when a newer engine exists (installe
 released at `[governance] source`, checked at most daily and cached): orange in a terminal,
 plain through a pipe so agents read the same words. `python3 .context-gate/bin/upgrade`
 acts on it: it finds the newest release (or `--to X.Y.Z`), installs it from the source if
-needed, and runs that engine's `upgrade`. When the Claude Code plugin is present (installed under `~/.claude/skills/` or enabled in
+needed, and runs that engine's `upgrade`. When the Claude Code plugin is present (installed under the profile's `skills/` or enabled in
 settings), the notice points at `/context-gate:upgrade` instead; the plugin's
 session-start hook shows the same notice when a session opens (see `plugin/README.md`).
 `CONTEXT_GATE_NO_UPDATE_CHECK=1` keeps the gate
@@ -181,6 +182,7 @@ module from `checks/__init__.py`. Then add a test that fails without it, and run
 
 ```sh
 python3 -m unittest discover -s engine/tests          # the engine's tests
+python3 tools/ci/parallel_tests.py engine/tests       # the same, one class per process (run-tests.sh uses it)
 tools/ci/run-tests.sh --host                          # the same, plus the plugin's validation
 tools/ci/run-tests.sh                                 # and again on Python 3.11 in Docker
 ```

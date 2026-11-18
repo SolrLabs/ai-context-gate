@@ -13,7 +13,10 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import profile_guard  # noqa: E402,F401
+
 from plugin_support import *  # noqa: E402,F401,F403
+from build_support import Build, GATES  # noqa: E402
 
 
 class Plugin(unittest.TestCase):
@@ -108,7 +111,7 @@ class Plugin(unittest.TestCase):
 
     def test_build_skill_runs_the_full_gate_on_the_phase_branch_after_the_merge(self):
         text = self.build_text()
-        self.assertIn("run the project's full gate on the phase branch", text)
+        self.assertIn("`python3 .context-gate/bin/govern build gate` on the phase branch", text)
         self.assertNotIn("Run the project's gate on its branch", text)
 
     def test_build_skill_says_what_a_red_gate_after_the_merge_means(self):
@@ -184,11 +187,27 @@ class Plugin(unittest.TestCase):
 
     def test_build_skill_checks_a_brief_against_itself(self):
         text = self.build_text()
-        self.assertIn("check it against itself", text)
-        self.assertIn("carries one worked example", text)
-        self.assertIn("The existing tests the unit will change are named", text)
-        self.assertIn("points at no file under `.context-gate/build` that git ignores", text)
+        self.assertIn("read `checklists.md` beside this file and check the brief", text)
+        checklist = " ".join((PLUGIN / "skills/build/checklists.md").read_text(
+            encoding="utf-8").split())
+        self.assertIn("carries one worked example", checklist)
+        self.assertIn("The existing tests the unit will change are named", checklist)
+        self.assertIn("points at no file under `.context-gate/build` that git ignores", checklist)
         self.assertIn('only for a unit added with `--red`', text)
+
+    def test_build_skill_numbered_steps_each_start_a_line(self):
+        raw = (PLUGIN / "skills/build/SKILL.md").read_text(encoding="utf-8")
+        section = raw[raw.index("## 1."):raw.index("## 2.")]
+        for n in range(1, 9):
+            self.assertRegex(section, rf"(?m)^{n}\. ", f"step {n} does not start its own line")
+        self.assertNotIn(".   Units that share", raw)
+        self.assertNotRegex(raw, r"\.\d\. `")
+
+    def test_build_skill_keeps_two_owner_rules(self):
+        text = self.build_text()
+        self.assertIn("what you are about to build and in what order. Do not wait for an answer.",
+                      text)
+        self.assertIn("Do not hand them a command to work out.", text)
 
     def test_build_skill_proves_a_running_system_fix_on_one(self):
         self.assertIn("proved fixed on a running system, with the reviewer's own steps",
@@ -670,7 +689,7 @@ class AgentHooks(Plugin):
 
     def test_hooks_json_registers_every_event_the_agent_hooks_act_on(self):
         hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
-        wanted = {"PreToolUse": "Agent|SendMessage|Bash", "PostToolUse": "*",
+        wanted = {"PreToolUse": "Agent|SendMessage|Bash|Read", "PostToolUse": "*",
                   "PostToolUseFailure": "*", "SubagentStart": None, "SubagentStop": None,
                   "UserPromptSubmit": None}
         for event, matcher in wanted.items():
@@ -691,6 +710,7 @@ class AgentHooks(Plugin):
         got = self.resolved()
         self.assertEqual(got["gates"], {"briefed": ["developer", "senior-developer"],
                                         "claims": True, "deny_push": True, "max_refusals": 2,
+                                        "deny_resume": True, "read_lines": 400,
                                         "checklist": False, "checklist_keys": {},
                                     "checklist_texts": {}})
         self.assertIsNone(got["measure"])
@@ -943,7 +963,7 @@ class BuildInFlight(Plugin):
         self.ledger("pending")
         self.ledger("done", branch="phase/p2", phase="p2")
         self.assertTrue(json.loads(self.start())["systemMessage"].startswith(
-            "A build is in flight: p2, 1 of 1 units done. Next: Every unit is done"))
+            "A build is in flight: p2, 1 of 1 units done. Next: Every added unit is done"))
 
     def test_a_build_folder_with_no_ledger_says_nothing(self):
         self.on_branch()
@@ -1051,6 +1071,64 @@ class BetaStandsDown(unittest.TestCase):
     def test_with_the_beta_off_the_usage_hook_says_nothing(self):
         out = self.run_hook("usage.py", {"session_id": "S", "hook_event_name": "SessionEnd"})
         self.assertEqual(out, "")
+
+
+class PushGuard(Build):
+    """A coordinator's `git push` is refused while the phase's last full gate is red at HEAD."""
+    CONFIG = '\n[checks.agent-roles]\nlevel = "warn"\nfull_gate = "exit 3"\n'
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.started(extra=self.CONFIG)
+        self.unit("u1")
+
+    def push(self, **more) -> dict | None:
+        from govern import agent_runs
+        data = {"session_id": "S", "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                "tool_input": {"command": "git push origin phase/p1"}, **more}
+        return agent_runs.handle(self.w.home, {"gates": GATES, "measure": None,
+                                               "root": str(self.w.root)}, data)
+
+    def reason(self, out: dict) -> str:
+        return out["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_a_coordinator_push_is_denied_on_a_red_record_for_head(self):
+        self.go("gate")
+        out = self.push()
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(self.reason(out),
+                         f"push refused: the last full gate on this phase is red (rc 3 at "
+                         f"{self.head()[:7]}). Run python3 .context-gate/bin/govern build gate.")
+
+    def test_no_record_a_running_record_or_another_head_never_blocks(self):
+        self.assertIsNone(self.push())
+        self.go("gate")
+        self.code()
+        self.assertIsNone(self.push())
+        path = self.dir() / "gate" / "last.json"
+        path.write_text('{"status": "running", "at": "x"}', encoding="utf-8")
+        self.assertIsNone(self.push())
+
+    def test_a_green_record_does_not_block(self):
+        self.go("gate", "--cmd", "exit 0")
+        self.assertIsNone(self.push())
+        (self.dir() / "gate").mkdir(exist_ok=True)
+        (self.dir() / "gate" / "last.json").write_text(
+            json.dumps({"status": "done", "rc": 0, "head": self.head()}), encoding="utf-8")
+        self.assertIsNone(self.push())
+
+    def test_an_agents_push_is_still_denied_for_the_old_reason(self):
+        out = self.push(agent_id="a1")
+        self.assertIn("Pushing is the coordinator's job", self.reason(out))
+
+    def test_without_the_gates_nothing_is_denied(self):
+        from govern import agent_runs
+        self.go("gate")
+        data = {"session_id": "S", "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                "tool_input": {"command": "git push"}}
+        self.assertIsNone(agent_runs.handle(
+            self.w.home, {"gates": None, "measure": {"notice": True}, "root": str(self.w.root)},
+            data))
 
 
 if __name__ == "__main__":

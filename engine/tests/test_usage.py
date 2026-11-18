@@ -15,6 +15,10 @@ from unittest import mock
 ENGINE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ENGINE))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import profile_guard  # noqa: E402,F401
+
 from govern import usage  # noqa: E402
 from govern.usage import Alert, AlertsError  # noqa: E402
 

@@ -6,15 +6,16 @@ DIR holds `plugin/` and `engine/govern/` as one release tag carries them (a clon
 say). What is installed is what `tools/release/install-plugin.py` installs for that tag:
 `plugin/` plus the engine as `govern/`, so the skill, its hooks and the engine it bundles are
 one version; the release stamp `govern/RELEASE` (`vX.Y.Z`), in the installed copy only; and
-`defaultEnabled: false`, since a plugin under ~/.claude/skills/ is otherwise on in every
-project. It lands in HOME/.claude/skills/<the plugin's own name>/ and loads in later sessions
-as `<name>@skills-dir`.
+`defaultEnabled: false`, since a plugin under the Claude profile's skills/ folder (~/.claude, or
+$CLAUDE_CONFIG_DIR) is otherwise on in every project. It lands in the profile's skills/<the
+plugin's own name>/ and loads in later sessions as `<name>@skills-dir`.
 
-A beta's plugin is named `<name>-beta` (Claude Code never loads a plugin under ~/.claude/skills/
-whose name an installed marketplace plugin has), lands in HOME/.claude/skills/<name>-beta/ and
-loads as `<name>-beta@skills-dir`. HOME/.claude/skills/<name>/ is then left holding only
-`govern/RELEASE` and a README: the marker launchers older than the beta's own name look for,
-which Claude Code does not take for a plugin. An existing local install there is replaced by it.
+A beta's plugin is named `<name>-beta` (Claude Code never loads a plugin under the profile's
+skills/ folder whose name an installed marketplace plugin has), lands in the profile's
+skills/<name>-beta/ and loads as `<name>-beta@skills-dir`. The profile's skills/<name>/ is then
+left holding only `govern/RELEASE` and a README: the marker launchers older than the beta's own
+name look for, which Claude Code does not take for a plugin. An existing local install there is
+replaced by it.
 
 `govern beta on` runs this module from the beta it fetched, so each beta lays out its own
 plugin. Standard library, `layout` and `profile.rmtree` only: it runs from a bare clone of the
@@ -25,7 +26,7 @@ leaves the earlier install whole. Refuses a tree whose plugin.json version and e
 disagree, and with `--name` one whose plugin.json gives another name: the caller says which
 plugin it came for, so a tree cannot choose what it replaces. Replaces an existing local install
 of the plugin, which is a directory carrying the release stamp; one without it was not put
-there by this tool and is refused. Never touches anything else under ~/.claude/.
+there by this tool and is refused. Never touches anything else under the profile folder.
 """
 from __future__ import annotations
 
@@ -89,8 +90,8 @@ def assemble(tree: Path, stage: Path) -> tuple[str, str]:
 
 def _marker(stage: Path, version: str, beta_name: str) -> None:
     """What launchers from before a beta had a plugin name of its own look for at
-    ~/.claude/skills/<name>/: the release stamp and a README, and nothing Claude Code takes for
-    a plugin (no `.claude-plugin/`, no SKILL.md)."""
+    the Claude profile's skills/<name>/ (~/.claude, or $CLAUDE_CONFIG_DIR): the release stamp and
+    a README, and nothing Claude Code takes for a plugin (no `.claude-plugin/`, no SKILL.md)."""
     (stage / "govern").mkdir(parents=True)
     (stage / "govern" / layout.RELEASE_MARKER).write_text(f"v{version}\n", encoding="utf-8")
     (stage / "README.md").write_text(
@@ -132,7 +133,7 @@ def install(tree: Path, home: Path, expected: str | None = None) -> tuple[str, s
     if expected is not None and name != expected:
         raise PluginError(f"v{version} is the plugin {name!r}, not {expected!r}; nothing was "
                           "installed")
-    skills = home / ".claude" / "skills"
+    skills = layout.claude_dir(home) / "skills"
     beta = "-beta." in version
     out = skills / (f"{name}-beta" if beta else name)
     marker = skills / name if beta else None      # what an older launcher reads, for a beta only
