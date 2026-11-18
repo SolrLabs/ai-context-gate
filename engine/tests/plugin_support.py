@@ -21,6 +21,10 @@ PLUGIN = REPO / "plugin"
 
 sys.path.insert(0, str(ENGINE))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import profile_guard  # noqa: E402,F401
+
 from govern import __version__, layout, notice  # noqa: E402
 
 BETA = "9.9.0-beta.1"

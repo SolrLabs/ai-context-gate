@@ -21,6 +21,10 @@ ENGINE = Path(__file__).resolve().parent.parent
 REPO = ENGINE.parent
 sys.path.insert(0, str(ENGINE))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import profile_guard  # noqa: E402,F401
+
 from govern import __version__, layout, local_plugin, profile  # noqa: E402
 
 VERSION = "9.8.7"
@@ -101,7 +105,7 @@ class LocalPlugin(unittest.TestCase):
         return subprocess.run([sys.executable, str(repo / "tools" / "release" / TOOL.name),
                                f"v{version}", *more], capture_output=True, text=True,
                               encoding="utf-8", env={**os.environ, "HOME": str(home)},
-                              timeout=60)
+                              timeout=60, cwd=str(home))
 
     def earlier_install(self, home: Path) -> None:
         """An older local install holding a read-only file, beside things that are not this

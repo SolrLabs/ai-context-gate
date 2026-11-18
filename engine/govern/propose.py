@@ -737,7 +737,7 @@ def propose(m: Measurement, source: str | None, profile: str | None,
             p.scopes = [s for s in p.scopes if s.name not in skip]
     logs = [c for s in [m.workspace, *p.scopes] for c in s.decision_logs]
     sets = [ts for s in [m.workspace, *p.scopes] for ts in s.trap_sets]
-    p.migrate = any(c.level == 3 for c in logs) or any(ts.bullets for ts in sets)
+    p.migrate = any(c.level == 3 or c.loose for c in logs) or any(ts.bullets for ts in sets)
     p.decision_logs(cfg)
     if p.registry_file is not None:
         p.id_ranges(cfg)

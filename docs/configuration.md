@@ -85,14 +85,46 @@ Optional. Every key is a string, and every key is optional.
 | `governance` | `"."` | The governance directory, relative to the root. `""` opts the repo out of the checks that need one. |
 | `id_prefix` | none | The decision-id prefix, like `"P"` for `P-12` |
 | `id_range` | none | The decision numbers this log may use, `"LO-HI"` |
-| `handoff` | none | The HANDOFF file, relative to the root |
+| `handoff` | none | The HANDOFF file, relative to the root. A glob such as `docs/handoff/*.md` is allowed: each match is checked and ratcheted on its own |
 | `role` | none | Used by `checkout-hygiene` and `licenses` to pick entries by role |
 | `license` | none | The project's license, read by `licenses` |
 | `upstream` | none | The upstream remote URL, read by `checkout-hygiene` |
+| `build_root` | none | In a workspace, where this member's build state (ledgers, briefs, reports) lives: a folder from the workspace root, in the workspace's own repository and outside the member's `dir`. Checked by `registry` |
 | `purpose`, `runtime_gate` | none | Descriptive facts, shown in a registry column if one is configured |
 
 A project that keeps a decision log needs `id_prefix` and `id_range` (the `registry` check
 reports it otherwise).
+
+#### A public member
+
+A member whose repository is public should receive only code: its governance files, build
+ledgers, briefs and reports live in the workspace's own private repository. Two settings do it.
+
+```toml
+# fragment: the member's entry in projects.toml, then the workspace's config.toml
+[[project]]
+name = "web"
+dir = "web"
+tier = "full"
+role = "publish"
+governance = "governance/web"
+build_root = "planning/web"
+
+[checks.checkout-hygiene]
+level = "error"
+roles = ["publish"]
+forbidden = [".context-gate/", "AGENTS.md"]
+history = true
+```
+
+`governance` points into the workspace, so the member's own tree holds no governance
+directory, and `build_root` puts its build state at `planning/web/.context-gate/build/` in the
+workspace. `checkout-hygiene` then fails when a checkout in the `publish` role holds any
+`forbidden` path in its tree, or, with `history = true`, anywhere in its history; and
+`govern build start` refuses for a member that has no `build_root` while `.context-gate/` is
+forbidden. The member's own `.context-gate/build/` is ignored through its `.git/info/exclude`,
+which `build start` writes. `build status --team` does not see ledgers under `build_root`
+(a limit of this release).
 
 ```toml
 [governance]
@@ -210,7 +242,7 @@ Where every project keeps its records. Paths are relative to each project's gove
 | `decision_log` | string | `"DECISIONS.md"` | The project's decision log |
 | `working_dir` | string | `"working-files"` | The working-files directory |
 | `trap_glob` | string | `"traps*.md"` | Trap files, inside the working-files directory |
-| `trap_prefix` | string | `"T"` | The trap-id prefix, as in `T-3` |
+| `trap_prefix` | string | `"T"` | The trap-id prefix, as in `T-3` | <!-- decision-citations: allow T-3 -->
 
 Governed docs never include files under `node_modules/`, `.venv/`, `venv/`, `vendor/`, `dist/`,
 `build/`, `target/`, `.git/`, `.context-gate/` (the tool's own files and reports) or `.claude/`
@@ -264,6 +296,7 @@ the block's id and the [`[dialect] markers`](#dialect) prefix:
 | `workspace` | `registry` | Every registry entry, in the configured columns |
 | `workspace`, `project` | `decision-index` | Every decision in the file, grouped by `**Topic:**` |
 | `project` | `doc-registry` | Every governed doc, grouped by doc type, with a working file's status |
+| `project` | `team-state` | Each handoff with its owner and first sentence, and the builds in flight; reads only builds tracked in the checkout, never fetched ones |
 | `project` | `trap-index` | Every trap: id, title and when it bites |
 
 A `trap-index` block may set `sources`, a glob of more trap files (relative to the governance
@@ -313,7 +346,7 @@ Format settings. The defaults are the standard. A project may keep a different f
 
 | Key | Default | Other value | Meaning |
 |---|---|---|---|
-| `decision_heading` | `"any-dash"` | `"em-dash"` | Which dash separates an entry's id from its title. `any-dash` accepts an em dash, an en dash or a hyphen, with spacing optional; `em-dash` requires ` — `. The examples in these docs use a hyphen (`## D-12 - Title`); an em or en dash is read too. A heading-shaped line that fails the grammar is an error either way. |
+| `decision_heading` | `"any-dash"` | `"em-dash"` | Which dash separates an entry's id from its title. `any-dash` accepts an em dash, an en dash or a hyphen, with spacing optional; `em-dash` requires ` — `. The examples in these docs use a hyphen (`## D-12 - Title`); an em or en dash is read too. A heading-shaped line that fails the grammar is an error either way. | <!-- decision-citations: allow D-12 -->
 | `next_id` | `"max-plus-one"` | `"first-free"` | Whether `next-id` prints the highest id plus one, or reuses the first gap. A reused gap can collide with a deleted id that is still cited. |
 | `id_overlap` | `"prefix-aware"` | `"prefix-blind"` | Whether id ranges are compared only within the same prefix, or across prefixes too |
 | `agent_turns_prose` | `"must-match"` | `"forbid"` | Whether an agent's prose may state a turn count that matches its `maxTurns`, or may state none at all |
@@ -532,21 +565,69 @@ that matches its `keep` setting, a list of `fnmatch` patterns (default `main`, `
 `development`, `beta-*`, `release-*`). When git cannot answer, or the default branch cannot be
 told, it warns that merged branches were not checked.
 
+## Merging on a team
+
+Git merges a decision log by line, so two branches that each add an entry conflict at the end
+of the file. The `merge-driver` check (off by default) keeps a region in `.gitattributes`,
+between `# context-gate:start` and `# context-gate:end`, that assigns context-gate's merge
+driver to the decision logs, the trap files, the files holding generated blocks and the ratchet
+baseline. `index` writes the region and `check` reports it missing or stale; `uninstall` removes
+it. The driver merges entries by id, so two new entries never conflict; a generated block takes
+our side and is refilled by `index`; the baseline merges per key.
+
+The region is committed, but git's driver definition lives in each clone's own config. Run
+`python3 .context-gate/bin/govern merge-driver install` once per clone. It sets
+`merge.context-gate.driver` and writes `post-merge` and `post-rewrite` hooks that run `index`
+after a merge or a rebase and say when generated blocks changed, so you can commit them. A hook
+that is not context-gate's, or a `core.hooksPath` setting, is never overwritten: the command
+prints the line to add to it. Install records the Python that ran it, so run it again after
+moving or upgrading Python. A session starts with a notice when the region is committed but
+the clone is not wired.
+
+When two branches add the same id, the driver keeps both entries, marks them as a conflict and
+puts the comment `<id> was added on both branches` above them. Keep one and give the other a
+new id; `govern renumber`, coming in a later release, will do that.
+
 ## Sweep
 
 `govern sweep` reports every worktree and local branch with a verdict saying whether it can go,
-and removes nothing without `--apply --only`. The `[sweep]` table has one key, `auto_remove`,
-which names the verdicts the `housekeeping` skill may remove without asking. An engine older than
-0.7.0-beta.16 refuses the table, so set it in `.context-gate/local.toml` while the committed pin
-is older. A branch the `merged-branches` check's `keep` list names is never offered for removal.
+and removes nothing without `--apply --only`. The `[sweep]` table has three keys: `auto_remove`,
+which names the verdicts the `housekeeping` skill may remove without asking, `stale_days` and
+`stale_remote_days`. An engine older than
+0.7.0 refuses the table. A principles profile may set `[sweep]` too: each key resolves engine default, then
+profile, then the project's `config.toml`, and a key the project sets replaces the profile's
+whole (`auto_remove = []` asks before every removal). A branch the `merged-branches` check's `keep` list names is never offered for removal.
 
 ```toml
-# fragment: local.toml, not config.toml
+# fragment: config.toml (or a principles profile)
 [sweep]
-auto_remove = ["merged", "pr-merged"]
+auto_remove = ["merged", "pr-merged", "pushed", "stale"]
+stale_days = 14
+stale_remote_days = 30
 ```
 
-- `auto_remove`: a list of `"merged"` and `"pr-merged"`. Default `[]`: ask before every removal.
+- `auto_remove`: a list of `"merged"`, `"pr-merged"`, `"pushed"` and `"stale"`. With no key, the
+  default is `[]`: the engine ships no auto-removal, so every removal is asked about. The example
+  above is one a project or profile may set.
+- `stale_days`: an integer of 0 or more, default 14. A local branch with no open pull request
+  whose exact tip is on a remote, and whose last commit is at least this many days old, has the
+  verdict `PUSHED` (`on origin/spike, idle 20 days`). `0` means any age. The remote has the
+  commits and the bundle `--apply` writes has them too, so it can go; `--apply` asks the remote
+  (`git ls-remote`) again first and skips the branch when the remote no longer holds that tip.
+- `stale_remote_days`: an integer of 0 or more, default 30. Each remote branch (`origin/spike`)
+  is listed as a `remote` item, only on the remote the default branch is judged against, except
+  the default branch, `develop`, `dev`, `staging`, `stage`, `production`, `prod` and `trunk`,
+  `keep` names, an open build's branch, and one whose local namesake is not merged (the
+  checked-out branch counts when it is merged, so `--home` can remove its remote too). It is `MERGED` when it is in the remote's default
+  branch, `PR-MERGED` as for a local branch, `STALE` when it has no open pull request and its
+  last commit is at least this many days old (`idle 40 days`), else `REVIEW`. `0` means never
+  `STALE`. Name it `origin/spike` in `--only`; `--apply` bundles it, asks the remote again, and
+  runs `git push origin --delete spike` only when the remote still holds the judged tip.
+- `--home`, with `--apply`: first `git fetch --prune` each remote (a failure stops the command
+  with nothing removed), then, when the checkout is on a removable branch with a clean work
+  tree, `git switch` to the default branch and fast-forward it. A default branch with commits
+  its remote lacks stops the command. A dirty tree stays where it is and removes nothing on
+  that branch.
 
 ## Running a beta locally
 
@@ -554,7 +635,7 @@ You can run a locally installed prerelease in one project, on one machine, witho
 committed pin, CI or anyone else's checkout. `.context-gate/local.toml` is the switch:
 
 ```toml
-# fragment: local.toml, not config.toml
+# fragment: config.toml (or a principles profile)
 [governance]
 engine = "0.6.0-beta.1"
 plugins_before = { "context-gate@context-gate" = true }
@@ -583,14 +664,14 @@ not already ignore them.
 
 A beta comes from a `vX.Y.Z-beta.N` tag. `govern beta on` installs its engine and its plugin from
 the project's `[governance] source` when either is missing on this machine. The beta plugin is the
-local install, `context-gate-beta@skills-dir`, in `~/.claude/skills/context-gate-beta/`, and its
+local install, `context-gate-beta@skills-dir`, in `skills/context-gate-beta/` of the Claude profile folder (`~/.claude`, or `$CLAUDE_CONFIG_DIR` when set), and its
 skills are `/context-gate-beta:<skill>`; the stable plugin is the marketplace one,
 `context-gate@context-gate`.
 
 The beta plugin has a name of its own because Claude Code does not load a local plugin whose name
 an installed plugin already has, whatever a project's settings enable. Under the released plugin's
 name the beta plugin would never load where the release is installed. Launchers from 0.6.1 or
-earlier look for the beta in `~/.claude/skills/context-gate/govern/RELEASE`, so the beta install
+earlier look for the beta in `~/.claude/skills/context-gate/govern/RELEASE` (their profile folder is always `~/.claude`), so the beta install
 also leaves that marker folder, holding only `govern/RELEASE` and a README. Claude Code does not
 take it for a plugin. After `govern beta on` from a launcher that old, which enables the old id,
 run any `govern` command once in the project: the beta engine corrects the setting and says so.
@@ -630,7 +711,7 @@ beta's own engine. For a beta whose engine has no `govern/local_plugin.py` (a fo
 engine and then names the `install-plugin.py` command to run. `govern beta` and `govern beta off` never use the network.
 `beta on` then writes `local.toml`, sets `enabledPlugins` in
 `.claude/settings.local.json` to turn the beta plugin on and the stable plugin off, and keeps every
-other key in that file. `govern beta off` removes `local.toml`, puts the two plugin keys back as it
+other key in that file. `govern beta off` clears its keys from `local.toml`, puts the two plugin keys back as it
 found them, and works even when the beta engine is broken or gone. With no beta on, it says so and
 touches nothing.
 
@@ -641,9 +722,10 @@ version named. It refuses when there is no beta, and when the newest one is a be
 project already runs (`0.6.0-beta.4` with a pin of `0.6.0` or `0.6`). Name the version to switch to
 that beta anyway.
 
-`govern beta off` removes `local.toml` whole. When the file holds anything besides its
-`[governance]` table, `beta off` prints those lines after its usual output, so you can copy what
-you want to keep into `.context-gate/config.toml`. A file it cannot parse is printed whole.
+`govern beta off` removes only `[governance] engine` and `plugins_before` from `local.toml` and
+keeps the rest of the file (your `[checks.*]` tables and comments); it deletes the file when
+nothing else is left. A file it cannot parse is printed whole. A beta tag that is missing names
+`tools/release/publish.py` in its message.
 
 With another beta already on, `govern beta on` switches to the new one. It changes only the
 `engine` value in `local.toml` and keeps the rest of the file: your `[checks.*]` tables, your
@@ -791,13 +873,14 @@ python3 .context-gate/bin/govern usage install
 ```
 
 This copies the writer to `~/.local/share/context-gate/capture.py`, then rewrites
-`~/.claude/settings.json`: only `statusLine.command` changes, to run the writer, chained to
+the `settings.json` in the Claude profile folder (`~/.claude`, or `$CLAUDE_CONFIG_DIR` when set):
+only `statusLine.command` changes, to run the writer, chained to
 whatever `statusLine` ran before (saved so it can be restored). Before that write, and before any
 other write this feature makes to `settings.json`, the file's current bytes are copied to
 `~/.local/share/context-gate/settings.json.bak`, so a bad write is recoverable by hand. `govern usage install` can be run again safely: it refreshes the writer and the interpreter path
 in place rather than wrapping twice.
 
-With `usage` on, each session start re-wraps the statusline in `~/.claude/settings.json` if
+With `usage` on, each session start re-wraps the statusline in the profile's `settings.json` if
 another tool replaced it. Turning the option off stops the data lines and alerts, but leaves the
 statusline wrapped until you run `govern usage uninstall`. Problems, not usage values, are logged
 to `~/.local/state/context-gate/usage/usage.log`: a failed option lookup, an alerts file that
@@ -881,6 +964,114 @@ once (`usage: .context-gate/usage-alerts.toml has an error (...); keeping the pr
 deleting the file keeps them too. Which file wins (project or profile) is settled at session start,
 and turning the `usage` option on or off needs a new session.
 
+### The status row
+
+The capture can draw its own status row in place of your statusline:
+
+```
+<folder> │ <branch> │ <model> │ Ctx: N% │ Usage: N% <bar> → Reset: <time> │ Weekly: N% · today N/N%
+```
+
+It reads only what Claude Code pipes to the status line: no credentials, and nothing is sent
+anywhere. It needs the capture installed first.
+
+```
+python3 .context-gate/bin/govern usage row on
+python3 .context-gate/bin/govern usage row off
+python3 .context-gate/bin/govern usage row status
+```
+
+`govern usage install` leaves the setting as it is; `govern usage uninstall` removes it.
+
+- Context: under 70% green, 70-89% yellow, 90% and up red.
+- 5-hour, by projection: `projected = used + rate × time left`, the share used by
+  the reset, with the rate taken from the last hour. Green at 100 or less; yellow up to 105;
+  red above that, and always red at 100% used. With under 15 minutes
+  of history it uses the average since the window opened. Examples: 2 hours left in the
+  5-hour window, 30% an hour ago and 40% now is 60, green; 60% now is 120, red; an idle hour
+  is green.
+- Weekly: see Weekly allowance below.
+- The bar: ten cells, one per 10% used (`█` used, `░` free), and a `┃` where an even pace would be.
+- `NO_COLOR` turns colors off.
+
+The figures: every session reports the same account-wide limits, but each only as fresh as its
+last request. The capture keeps one shared history on the machine
+(`~/.local/state/context-gate/usage/history.jsonl`, the last two hours; `govern usage uninstall`
+removes it), and every row shows the freshest figure any session has seen.
+
+The timer: `govern usage install` sets `refreshInterval: 60` on the statusLine, so the row
+redraws while the session is idle. Use from the desktop app shows up only after a Claude Code
+session next makes a request.
+
+Wrapping: on a narrow terminal the row breaks between parts (Claude Code sets `COLUMNS`).
+
+### Weekly allowance
+
+With the status row on, the weekly figure shows a daily allowance: how much of the week you have used, and how much
+of today's share. It reads a settings file on your machine,
+`~/.local/share/context-gate/usage-week.toml`. Without the file every day weighs the same.
+
+```toml
+# fragment: ~/.local/share/context-gate/usage-week.toml
+[weekly]
+weights = { mon = 1, tue = 1, wed = 1, thu = 1, fri = 1, sat = 0.4, sun = 1 }
+day_end = "24:00"
+later_cut = 0.1
+[weekly.profiles."~/.claude-work"]
+weights = { mon = 1, tue = 1, wed = 1, thu = 1, fri = 1, sat = 0, sun = 0 }
+day_end = "18:00"
+```
+
+- `weights`: a number from 0 to 10 for each of `mon` to `sun`. A day that weighs 0 is an off day.
+  A weekday left out weighs 1.
+- `day_end`: when your day ends, `HH:MM` from `00:01` to `24:00`. The default is `24:00`.
+- `later_cut`: a number from 0 to 1, the yellow band described below. The default is 0.1.
+- `[weekly.profiles."<folder>"]`: the same keys for one Claude profile, over `[weekly]` key by key.
+  A profile's `weights` replaces the whole `[weekly]` weights table, so a weekday it leaves out
+  weighs 1, not the `[weekly]` value.
+  A profile is the folder in `CLAUDE_CONFIG_DIR`. A key matches when it names the same folder
+  once `~` is expanded. The key `~/.claude` also matches the default profile.
+
+The row shows `Weekly: 40% · today 5/18%`: 40% of the week used, 5 points of it today, out of
+today's allowance of 18. On an off day it says so instead. A payload older than its weekly reset
+prints only `Weekly: N%` in grey. The color follows where today's pace
+ends the day. Today's pace is the rate since the first figure seen today; under 15 minutes of
+that, it is the last hour's rate:
+
+- Green: today stays within its allowance by the day's end.
+- Yellow: today overruns, and the overrun costs a later day at most `later_cut` of its allowance.
+- Red: the overrun costs more than that, or the week runs out.
+
+The capture reads the file quietly. A bad value falls back to its default so the statusline never
+breaks. Two commands check it and help fill it in:
+
+```
+python3 .context-gate/bin/govern usage weights
+python3 .context-gate/bin/govern usage weights --suggest
+```
+
+`weights` prints the settings in effect for the profile (add `--profile <folder>` to ask about
+another one) and reports every fault in the file, naming the key. It exits 1 when there is a
+fault.
+
+`--suggest` reads the days the capture has recorded and leaves out today. Days are recorded only
+while the status row is on (`govern usage row on`), so it needs two weeks of the row. With at least
+14 days it prints a ready-to-paste `[weekly.profiles."<folder>"]` table, each weekday weighted by
+its average use against the busiest weekday. It writes nothing.
+
+## Reading less output
+
+`govern check --quiet` (`-q`) prints errors only. Each status line says
+`N warnings hidden, run without --quiet`, and the exit status does not change.
+
+## Allowing an example
+
+`decision-citations` takes `<!-- decision-citations: allow <ids> -->`, which covers its own line and
+the next, and the param `example_ids` for ids that appear as examples everywhere. The
+`writing-rules` allow marker also ends at `--}}`. A first `no frontmatter` finding hints
+`[projects] exclude`, and a first `writing-rules` finding hints `[checks.writing-rules] exclude`.
+A clone in a git-ignored folder inside a governed folder is not governed.
+
 ## Agent roles
 
 With `agent-roles` on, the engine writes the project's agent definitions and the coordinator's
@@ -938,6 +1129,12 @@ out of git through the repository's own `info/exclude`, and `render` names any o
 tracks (`--untrack` stops that, leaving the files). A param that `local.toml` sets while
 `config.toml` has the check on is refused, because it would be rendered into committed files.
 
+`forbidden_trailers` is a list of regexes (default empty): `build verify` refuses a unit branch
+whose commit message has a line matching one, for example `["(?im)^co-authored-by:.*claude"]`.
+`fast_checks` is a list of commands, rendered for `developer` and `senior-developer` as the
+hand-back key `Fast checks` (not under `unit_gate = "full"`). `worktree_setup` is one command,
+rendered as a line in `developer`, `senior-developer` and `technical-writer`.
+
 ## Agent gates
 
 With `agent-gates` on, and the plugin installed, a hook holds a role agent to its brief. A brief
@@ -950,7 +1147,7 @@ Red: /work/briefs/unit-3/red
 ```
 
 The launch prompt is one line, `Brief: <absolute path>`; the path may be quoted or contain
-spaces. A relative `Produces:` or `Red:` path resolves against the brief file's folder.
+spaces. A relative `Produces:` or `Red:` path is read from the root of the agent's working tree, then beside the brief file.
 
 ```toml
 [governance]
@@ -960,6 +1157,8 @@ engine = "0.4.0"
 level = "error"
 briefed = ["developer", "senior-developer"]
 max_refusals = 2
+deny_resume = true
+read_lines = 400
 ```
 
 | Gate | What is refused |
@@ -969,11 +1168,14 @@ max_refusals = 2
 | Claims | With `claims` on: a stop whose final message says `report`, `written to`, `saved to` or `wrote`, then an absolute path that does not exist |
 | Red | A bug fix's stop with no failing test output in the `Red:` folder saved before its last edit |
 | Push | With `deny_push` on: a subagent's `git push` |
+| Resume | With `deny_resume` on: a `SendMessage` to an agent that has finished |
+| Read | With `read_lines` above 0: a `Read` of a file longer than that with no `offset` or `limit`; images, PDFs, notebooks and binary files pass |
 | Checklist | With `checklist` on: a stop whose report leaves a hand-back checklist line unanswered |
 
 A refusal names every unmet item. A stop is refused at most `max_refusals` times in one run; then
 the agent is let go and the coordinator is told what was unmet. A gate never traps an agent, and
-nothing in the main session is refused except a briefed role launched without a brief.
+the main session is refused only three things: a briefed role launched without a brief, a
+resume of a finished agent, and a whole-file `Read` of a large file.
 
 Claude Code's Write tool refuses a subagent a file named `report.md`, `findings.md`, `summary.md`
 or `analysis.md`, and no hook sees the attempt. A brief names its report `<role>-report.md`, and a
@@ -985,6 +1187,16 @@ With `agent-measure` on, and the plugin installed, every tool call inside a suba
 with its time and result size, and each finished run is totalled from its transcript: tokens
 summed over its requests, calls, time in tools and the largest results. The token figure in a
 completion notice is only the context size at the last request, so it is not the run's cost.
+
+The coordinator's own sessions are measured too: when a session ends its transcript is totalled
+per phase into the same log, and `runs report` first records the main sessions not yet in the log (any that never ended), so it
+appends rows before it reports. A row
+holds numbers only, never conversation text, tool input or a path. The report's `Coordinator`
+section shows, per phase (`planning` before the first mark), the requests, tokens (new input,
+cached re-read, output), peak context, compactions, owner turns and hand-backs, then the largest
+tool results; the coordinator also joins "By role and model", and `--json` has a `coordinator`
+key. `phase close` starts planning: sessions after a close count as planning until the next
+`runs mark`, and the report then says `planning, since the last phase closed`.
 
 ```toml
 [governance]
@@ -1025,7 +1237,8 @@ and anything named by `--keep`. It prints `pushed <branch> to <remote>/<branch> 
 `removed <branch>` (with `and its worktree`) and `kept <branch>: <reason>` lines. Where the push
 fails or the remote does not show the commit, it prints why and deletes nothing. It opens no pull
 request, merges nothing upward and never forces a deletion. `--dry-run` prints `would push`,
-`would remove` and `would keep` lines and changes nothing.
+`would remove` and `would keep` lines and changes nothing. When the project's run log exists, a
+successful close also marks planning in it and prints `run log: planning from here`.
 
 ## The build loop
 
@@ -1057,13 +1270,15 @@ attempts = 0
 |---|---|
 | `build start <phase> [--plan FILE] [--from BRANCH] [--high-risk] [--visual]` | Writes the ledger; `--visual` marks the phase visual, so `build review` writes a third brief for `ux-reviewer`, and is refused unless `visual_paths` renders that role. Refuses on the default branch, a dirty tree, an existing ledger, or when git ignores the ledger (it prints the line to add to `.gitignore`) |
 | `build unit add <id> --title T [--role R] [--red]` | Adds a unit and writes its `brief.md` |
-| `build unit set <id> <status> [--role R] [--branch B] [--commit C] [--note N]` | Updates a unit |
+| `build unit set <id> <status> [--role R] [--branch B] [--commit C] [--note N] [--agent ID] [--accept-red REASON]` | Updates a unit. `done` with `--branch` runs `build verify`; `--agent` stores the agent that built it (cleared on `failed`, `blocked` and relaunch). With `full_gate` set and `unit_gate = "scoped"`, `done` is refused on a red, missing or stale gate record; `--accept-red` lets it through and records a ruling |
+| `build gate [--cmd CMD]` | Runs `full_gate` and records `<phase folder>/gate/last.json` (`status`, `rc`, `head`, `dirty`, `seconds`, `at`, `cmd`) and `gate/last.log`. A HEAD that moves during the run leaves the record stale. `--cmd` runs another command and records nothing |
+| `build verify <id> --branch B` | Read-only hand-back check. Refuses: no commit past the unit's base, an empty diff, uncommitted files in the branch's worktree, a git-ignored ledger, a commit line matching `forbidden_trailers`. Warns: a report `Scope:` path the diff does not touch; ignored files in a folder the diff touches |
 | `build launch <unit, review, fix or close>` | Refuses an unfilled or uncommitted brief; prints the launch prompt |
 | `build collect <branch>` | Copies what the agent on that branch produced (reports, failing output) from its worktree into this checkout's build folder |
 | `build ruling <text>` | Records a decision made without the owner: what, why, cost if wrong |
 | `build status [--json]` | The phase, a line per unit, and what is next |
-| `build review` | Writes the review package and the reviewers' briefs |
-| `build fix [--role R]` | Writes a ranked fix brief |
+| `build review [--accept-red REASON]` | Writes the review package and the reviewers' briefs; with `full_gate` set it is refused on a red, missing or stale gate record |
+| `build fix [--role R] [--unit ID]` | Writes a ranked fix brief; `--unit` adds a `Unit: <id>` line; every fix brief gets a fresh agent |
 | `build close` | Writes the technical writer's brief and prints the `phase close` command |
 
 The brief contract: the launch prompt carries `Brief:`, a path from the repository root (or an
@@ -1071,8 +1286,43 @@ absolute one), and, for a role that works in a worktree, `Base:`, the commit the
 fast-forwards to first. `Produces:` and `Red:` are paths from the repository root, written and
 checked in the agent's own working tree; `build unit set <id> done --branch <branch>` and
 `build collect <branch>` copy what an agent produced into the coordinator's checkout. A brief still
-holding a `<!-- fill:` line is refused at launch by `agent-gates`. SessionStart tells the
-coordinator when a build is in flight.
+holding a `<!-- fill:` line is refused at launch by `agent-gates`. `launch` also prints
+`Phase branch: <branch>` after `Base:`. Every brief names its own scratch folder under the phase
+folder (`<unit id>`, `fix-N`, `review-code`, `review-qa`, `review-ux`, `close`, each with
+`/scratch/`), and agent worktree folders get `.metadata_never_index`. A build command stopped by an
+OS error says `stopped at <path>: <reason>; anything written before it stays`; a failed run-record
+write is a warning. With `agent-gates` on, a coordinator `git push` is denied when the phase's last
+gate is red at HEAD. SessionStart tells the coordinator when a build is in flight.
+
+## Overnight driver
+
+`govern build drive <plan>` runs a plan unattended. It starts one fresh headless `claude -p`
+coordinator session per build step (`/context-gate:build <plan>`), each resuming from
+`govern build status`, the ledger and git, so no session re-reads a long context. A session ends
+its final message with `LOOP: continue`, `LOOP: plan-done` or `LOOP: stop <reason>`; one that ends
+without such a line is recorded as `unfinished` and the next session carries on.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--cap N` | 90 | stop when the weekly (seven-day) usage reaches N percent |
+| `--hours H` | none | stop after H hours (may be fractional); the running session is ended |
+| `--max-sessions N` | 50 | stop after N sessions |
+| `--compact-pct P` | 50 | auto-compact at P percent of the window, 20 to 90, or `auto` for the measured suggestion |
+| `--permission-mode M` | `auto` | claude's permission mode |
+| `--claude CMD` | `claude` | the claude command |
+| `--project NAME` | none | passed to `build status` in a workspace |
+
+Stops: `plan done` and `stop <reason>` (a person is needed) exit 0, as do `cap reached` (the
+usage read at the start of the run and after each session, plus the largest rise one session has
+caused, would reach the cap; no reading also stops), `session limit` and `time limit`. `no
+progress` (two sessions in a row left `build status` unchanged) exits 1, as does a `--compact-pct`
+outside 20 to 90, which is refused before anything starts.
+
+Each run keeps every session's stream and errors as `<n>.jsonl` and `<n>.err` in
+`~/.local/state/context-gate/drive/runs/<project folder>-<UTC time>/`. One row per session
+(project, plan, phase, next step, times, exit, peak context percent, compactions) is appended to
+`~/.local/state/context-gate/drive/sessions.jsonl`; `govern build drive-report [project folder]`
+prints them with a suggested `--compact-pct`.
 
 ## Profiles
 

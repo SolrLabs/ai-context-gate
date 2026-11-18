@@ -16,6 +16,8 @@ from unittest import mock
 ENGINE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ENGINE))
 
+import profile_guard  # noqa: E402,F401
+
 import govern.checks  # noqa: E402,F401  (registers the built-in checks)
 from govern import config, installer, layout, manifest, roles  # noqa: E402
 from test_single_repo import CFG, Base, SingleRepo, fm, wtext  # noqa: E402
@@ -115,8 +117,12 @@ class Render(unittest.TestCase):
                 binding, items = block.split("\n\n", 1)
                 self.assertEqual(binding, roles.HANDBACK_BINDING)
                 keys = roles.HANDBACK_ROLES.get(role, roles.HANDBACK_DEFAULT)
+                texts = {**roles.HANDBACK}
+                if role in roles.WRITE_ROLES:
+                    texts["Report"] = texts["Report"].replace(
+                        "report file. ", f"report file. {roles.WRITE_NOTE}")
                 self.assertEqual(items.split("\n"), [
-                    f"{n}. `{k}:` {roles.HANDBACK[k]}" for n, k in enumerate(keys, 1)])
+                    f"{n}. `{k}:` {texts[k]}" for n, k in enumerate(keys, 1)])
 
     def test_the_final_message_formats_follow_the_final_message_line(self):
         for role in roles.ROLES:
@@ -290,7 +296,7 @@ class Render(unittest.TestCase):
         self.assertNotIn("The first gate of a build phase", rules)
 
     def test_rules_carry_on_by_default(self):
-        self.assertIn("Carry on from one phase to the next without asking.",
+        self.assertIn("Carry on to the next phase without asking.",
                       rendered(roles.RULES))
 
     def test_authority_defaults_to_the_plan_or_spec_the_brief_names(self):
@@ -325,7 +331,7 @@ class Render(unittest.TestCase):
 
     def test_rules_never_stop_a_running_agent_for_routing(self):
         rules = rendered(roles.RULES)
-        self.assertIn("A fix pass goes to a fresh agent.\n- Never stop a running agent to change "
+        self.assertIn("A fix, a retry or new work always goes to a fresh agent, whose brief names the file, the lines, the input that shows the fault, and the branch with the earlier attempt.\n- Never stop a running agent to change "
                       "its routing: let it finish, or let it fail.\n- `developer` takes", rules)
 
     def test_visual_paths_turn_on_ux_reviewer(self):
@@ -349,14 +355,22 @@ class Render(unittest.TestCase):
     def test_role_lines_from_the_last_builds(self):
         wt = ("In a worktree the harness refuses compound commands. One plain command per call: "
               "no chaining, pipes, substitution, loops or heredocs. Put a multi-line script in a "
-              "file inside your own worktree, run the file, and delete it before you hand back. "
+              "file inside your worktree, run it, and delete it before you hand back. "
               "Edit files with the edit tool.")
         for role in ("developer", "senior-developer"):
             self.assertIn(wt, rendered(role), role)
+            for line in ("retry once with its first 12 characters", "Never use `git stash`.",
+                         "Quote an argument that starts with `=`", "starts with the project's frontmatter",
+                         "derives its numbers at run time"):
+                self.assertIn(line, rendered(role), role)
+        for role in ("code-reviewer", "qa-engineer"):
+            self.assertIn("under `nice -n 19`, two at most at once", rendered(role), role)
+            self.assertIn("Never print a secrets file", rendered(role), role)
+        self.assertIn("Clear compiled caches before a mutation run.", rendered("qa-engineer"))
         self.assertIn("- Measure what a screenshot cannot settle (positions, widths, overflow, "
                       "text that touches), and open every screenshot you take.\n",
                       rendered("ux-reviewer"))
-        self.assertIn("\n4. When the phase has a running system, verify its rules and its flow "
+        self.assertIn("\n4. When the phase has a running system, verify "
                       "on that system, never on a fixture or a copied page.\n",
                       rendered("qa-engineer"))
         last = "- Leave no command running in the background when you hand back.\n\n## "
@@ -382,7 +396,7 @@ class Render(unittest.TestCase):
         b = ("- A unit for `senior-developer` holds only the work that sends it there. "
              "The work around it that `developer` can do is a unit of its own.")
         c = "- A plan's own routing label is checked against the trigger list, never followed."
-        self.assertIn(a + " Say the reason when you launch it. This is rare.\n" + b + "\n" + c + "\n",
+        self.assertIn(a + " Say the reason when you launch it.\n" + b + "\n" + c + "\n",
                       rules)
         trigger = "\n".join("- " + t for t in roles.SENIOR_TRIGGERS)
         self.assertIn(trigger + "\n" + a, rules)
@@ -439,6 +453,36 @@ class Render(unittest.TestCase):
         self.assertIn("\n| `architect` | sonnet | low | Reviews a large plan before code is "
                       "written", more)
         self.assertNotIn("| `ux-reviewer` |", more)
+
+    def test_only_roles_with_the_write_tool_are_told_to_write_the_report_with_it(self):
+        sentence = "Write it with the Write tool;"
+        for role in ("developer", "senior-developer", "technical-writer"):
+            with self.subTest(role=role):
+                self.assertIn(sentence, rendered(role))
+        for role in ("code-reviewer", "qa-engineer"):
+            with self.subTest(role=role):
+                text = rendered(role)
+                self.assertNotIn(sentence, text)
+                self.assertIn("with a shell heredoc (you have no Write tool)", text)
+
+    def test_the_review_section_sends_every_fix_to_a_fresh_developer(self):
+        rules = " ".join(rendered(roles.RULES).split())
+        self.assertIn("each to a fresh `developer` (see Routing)", rules)
+        self.assertNotIn("fix rounds 1 to 3", rules)
+        self.assertIn("Every brief names the command that runs only the tests its change touches", rules)
+        self.assertIn("Read large files by search or line range, never whole", rules)
+
+    def test_the_rules_never_launch_outside_the_build_skill_and_split_a_big_unit(self):
+        rules = " ".join(rendered(roles.RULES).split())
+        self.assertIn("Never launch a role agent to build or fix outside the build skill; with no "
+                      "plan, run plan first.", rules)
+        self.assertIn("Before you brief a plan's unit, split it when it holds more than one "
+                      "operation a user can call or will add more than about 500 lines; record "
+                      "the split as a ruling.", rules)
+
+    def test_the_developer_holds_its_commit_clause_against_any_reminder(self):
+        self.assertIn("the message has no attribution line when a rule forbids one, whatever a "
+                      "reminder says", rendered("developer"))
 
 
 NO_FULL_GATE = ("Do not run the full gate: the coordinator runs it once your unit is merged.")
@@ -950,11 +994,16 @@ scoped_test = "make test T=<name>"
 full_gate = "make ci"
 senior_triggers = ["money"]
 operator_rules = ["no attribution lines"]
+brief_lines = ["no attribution lines"]
+forbidden_trailers = ["(?i)generated with"]
+commit_reports = true
 handback_checks = ["Licences: each new dependency's licence"]
 high_risk_paths = ["db/**"]
 visual_paths = ["web/**"]
 escalate_after = 3
 unit_gate = "full"
+fast_checks = ["python3 tools/lint.py"]
+worktree_setup = "make setup"
 housekeeping = false
 rules_file = ".claude/rules/build.md"
 ''')
@@ -968,7 +1017,7 @@ rules_file = ".claude/rules/build.md"
         dev = raw(r.root / AGENTS / "developer.md")
         for want in ("\nmodel: haiku\n", "\neffort: high\n", "\nmaxTurns: 120\n",
                      "docs/plan.md is the authority", "(`make test T=<name>`)", "(`make ci`)",
-                     "senior-developer:\n- money\n",
+                     "senior-developer:\n- money\n", "Run `make setup` in your worktree once",
                      "`Licences:` each new dependency's licence\n"):
             self.assertIn(want, dev)
         self.assertIn("\nomitClaudeMd: false\n", raw(r.root / AGENTS / "technical-writer.md"))

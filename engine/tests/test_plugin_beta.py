@@ -12,6 +12,8 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import profile_guard  # noqa: E402,F401
+
 from plugin_support import *  # noqa: E402,F401,F403
 
 
@@ -242,7 +244,8 @@ class ReportSkill(unittest.TestCase):
 
     def test_build_rules_and_build_skill_hold_the_new_phrases(self):
         rules = self.squash(ENGINE / "govern/templates/build-rules.md")
-        self.assertIn("written up with the plugin's `report` skill when the phase closes", rules)
+        self.assertIn("write up a context-gate fault that cost it time with the plugin's `report` skill",
+                      rules)
         build = self.squash(PLUGIN / "skills/build/SKILL.md")
         self.assertIn("any fault in context-gate itself, with the draft the `report` skill made", build)
         self.assertIn("start it with `--high-risk` all the same", build)
@@ -289,10 +292,11 @@ class WorktreeLine(unittest.TestCase):
         section = text[head:text.index("## Carrying on")]
         for phrase in ("every `govern build` command takes `--project <name>`",
                        "`git -C <member folder>`",
-                       "`Worktree:` included, and without isolation",
+                       "`Worktree:` included, without isolation",
                        "`runtime_gate`",
                        "`phase close --path <member folder>`",
-                       "A project with no registry ignores this section."):
+                       "No registry: ignore this section.",
+                       "A close prints two writer launches; merge the second's branch in the workspace repository."):
             self.assertIn(phrase, section)
 
 

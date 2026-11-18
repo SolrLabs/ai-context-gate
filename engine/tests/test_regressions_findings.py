@@ -12,6 +12,8 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import profile_guard  # noqa: E402,F401
+
 from regressions_support import *  # noqa: E402,F401,F403
 
 class TopicWords(Base):
@@ -22,7 +24,7 @@ class TopicWords(Base):
 
     def test_a_topic_line_does_not_grow_a_baselined_entry(self):
         w = self.ws(extra="\nmax_words = 1\n")
-        code, _, _ = w.run("baseline", "--allow-raise")
+        code, _, _ = w.run("baseline", "--allow-raise", "--reason", "test")
         self.assertEqual(code, 0)
         before = json.loads((w.root / layout.BASELINE).read_text(encoding="utf-8"))
         log = w.root / "projects/alpha/DECISIONS.md"
@@ -36,7 +38,7 @@ class TopicWords(Base):
 
     def test_a_topic_line_inside_a_fence_still_counts(self):
         w = self.ws(extra="\nmax_words = 1\n")
-        code, _, _ = w.run("baseline", "--allow-raise")
+        code, _, _ = w.run("baseline", "--allow-raise", "--reason", "test")
         self.assertEqual(code, 0)
         before = json.loads((w.root / layout.BASELINE).read_text(encoding="utf-8"))
         log = w.root / "projects/alpha/DECISIONS.md"
@@ -195,7 +197,7 @@ max_working_words = 5
         code, out, _ = w.run("check", "--project", "alpha")
         self.assertEqual(code, 0, out)
         self.assertNotIn("words", out)
-        w.run("baseline", "--allow-raise")
+        w.run("baseline", "--allow-raise", "--reason", "test")
         baseline = json.loads((w.root / layout.BASELINE).read_text(encoding="utf-8"))
         self.assertEqual([k for k in baseline if "words" in k], [], baseline)
 
@@ -344,7 +346,8 @@ class OneFindingPerBreach(Base):
             f"(doc-frontmatter max_working_words=3), not in "
             f"{Path(layout.BASELINE).name} — {self.REMEDY}; to accept a file that predates the "
             f"gate, run `"), found[0])
-        self.assertTrue(found[0].endswith(" baseline --allow-raise`"), found[0])
+        self.assertTrue(found[0].endswith(
+            f' baseline --allow-raise {self.KEY} --reason "<why>"`'), found[0])
 
     def assert_warning_only(self, out: str, label: str = "alpha/working-files/notes.md") -> None:
         found = self.about(out)
@@ -361,7 +364,7 @@ class OneFindingPerBreach(Base):
     def test_a_recorded_unchanged_breach_is_one_finding_the_warning(self):
         w = self.ws(extra=self.LIMIT)
         self.over(w)
-        code, out, _ = w.run("baseline", "--allow-raise")
+        code, out, _ = w.run("baseline", "--allow-raise", "--reason", "test")
         self.assertEqual(code, 0, out)
         code, out, _ = w.run("check")
         self.assertEqual(code, 0, out)
@@ -370,7 +373,7 @@ class OneFindingPerBreach(Base):
     def test_a_grown_breach_is_one_finding_the_ratchet_error_as_before(self):
         w = self.ws(extra=self.LIMIT)
         self.over(w)
-        w.run("baseline", "--allow-raise")
+        w.run("baseline", "--allow-raise", "--reason", "test")
         self.over(w, words=12)
         code, out, _ = w.run("check")
         self.assertEqual(code, 1, out)
@@ -379,8 +382,9 @@ class OneFindingPerBreach(Base):
         self.assertTrue(found[0].startswith(
             f"  ERROR  ratchet: '{self.KEY}' grew to 12 words (doc-frontmatter "
             f"max_working_words=3, baseline 10) — fix it, or `"), found[0])
-        self.assertTrue(found[0].endswith(" baseline --allow-raise` to accept the new size"),
-                        found[0])
+        self.assertTrue(found[0].endswith(
+            f' baseline --allow-raise {self.KEY} --reason "<why>"` to accept the new size'),
+            found[0])
 
     def test_a_kind_with_no_remedy_keeps_the_generic_new_breach_text(self):
         w = self.ws(extra="\n[checks.governed-doc-count]\nmax_docs = 0\n")
@@ -390,7 +394,8 @@ class OneFindingPerBreach(Base):
         self.assertTrue(line.startswith(
             f"  ERROR  ratchet: 'governed_docs:alpha' is a new breach at 1, not in "
             f"{Path(layout.BASELINE).name} — fix it, or if it is accepted for now run `"), line)
-        self.assertTrue(line.endswith(" baseline --allow-raise`"), line)
+        self.assertTrue(line.endswith(
+            ' baseline --allow-raise governed_docs:alpha --reason "<why>"`'), line)
         self.assertIn("governed docs exceeds governed-doc-count max_docs=0", out)
 
     def test_a_governed_docs_breach_names_the_finished_working_files_that_could_go(self):
@@ -406,7 +411,8 @@ class OneFindingPerBreach(Base):
         line = next(ln for ln in out.splitlines()
                     if ln.startswith("  ERROR") and "governed_docs:alpha" in ln)
         self.assertTrue(line.endswith(
-            " baseline --allow-raise` Finished working files that could go: "
+            ' baseline --allow-raise governed_docs:alpha --reason "<why>"` '
+            "Finished working files that could go: "
             "alpha/working-files/old.md"), line)
 
     def test_a_governed_docs_breach_with_nothing_finished_keeps_its_message(self):
@@ -416,7 +422,8 @@ class OneFindingPerBreach(Base):
         self.assertEqual(code, 1, out)
         line = next(ln for ln in out.splitlines()
                     if ln.startswith("  ERROR") and "governed_docs:alpha" in ln)
-        self.assertTrue(line.endswith(" baseline --allow-raise`"), line)
+        self.assertTrue(line.endswith(
+            ' baseline --allow-raise governed_docs:alpha --reason "<why>"`'), line)
 
     # ---- every way `check` runs: one finding where the ratchet reports, never none
 
@@ -430,7 +437,7 @@ class OneFindingPerBreach(Base):
     def test_project_run_recorded_breach_keeps_the_warning(self):
         w = self.ws(extra=self.LIMIT)
         self.over(w)
-        w.run("baseline", "--allow-raise")
+        w.run("baseline", "--allow-raise", "--reason", "test")
         code, out, _ = w.run("check", "--project", "alpha")
         self.assertEqual(code, 0, out)
         self.assert_warning_only(out)
@@ -448,7 +455,7 @@ class OneFindingPerBreach(Base):
     def test_path_snapshot_recorded_breach_keeps_the_warning(self):
         w = self.ws(extra=self.LIMIT)
         self.over(w)
-        w.run("baseline", "--allow-raise")
+        w.run("baseline", "--allow-raise", "--reason", "test")
         snap = self.tmp / "snapshot"
         shutil.copytree(w.root / "projects/alpha", snap)
         code, out, _ = w.run("check", "--project", "alpha", "--path", str(snap))
@@ -506,7 +513,7 @@ class OneFindingPerBreach(Base):
     def test_one_file_s_ratchet_error_does_not_hide_another_file_s_warning(self):
         w = self.ws(extra=self.LIMIT)
         self.over(w, rel="projects/alpha/working-files/older.md")
-        w.run("baseline", "--allow-raise")
+        w.run("baseline", "--allow-raise", "--reason", "test")
         self.over(w)
         code, out, _ = w.run("check")
         self.assertEqual(code, 1, out)

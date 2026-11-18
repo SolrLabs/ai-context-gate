@@ -47,3 +47,14 @@ def home() -> Path:
 
 def engines_dir(home_dir: Path | None = None) -> Path:
     return (home_dir or home()) / ".local" / "share" / TOOL / "engines"
+
+
+def claude_dir(home_dir: Path | None = None) -> Path:
+    """The Claude profile folder: $CLAUDE_CONFIG_DIR when set, else `<home>/.claude`. The
+    variable describes the running user's profile, so a caller naming another home asks about
+    that home's default one."""
+    h = home_dir or home()
+    configured = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if configured and h == home():
+        return Path(configured).expanduser()
+    return h / ".claude"

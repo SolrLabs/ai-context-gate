@@ -13,6 +13,8 @@ from pathlib import PureWindowsPath
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import profile_guard  # noqa: E402,F401
+
 from agent_runs_support import *  # noqa: E402,F401,F403
 import types  # noqa: E402
 import test_agent_runs_measure  # noqa: E402
@@ -162,6 +164,7 @@ class ProducesGate(HookCase):
         self.assertIn(str(report), line)
 
     def test_a_resumed_run_blocked_and_never_ended_is_said_not_its_earlier_row(self):
+        self.resolve({**GATES, "deny_resume": False}, MEASURE)
         report, second = self.work / "r.md", self.work / "two.md"
         self.launch(f"Produces: {report}")
         report.write_text("done\n", encoding="utf-8")
@@ -414,7 +417,7 @@ class HeldBrief(HookCase):
 class RedGate(HookCase):
     def test_no_failing_output_blocks(self):
         self.launch(f"Fix it.\nRed: {self.work / 'red'}")
-        self.assertIn("no failing-test output", self.stop()["reason"])
+        self.assertIn("holds no files", self.stop()["reason"])
 
     def test_output_saved_after_the_last_edit_blocks(self):
         red = self.work / "red"
@@ -860,6 +863,163 @@ class PushGateHook(HookCase):
     def test_with_gates_off_a_push_is_allowed(self):
         self.resolve(None, MEASURE)
         self.assertIsNone(self.bash("git push", agent_id="a1"))
+
+
+class ResumeGateHook(HookCase):
+    def send(self, to="a1", **extra):
+        return self.fire("PreToolUse", tool_name="SendMessage",
+                         tool_input={"to": to, "message": "Fix it.\nProduces: r.md"}, **extra)
+
+    def test_a_finished_agent_is_denied_with_the_reason(self):
+        self.launch("Run date.")
+        self.assertIsNone(self.stop())
+        out = self.send()
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecisionReason"],
+                         "a1 has finished. A finished agent re-reads its whole history on every "
+                         "turn: launch a fresh agent with a brief that names the file, the lines, "
+                         "the input that shows the fault, and the branch with the earlier attempt.")
+        self.assertFalse((self.state / "resume-a1.json").exists())
+
+    def test_a_running_agent_is_allowed_and_its_contract_written(self):
+        self.launch("Run date.")
+        self.assertIsNone(self.send())
+        self.assertTrue((self.state / "resume-a1.json").is_file())
+
+    def test_a_name_no_launch_record_holds_is_allowed(self):
+        self.launch("Run date.")
+        self.stop()
+        self.assertIsNone(self.send(to="worker"))
+        self.assertTrue((self.state / "resume-by-name.json").is_file())
+
+    def test_deny_resume_off_allows_it(self):
+        self.resolve({**GATES, "deny_resume": False}, MEASURE)
+        self.launch("Run date.")
+        self.stop()
+        self.assertIsNone(self.send())
+        self.assertTrue((self.state / "resume-a1.json").is_file())
+
+    def test_with_gates_off_it_is_allowed(self):
+        self.launch("Run date.")
+        self.stop()
+        self.resolve(None, MEASURE)
+        self.assertIsNone(self.send())
+
+    def test_an_unreadable_launch_record_is_allowed(self):
+        self.launch("Run date.")
+        self.stop()
+        (self.state / "launch-a1.json").write_text("{not json", encoding="utf-8")
+        self.assertIsNone(self.send())
+
+
+class ReadGateHook(HookCase):
+    def big(self, name="big.txt", lines=401, data=None):
+        path = self.work / name
+        path.write_bytes(data if data is not None else b"x\n" * lines)
+        return path
+
+    def read(self, path, **extra):
+        inp = {"file_path": str(path)}
+        inp.update(extra.pop("inp", {}))
+        return self.fire("PreToolUse", tool_name="Read", tool_input=inp, **extra)
+
+    def test_a_long_file_is_denied_with_the_line_count(self):
+        path = self.big()
+        out = self.read(path)
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecisionReason"],
+                         f"{path} has more than 400 lines. Grep for what you need, or Read it "
+                         "with offset/limit, in parts if you need all of it.")
+
+    def test_the_limit_itself_is_allowed(self):
+        self.assertIsNone(self.read(self.big(lines=400)))
+
+    def test_offset_or_limit_allows_it(self):
+        path = self.big()
+        self.assertIsNone(self.read(path, inp={"offset": 10}))
+        self.assertIsNone(self.read(path, inp={"limit": 50}))
+
+    def test_images_pdfs_and_notebooks_are_allowed(self):
+        for suffix in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".pdf",
+                       ".ipynb", ".PNG"):
+            with self.subTest(suffix=suffix):
+                self.assertIsNone(self.read(self.big(f"f{suffix}")))
+
+    def test_a_binary_file_is_allowed(self):
+        self.assertIsNone(self.read(self.big(data=b"\0" + b"x\n" * 500)))
+
+    def test_a_missing_file_is_allowed(self):
+        self.assertIsNone(self.read(self.work / "nope.txt"))
+
+    def test_read_lines_zero_turns_it_off(self):
+        self.resolve({**GATES, "read_lines": 0}, MEASURE)
+        self.assertIsNone(self.read(self.big()))
+
+    def test_gates_off_allows_it(self):
+        self.resolve(None, MEASURE)
+        self.assertIsNone(self.read(self.big()))
+
+    def test_a_negative_read_lines_turns_it_off(self):
+        self.resolve({**GATES, "read_lines": -1}, MEASURE)
+        self.assertIsNone(self.read(self.big(lines=3)))
+
+    def test_the_limit_holds_with_or_without_a_trailing_newline(self):
+        self.assertIsNone(self.read(self.big(data=b"x\n" * 399 + b"x")))
+        self.assertIsNone(self.read(self.big(data=b"x\n" * 400)))
+        out = self.read(self.big(data=b"x\n" * 400 + b"x"))
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_a_file_without_newlines_is_read_in_chunks(self):
+        from govern import agent_runs
+        path = self.big(data=b"x" * 1_000_000)
+        sizes = []
+        real = open
+
+        class Spy:
+            def __init__(self, f):
+                self.f = f
+
+            def read(self, n=-1):
+                data = self.f.read(n)
+                sizes.append(len(data))
+                return data
+
+            def __getattr__(self, name):
+                return getattr(self.f, name)
+
+            def __iter__(self):
+                for line in self.f:
+                    sizes.append(len(line))
+                    yield line
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self.f.close()
+
+        with mock.patch.object(agent_runs, "open", lambda *a, **k: Spy(real(*a, **k)),
+                               create=True):
+            out = agent_runs.on_pre_read({"read_lines": 400}, {"tool_input": {"file_path": str(path)}})
+        self.assertIsNone(out)
+        self.assertTrue(sizes)
+        self.assertLessEqual(max(sizes), 65536)
+
+    def test_a_custom_limit_is_used(self):
+        self.resolve({**GATES, "read_lines": 10}, MEASURE)
+        out = self.read(self.big(lines=11))
+        self.assertIn("has more than 10 lines.", out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_a_subagent_is_denied_too(self):
+        out = self.read(self.big(), agent_id="a1", agent_type="developer")
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_a_relative_path_resolves_against_cwd(self):
+        path = self.big()
+        out = self.fire("PreToolUse", tool_name="Read", cwd=str(self.work),
+                        tool_input={"file_path": path.name})
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn(str(path), out["hookSpecificOutput"]["permissionDecisionReason"])
 
 
 if __name__ == "__main__":

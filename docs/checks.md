@@ -18,6 +18,8 @@ Each check has a level: `off`, `warn` or `error`. At `error`, a check reports wh
 | [`trap-ids`](#trap-ids) | `error` | A trap id is owned by exactly one of a project's trap files. |
 | [`trap-entries`](#trap-entries) | `warn` | Every trap entry says when it bites: the **Bites when:** line is what the trap index shows. |
 | [`decision-changes`](#decision-changes) | `error` | A locked decision changed in place without a dated Revised line, a decision removed, or an id another branch already took. Advisory (warnings) unless run with `--base`. |
+| [`merge-driver`](#merge-driver) | `off` | `.gitattributes` assigns context-gate's merge driver to the decision logs, trap files, generated-block files and the ratchet baseline, so two branches that each add an entry merge without a conflict. |
+| [`decision-citations`](#decision-citations) | `off` | Docs, agent definitions, build briefs and listed code files cite only decision and trap ids that exist and were not replaced. |
 | [`doc-frontmatter`](#doc-frontmatter) | `error` | Every governed doc carries valid frontmatter, a current review date, and resolvable related links; working files carry a status and stay bounded. |
 | [`workspace-docs`](#workspace-docs) | `error` | The workspace's own docs exist and pass the same doc check as project docs. |
 | [`governed-doc-count`](#governed-doc-count) | `error` | Bounds how many governed docs a project carries. |
@@ -40,7 +42,7 @@ Each check has a level: `off`, `warn` or `error`. At `error`, a check reports wh
 | [`git-repo`](#git-repo) | `warn` | The governance root is inside a git repository. |
 | [`tool-files`](#tool-files) | `warn` | Git ignores none of the files the gate needs committed: its config, baseline, install record and entry points. |
 | [`local-layer`](#local-layer) | `error` | Git does not track .context-gate/local.toml, the machine-local beta layer. |
-| [`agent-gates`](#agent-gates) | `off` | Refuses launching a briefed role without a brief file, ends a subagent's run only when the files its brief promised exist, and keeps subagents from running `git push`. |
+| [`agent-gates`](#agent-gates) | `off` | Refuses launching a briefed role without a brief file, ends a subagent's run only when the files its brief promised exist, and keeps subagents from running `git push`, resuming a finished agent, and reading a whole large file. |
 | [`agent-measure`](#agent-measure) | `off` | Records what each subagent run cost (tokens summed over its requests, tool calls and time, largest results) and tells the coordinator in one line per run; `govern runs report` summarizes a phase. |
 | [`agent-roles`](#agent-roles) | `off` | The engine's agent roles and the coordinator's build rules are rendered into the project, and each rendered file matches what `agents render` would write. |
 | [`agent-references`](#agent-references) | `warn` | Every agent a governed doc, a skill, an agent definition or the build rules names has a definition in the agents directory. |
@@ -99,7 +101,7 @@ Checkouts in the configured registry roles carry none of the governance root's o
 | Since | 0.4.0 |
 | Needs | `roles`, to do anything |
 
-**Question:** Do you govern checkouts of repositories you don't want your governance files to land in (a fork you send pull requests from, a repo you publish)? Which registry roles are they, and which files must never appear in them?
+**Question:** Do you govern checkouts of repositories you don't want your governance files to land in (a fork you send pull requests from, a repo you publish)? Which registry roles are they, and which files must never appear in them? Is a checkout published, so that its history must hold none of those paths too?
 
 **Why:** A governance file inside a fork lands in somebody else's pull request; inside a published repo it lands in a release. Both failures are silent.
 
@@ -107,6 +109,7 @@ Checkouts in the configured registry roles carry none of the governance root's o
 |---|---|---|---|---|
 | `roles` | list | `[]` | — | Registry roles whose checkouts are checked |
 | `forbidden` | list | `[]` | a value is removed | Paths, relative to a checkout, that never belong in it |
+| `history` | bool | `false` | — | Also look for each forbidden path in the checkout's history |
 | `rules` | table | `{}` | — | Decision id to cite per role, e.g. { contribute = "W-1" } |
 | `upstream_remote` | str | `"upstream"` | — | Remote whose URL must equal the registry's upstream |
 | `setup_hint` | str | `""` | — | What to run when a checkout or remote is missing |
@@ -246,6 +249,43 @@ A locked decision changed in place without a dated Revised line, a decision remo
 | Parameter | Type | Default | Looser when | Meaning |
 |---|---|---|---|---|
 | `locked_statuses` | list | `["locked"]` | — | Statuses whose entries may only change with a dated Revised line |
+
+### `merge-driver`
+
+`.gitattributes` assigns context-gate's merge driver to the decision logs, trap files, generated-block files and the ratchet baseline, so two branches that each add an entry merge without a conflict.
+
+| | |
+|---|---|
+| Default level | `off` |
+| Scope | Runs once for the governance root |
+| Ratchet | No |
+| Since | 0.9.0 |
+
+**Question:** Do several people or agents work on branches of this repository at once, and so add decision or trap entries in parallel?
+
+**Why:** Git merges a log by line, so two branches that each append an entry conflict at the end of the file; the driver merges by entry id instead. Git applies it only where `.gitattributes` says so.
+
+No parameters: set its `level` only.
+
+### `decision-citations`
+
+Docs, agent definitions, build briefs and listed code files cite only decision and trap ids that exist and were not replaced.
+
+| | |
+|---|---|
+| Default level | `off` |
+| Scope | Runs once for the governance root |
+| Ratchet | No |
+| Since | 0.9.0 |
+
+**Question:** Do docs, agents or code cite decision or trap ids by number, so a renumbered or replaced entry leaves a dangling reference?
+
+**Why:** An id that names nothing, or an entry replaced by another, sends the reader to the wrong rule; a citation is only as good as the id it points at.
+
+| Parameter | Type | Default | Looser when | Meaning |
+|---|---|---|---|---|
+| `code_globs` | list | `[]` | — | Code files whose comments cite ids, as globs relative to the governance root |
+| `example_ids` | list | `[]` | — | Ids written as examples, never reported (`T-3`); one place is marked with `decision-citations: allow <ids>` |
 
 ## Docs
 
@@ -448,6 +488,7 @@ Bounds how many files sit directly in a project's working-files directory.
 |---|---|---|---|---|
 | `max_files` | int | `12` | raised | Files directly under the working dir |
 | `extensions` | list | `["*.md", "*.html", "*.pdf"]` | — | Which files count |
+| `per_owner_max` | int | `0` | raised | Owned files (frontmatter owner) each owner may hold in the working dir; 0 counts every file against max_files |
 
 ### `finished-files`
 
@@ -688,7 +729,7 @@ No parameters: set its `level` only.
 
 ### `agent-gates`
 
-Refuses launching a briefed role without a brief file, ends a subagent's run only when the files its brief promised exist, and keeps subagents from running `git push`.
+Refuses launching a briefed role without a brief file, ends a subagent's run only when the files its brief promised exist, and keeps subagents from running `git push`, resuming a finished agent, and reading a whole large file.
 
 | | |
 |---|---|
@@ -707,6 +748,8 @@ Refuses launching a briefed role without a brief file, ends a subagent's run onl
 | `claims` | bool | `true` | — | Refuse a final message that points at a file that does not exist |
 | `checklist` | bool | `false` | — | Refuse a report that leaves a line of the role's hand-back checklist unanswered |
 | `deny_push` | bool | `true` | — | Deny a subagent's `git push` |
+| `deny_resume` | bool | `true` | — | Deny a `SendMessage` to an agent that has finished; a fix goes to a fresh agent |
+| `read_lines` | int | `400` | raised | Deny a whole-file `Read` of a file longer than this many lines; 0 turns it off |
 | `max_refusals` | int | `2` | lowered | Refusals in one run before the agent is let go and the unmet items go to the coordinator |
 
 ### `agent-measure`
@@ -756,11 +799,16 @@ The engine's agent roles and the coordinator's build rules are rendered into the
 | `senior_triggers` | list | `["security: credentials, keys, tokens, signing, sign-in and sessions, the code that decides who may read or change protected data, or input from outside the project (a download, an archive, pasted text). A product rule about who may do what is not security."]` | — | What sends a unit to senior-developer instead of developer |
 | `operator_rules` | list | `[]` | — | Rules the operator gives every role, rendered above the project's own |
 | `handback_checks` | list | `[]` | — | Lines the operator adds to every role's hand-back checklist, each `Key: text` |
+| `brief_lines` | list | `[]` | — | Lines every brief that govern build writes carries, under ## Project rules |
+| `forbidden_trailers` | list | `[]` | — | Regular expressions; a commit message in a unit's branch with a line matching one is refused when the unit is marked done |
+| `commit_reports` | bool | `false` | — | Unit and review reports (*-report.md) are committed with the ledger, so a reviewer on another machine can read them |
 | `high_risk_paths` | list | `[]` | — | Paths that make a phase high-risk, so qa-engineer runs beside code-reviewer |
 | `visual_paths` | list | `[]` | — | Paths whose change means someone must look at the running product |
 | `escalate_after` | int | `2` | — | Failed or handed-back attempts by developer before a unit goes to senior-developer |
 | `unit_gate` | str | `"scoped"` | — | What a unit runs before it hands back: `scoped` (its own tests; the coordinator runs the full gate after the merge) or `full` |
 | `housekeeping` | bool | `true` | — | Whether the rules tell the coordinator to launch technical-writer and close the phase when a fix pass closes |
+| `fast_checks` | list | `[]` | — | Cheap whole-tree commands developer and senior-developer run once after their scoped tests and report; not rendered under `unit_gate = "full"` |
+| `worktree_setup` | str | `""` | — | One command the code and writing roles run in their worktree right after the Base merge, before the first edit |
 | `rules_file` | str | `".claude/rules/context-gate-build.md"` | — | Where the coordinator's build rules are rendered |
 
 ### `agent-references`

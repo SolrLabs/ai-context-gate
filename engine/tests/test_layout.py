@@ -17,6 +17,10 @@ REPO = ENGINE.parent
 PLUGIN = REPO / "plugin"
 sys.path.insert(0, str(ENGINE))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import profile_guard  # noqa: E402,F401
+
 from govern import layout, notice  # noqa: E402
 
 TEMPLATE = ENGINE / "govern" / "templates" / "entrypoint.py"

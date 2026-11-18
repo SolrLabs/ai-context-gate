@@ -12,7 +12,16 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import profile_guard  # noqa: E402,F401
+
 from regressions_support import *  # noqa: E402,F401,F403
+
+
+def hit_lines(out: str) -> list[str]:
+    """The writing-rules findings in `out`, without the once-per-run exclude hint the first one
+    carries (it says how to leave a file out, which these tests are not about)."""
+    return [line.strip().split(" \u2014 exclude a shipped or downloaded file")[0]
+            for line in out.splitlines() if " × " in line]
 
 class Baseline(Base):
     def test_clean_workspace_passes(self):
@@ -72,7 +81,7 @@ rules = [{rule}]
 
     def findings(self, w: Workspace) -> list[str]:
         _, out, _ = w.run("check")
-        return [line.strip() for line in out.splitlines() if " × " in line]
+        return hit_lines(out)
 
     def test_an_engine_name_in_a_markdown_code_span_is_not_flagged(self):
         w = self.rules_ws(self.AMERICAN)
@@ -171,7 +180,7 @@ rules = [{self.RULE}]
     def findings(self, w: Workspace) -> list[str]:
         code, out, err = w.run("check")
         self.assertNotEqual(code, 2, err)
-        return [line.strip() for line in out.splitlines() if " × " in line]
+        return hit_lines(out)
 
     def test_the_tools_own_reports_are_never_checked(self):
         w = self.rules_ws()
@@ -248,7 +257,7 @@ rules = [{self.RULE}]
         _, out, _ = w.run("check")
         self.assertIn("writing-rules: 'outbound/*.md' matched 1 file(s), all left out "
                       f"(gitignored) — {self.INCLUDE}", out)
-        self.assertEqual([line.strip() for line in out.splitlines() if " × " in line],
+        self.assertEqual(hit_lines(out),
                          [self.HIT])
 
     def test_include_ignored_checks_ignored_drafts(self):
@@ -326,7 +335,7 @@ rules = [{self.RULE}]
         w = self.rules_ws(files='["notes/./*.md", "notes/."]')
         _, out, _ = w.run("check")
         self.assertNotIn("another spelling", out)
-        self.assertEqual([line.strip() for line in out.splitlines() if " × " in line],
+        self.assertEqual(hit_lines(out),
                          [self.HIT])
 
     def test_an_absolute_entry_is_refused(self):
@@ -382,7 +391,7 @@ rules = [{self.RULE}]
                       "(always excluded) — list it in include_excluded to check it anyway", out)
         self.assertNotIn("notes/*.md' matched", out)
         self.assertNotIn("none/*.md", out)
-        self.assertEqual([line.strip() for line in out.splitlines() if " × " in line],
+        self.assertEqual(hit_lines(out),
                          [self.HIT])
 
     def test_exclude_is_matched_as_a_glob_is(self):
@@ -428,7 +437,7 @@ rules = {self.RULES}
     def findings(self, w: Workspace) -> list[str]:
         code, out, err = w.run("check")
         self.assertNotEqual(code, 2, err)
-        return [line.strip() for line in out.splitlines() if " × " in line]
+        return hit_lines(out)
 
     def test_the_marker_skips_the_named_text_on_its_line(self):
         w = self.rules_ws()
@@ -462,6 +471,12 @@ rules = {self.RULES}
         w.write("notes/a.md", "A licence. <!-- writing-rules: allow licence. -->\n"
                               "A licence. <!-- writing-rules: allow \"licence\" -->\n"
                               "A licence. <!-- Writing-Rules: ALLOW `licence`; -->\n")
+        self.assertEqual(self.findings(w), [])
+
+    def test_a_marker_ends_at_a_handlebars_comment_close(self):
+        w = self.rules_ws()
+        w.write("notes/a.hbs", "{{!-- writing-rules: allow colour --}}\n")
+        w.write("notes/b.md", "The colour. {{!-- writing-rules: allow colour --}}\n")
         self.assertEqual(self.findings(w), [])
 
     def test_allowing_a_text_no_rule_has_is_harmless(self):
@@ -518,6 +533,48 @@ setup_hint = "run ./bootstrap.sh"
         subprocess.run(["git", "-C", str(w.root / "alpha"), "init", "-q"], check=True)
         code, out, _ = w.run("check", "--project", "alpha")
         self.assertIn("alpha: 'AGENTS.md' is present but untracked inside the checkout (W-1)", out)
+
+    def history_output(self, history: str, forbidden: str = "AGENTS.md",
+                       added: str = "AGENTS.md", sub: str = "") -> str:
+        """`check` output for a checkout that added `added` and a later commit removed it;
+        `sub` names a folder of its own when a test runs this twice."""
+        (self.tmp / sub).mkdir(exist_ok=True)
+        w = Workspace(self.tmp / sub, alpha_extra='role = "contribute"', extra=f"""
+[checks.checkout-hygiene]
+level = "error"
+roles = ["contribute"]
+forbidden = ["{forbidden}"]
+rules = {{ contribute = "W-1" }}
+{history}""")
+        repo = w.root / "alpha"
+        w.write(f"alpha/{added}", "x")
+
+        def git(*args: str) -> None:
+            subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+                            "-c", "commit.gpgSign=false", *args],
+                           check=True, capture_output=True, cwd=w.root, env={**os.environ,
+                                                                           "HOME": str(w.home)})
+        git("init", "-q")
+        git("add", "-A")
+        git("commit", "-qm", "add")
+        git("rm", "-q", added)
+        git("commit", "-qm", "remove")
+        return w.run("check", "--project", "alpha")[1]
+
+    def test_checkout_hygiene_history_finds_a_path_a_later_commit_removed(self):
+        out = self.history_output("history = true")
+        self.assertIn("alpha: 'AGENTS.md' is in the checkout's history (commit ", out)
+        self.assertIn("our files never go there (W-1)", out)
+
+    def test_checkout_hygiene_history_finds_a_folder_a_later_commit_removed(self):
+        out = self.history_output("history = true", forbidden=".context-gate/",
+                                  added=".context-gate/build/p1/ledger.toml")
+        self.assertIn("'.context-gate/' is in the checkout's history (commit ", out)
+
+    def test_checkout_hygiene_without_history_says_nothing_of_a_removed_path(self):
+        said = "'AGENTS.md' is in the checkout's history"
+        self.assertIn(said, self.history_output("history = true"))
+        self.assertNotIn(said, self.history_output("", sub="off"))
 
     def test_generic_checks_are_off_until_configured(self):
         code, out, _ = self.ws().run("check")

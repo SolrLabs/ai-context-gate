@@ -13,6 +13,8 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import profile_guard  # noqa: E402,F401
+
 from regressions_support import *  # noqa: E402,F401,F403
 
 class MalformedRange(Base):
@@ -88,7 +90,7 @@ class FindingNamesItsSetting(Base):
         wtext(mem, "- line\n" * 50)
         # Recorded first: a new size breach is the ratchet's finding alone, and the
         # limit's own warning, the one that names the setting, is what a recorded one shows.
-        w.run("baseline", "--allow-raise")
+        w.run("baseline", "--allow-raise", "--reason", "test")
         _, out, _ = w.run("check")
         self.assertIn("last_reviewed 30d ago exceeds doc-frontmatter stale_days=10", out)
         self.assertIn("words exceeds doc-frontmatter max_working_words=3", out)
@@ -112,7 +114,7 @@ class FindingNamesItsSettingWhenTheRatchetReports(Base):
         w = self.ws(extra="\n[checks.doc-frontmatter]\nmax_working_words = 3\n")
         w.write("projects/alpha/working-files/notes.md",
                 fm("working", status="active") + "word " * 10)
-        w.run("baseline", "--allow-raise")
+        w.run("baseline", "--allow-raise", "--reason", "test")
         w.write("projects/alpha/working-files/notes.md",
                 fm("working", status="active") + "word " * 12)
         _, out, _ = w.run("check")
@@ -139,7 +141,7 @@ class ExitCodes(Base):
         code, out, _ = w.run("baseline")
         self.assertEqual(code, 1)
         self.assertIn("refused new entry 'governed_docs:alpha'", out)
-        code, out, _ = w.run("baseline", "--allow-raise")
+        code, out, _ = w.run("baseline", "--allow-raise", "--reason", "test")
         self.assertEqual(code, 0)
 
 
@@ -197,7 +199,7 @@ class EdgeCases(Base):
 
     def test_unreadable_log_blocks_every_write(self):
         w = self.ws(extra="\n[checks.governed-doc-count]\nmax_docs = 0\n")
-        self.assertEqual(w.run("baseline", "--allow-raise")[0], 0)
+        self.assertEqual(w.run("baseline", "--allow-raise", "--reason", "test")[0], 0)
         base = (w.root / layout.BASELINE).read_text(encoding="utf-8")
         log = w.root / "projects/alpha/DECISIONS.md"
         log.write_bytes(log.read_bytes() + b"\xff")
@@ -330,7 +332,7 @@ class EnginePin(Base):
         entry, env = self._installed(w)
         self._engines(w, (f"{PREV_SERIES}.0", __version__, f"{SERIES}.99", NEXT_RELEASE))
         res = subprocess.run([sys.executable, str(entry), "check"], env=env,
-                             capture_output=True, text=True)
+                             capture_output=True, text=True, cwd=w.root)
         self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
         self.assertTrue(self._which(entry, env).endswith(__version__))
         # A newer engine is installed: one plain line (not a terminal), with the command.
@@ -346,7 +348,7 @@ class EnginePin(Base):
         before = cfg.read_bytes()
         for flag in ("--help", "-h"):
             res = subprocess.run([sys.executable, str(entry.with_name("upgrade")), flag],
-                                 env=env, capture_output=True, text=True)
+                                 env=env, capture_output=True, text=True, cwd=w.root)
             self.assertEqual(res.returncode, 0, res.stderr)
             self.assertIn("usage: upgrade [--to X.Y.Z]", res.stdout)
             self.assertEqual(cfg.read_bytes(), before)
@@ -358,7 +360,7 @@ class EnginePin(Base):
         cfg = w.root / CFG
         before = cfg.read_bytes()
         res = subprocess.run([sys.executable, str(entry.with_name("upgrade")), "--dry-run"],
-                             env=env, capture_output=True, text=True)
+                             env=env, capture_output=True, text=True, cwd=w.root)
         self.assertEqual(res.returncode, 2)
         self.assertIn("usage: upgrade [--to X.Y.Z]", res.stderr)
         self.assertEqual(cfg.read_bytes(), before)
@@ -369,7 +371,7 @@ class EnginePin(Base):
         cfg = w.root / CFG
         before = cfg.read_bytes()
         res = subprocess.run([sys.executable, str(entry.with_name("upgrade")), "--to"],
-                             env=env, capture_output=True, text=True)
+                             env=env, capture_output=True, text=True, cwd=w.root)
         self.assertEqual(res.returncode, 2)
         self.assertIn("usage: upgrade [--to X.Y.Z]", res.stderr)
         self.assertEqual(cfg.read_bytes(), before)
@@ -379,7 +381,7 @@ class EnginePin(Base):
         entry, env = self._installed(w)
         for flag in ("--help", "-h"):
             res = subprocess.run([sys.executable, str(entry.with_name("uninstall")), flag],
-                                 env=env, capture_output=True, text=True)
+                                 env=env, capture_output=True, text=True, cwd=w.root)
             self.assertEqual(res.returncode, 0, res.stderr)
             self.assertIn("usage: uninstall [--force]", res.stdout)
             self.assertTrue((w.root / layout.GOV_DIR).is_dir())
@@ -388,7 +390,7 @@ class EnginePin(Base):
         w = self.ws()
         entry, env = self._installed(w)
         res = subprocess.run([sys.executable, str(entry.with_name("uninstall")), "--purge"],
-                             env=env, capture_output=True, text=True)
+                             env=env, capture_output=True, text=True, cwd=w.root)
         self.assertEqual(res.returncode, 2)
         self.assertIn("usage: uninstall [--force]", res.stderr)
         self.assertTrue((w.root / layout.GOV_DIR).is_dir())
@@ -420,7 +422,7 @@ class EnginePin(Base):
         wtext(cfg, cfg.read_text(encoding="utf-8").replace(
             "schema = 1", f'schema = 1\nsource = "{src.as_posix()}"', 1))
         res = subprocess.run([sys.executable, str(entry), "check"], env=env,
-                             capture_output=True, text=True)
+                             capture_output=True, text=True, cwd=w.root)
         self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
         self.assertIn(f"installing engine {__version__}", res.stderr)
         self.assertTrue((layout.engines_dir(w.home) / __version__ / "govern" / "cli.py").is_file())
@@ -429,7 +431,7 @@ class EnginePin(Base):
         w = self.ws()
         entry, env = self._installed(w)
         res = subprocess.run([sys.executable, str(entry)], env=env, capture_output=True,
-                             text=True)
+                             text=True, cwd=w.root)
         self.assertEqual(res.returncode, 2)
         self.assertIn(f"engine {__version__} is not installed", res.stderr)
 
@@ -439,7 +441,7 @@ class EnginePin(Base):
 
     def _check(self, entry, env):
         return subprocess.run([sys.executable, str(entry), "check"], env=env,
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, cwd=env["HOME"])
 
     def test_no_local_file_changes_nothing(self):
         w = self.ws()

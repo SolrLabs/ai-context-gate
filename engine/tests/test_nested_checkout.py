@@ -22,6 +22,10 @@ from unittest import mock
 ENGINE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ENGINE))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import profile_guard  # noqa: E402,F401
+
 from govern import __version__, cli, config, layout, measure, registry  # noqa: E402
 from govern.context import Context  # noqa: E402
 
@@ -262,6 +266,38 @@ class NestedCheckout(Fixture):
         self.assertIn("link target does not exist: a.md — deleted in", out)
 
 
+class IgnoredClone(Fixture):
+    """A git clone inside a folder the governed folder's own repo ignores is not the
+    project's documentation, whatever its own (empty) ignore rules say."""
+
+    def clone(self, folder: str) -> None:
+        self.write(f"{NESTED}/{folder}/docs/x.md", "no frontmatter at all\n")
+        git(self.mod / folder, "init", "-q")
+
+    def test_a_clone_in_an_ignored_folder_is_not_governed(self):
+        self.write(f"{NESTED}/.gitignore", "docs/scratch.md\nscratch-clones/\n")
+        self.clone("scratch-clones/verify")
+        self.assertEqual(self.governed(), ["DECISIONS.md", "docs/INDEX.md", *self.DOCS])
+        code, out = self.run_cli("check")
+        self.assertNotIn("scratch-clones", out)
+
+    def test_a_clone_the_repo_does_not_ignore_is_still_governed(self):
+        self.clone("kept-clones/verify")
+        self.assertIn("kept-clones/verify/docs/x.md", self.governed())
+
+    def test_a_failing_git_keeps_the_clone_governed(self):
+        self.write(f"{NESTED}/.gitignore", "scratch-clones/\n")
+        self.clone("scratch-clones/verify")
+        real = subprocess.run
+
+        def failing(argv, *a, **kw):
+            if "check-ignore" in argv:
+                return subprocess.CompletedProcess(argv, 128, b"", b"fatal: lock")
+            return real(argv, *a, **kw)
+        with mock.patch("govern.context.subprocess.run", failing):
+            self.assertIn("scratch-clones/verify/docs/x.md", self.governed())
+
+
 class SnapshotIgnores(Fixture):
     """Under `check --path`, which snapshot files git ignores is asked of the snapshot's
     own repo (or `--history-from`'s), never of the root. The shape is the project's own CI: a
@@ -272,7 +308,7 @@ class SnapshotIgnores(Fixture):
         super().setUp()
         code, out = self.run_cli("index")
         self.assertEqual(code, 0, out)
-        code, out = self.run_cli("baseline", "--allow-raise")
+        code, out = self.run_cli("baseline", "--allow-raise", "--reason", "test")
         self.assertEqual(code, 0, out)
         self.code, self.out = self.run_cli("check", "--project", NESTED)
         self.assertEqual(self.code, 0, self.out)                # green in place
@@ -336,7 +372,7 @@ class WorkspaceOnly(Fixture):
         self.write("AGENTS.md", fm("control") + "# Agents\n\nSee [a](nested-mod/docs/a.md).\n\n"
                    "<!-- t:generated:start id=agent-roster -->\n"
                    "<!-- t:generated:end id=agent-roster -->\n")
-        for argv in (["index"], ["baseline", "--allow-raise"]):
+        for argv in (["index"], ["baseline", "--allow-raise", "--reason", "test"]):
             code, out = self.run_cli(*argv)
             self.assertEqual(code, 0, out)
         code, out = self.run_cli("check")

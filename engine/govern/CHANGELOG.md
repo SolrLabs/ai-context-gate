@@ -4,214 +4,231 @@ Newest first. Each release says what changed and, under **Upgrading**, anything 
 do or decide. The upgrade report quotes every entry between the engine a project ran and the one
 it upgraded to.
 
-## 0.7.0-beta.17 — 2026-10-15
+## 0.9.5-beta.1 — 2026-11-17
 
-This release adds agent roles, hooks and a `govern build` ledger for running a plan phase by phase with role agents. To try a beta, run `govern beta on <version>` in a project; it installs the beta engine and a plugin named `context-gate-beta`, whose skills are `/context-gate-beta:plan`, `/context-gate-beta:build` and `/context-gate-beta:options`. Restart the Claude Code session after it so the plugin loads. To leave, run `govern beta off`. Everything below was added in the betas leading to this release, and the first group of bullets is the newest.
+Overnight driver: `govern build drive` runs a plan unattended, one fresh coordinator session per build step, with a weekly usage cap and compaction hooks.
 
-- **`govern sweep` protects long-lived branches:** `sweep` claims every local branch the `merged-branches` check's `keep` list names (default `main`, `master`, `development`, `beta-*`, `release-*`, read from the check's manifest; a project's own `keep` replaces it) as `IN-USE`, note `a protected branch (merged-branches keep)`, whatever the check's level. So `--apply --only main` prints `skipped` and removes nothing, and a worktree on a protected branch is `IN-USE` (or `DIRTY`). Before, a local `main` that was an ancestor of the default branch came out `MERGED`. Output changed: those verdicts and notes, and protected branches now print `unpushed` lines (they printed none as `MERGED`).
-- **`govern sweep` and the `housekeeping` skill:** `govern sweep [--project NAME]` is a read-only report, per repository, of every linked worktree and local branch with a verdict (`MERGED`, `PR-MERGED` via `gh`, `IN-USE`, `DIRTY`, `REVIEW`), plus `unpushed`, `build`, `finished` (from the finished-files check's own function), `memory` and `auto-remove` lines. It fails closed: no `gh` means nothing unmerged is removable; no `lsof` (every Windows machine) means no worktree is removable without asking; a repository git cannot read prints an `error` line and exits 1. `govern sweep --apply --only NAME...` removes exactly the named items that are `MERGED` or `PR-MERGED` when it runs, after a bundle under `<git common dir>/context-gate/sweep/<date>/` that `git bundle verify` accepts, and prints a `restore with:` command; it never pushes, merges or forces. New config section `[sweep] auto_remove` (`merged`, `pr-merged`; default none), read only by the skill; an engine before this beta refuses the section, so set it in `local.toml` while the pin is older. The plugin's `housekeeping` skill runs seven steps at the end of a session, and the build skill runs it after `phase close`. The technical-writer role's close step ends the handoff with the next step and its exact command. Output changed: the new `sweep` command and its lines, and the handoff's last lines. `govern index` already renders every project's blocks and takes no project option.
-- **The roster leaves out local-only roles:** the `agent-roster` block skips the role files `.context-gate/rendered.local.toml` lists, so a machine with local-only roles renders the same block as one with none. A non-UTF-8 role record reads as empty instead of failing. Output changed: the `agent-roster` block on such a machine. **Upgrading:** run `govern index` once if `govern check` reports the block stale.
-- **After `govern beta on`:** the options skill says to run `govern check` once before restarting, because the committed launcher writes the old plugin id and any beta command corrects it. No engine change.
-- **`govern build` in a workspace member:** in a workspace whose members are repositories of their own, every `build` subcommand takes `--project <name>`; the ledger, the phase branch and the review package are the member's. `build start` without it refuses and lists the members; other subcommands find the one build in flight or refuse naming several. A member that is a folder of the root's repository works as before, and `--project` on it says to build without it. A failing repository call stops the command. `build launch` for a writing agent in a member makes its worktree and prints `Worktree: <path>` after `Brief:` and `Base:`. The roles say what `Worktree:` means, and the build skill has a section `## In a workspace`. Output changed: the launch lines in a workspace, the printed commands in a workspace (`--project`, `-C <folder>`, `phase close --path <folder>`), and the new ledger key `project`. A single repository is unchanged. Not shown live: an agent working in a member worktree.
+**Upgrading:** nothing to configure. The compaction hooks (PreCompact, and SessionStart on `compact`) live in the plugin: update the plugin and start a new session to get them. The driver and its report need only the engine. The driver's time-limit kill ends only the top process on Windows.
+
+- **Added:** `govern build drive <plan>` runs one headless `claude -p` coordinator session per build step (stream-json, `--permission-mode auto`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, default 50). It stops on the session's `LOOP:` exit line (plan-done only when `build status` confirms it), on a weekly cap (default 90; read from each session's `rate_limit_event`, first reading from a one-turn Haiku probe; stops when the last reading plus the largest rise reaches the cap), on `--hours`, on `--max-sessions`, or after two sessions without progress. It kills the session's process group on the time limit and when the driver itself is signalled.
+- **Added:** every session appends a measurement row to `~/.local/state/context-gate/drive/sessions.jsonl`. `govern build drive-report [name]` prints peaks and a suggested `--compact-pct` (p95 + 10, per project and overall, from 20 sessions).
+- **Added:** a PreCompact hook prints the build's state as the compact instructions; SessionStart with source `compact` re-injects it.
+
+## 0.9.4 — 2026-11-17
+
+Agent hygiene: a fresh agent for every fix, two new refusals under `agent-gates`, and workspace builds that brief and close correctly.
+
+**Upgrading:** a project with `agent-gates` on gets two new refusals after upgrading: a `SendMessage` to a finished agent, and a whole-file `Read` of a file over 400 lines. `deny_resume = false` and `read_lines = 0` turn them off. `build launch fix` no longer prints `Resume:` or resumes a unit's builder; the 0.9.2 entries that mention it are history. Run `govern agents render` to refresh the rendered agents and build rules. In a workspace, `build launch close` now prints two launches, and the second writer's branch (`build/<slug>/close-workspace`) is merged in the workspace repository by you or the coordinator.
+
+- **Changed:** `govern build launch fix` always launches a fresh agent and never prints `Resume:`. The fix brief gains a `Tests` section; the build rules say a finished agent is never resumed and every brief names a scoped test command.
+- **Added:** every role reads large files by search or line range (`{{reading}}` in each role template).
+- **Added:** `[checks.agent-gates]` params `deny_resume` (bool, default true) and `read_lines` (int, default 400; below 1 is off). The PreToolUse matcher is now `Agent|SendMessage|Bash|Read`.
+- **Changed:** in a workspace, every unit, fix, review and close brief says its contract paths are from the root of the `Worktree:` folder, a checkout of the member.
+- **Changed:** in a workspace, `govern build close` also writes `close/workspace-brief.md` (the workspace repository's handoff, decision log and roadmap), and `govern build launch close` prints a second technical-writer launch: a worktree of the workspace repository on `build/<slug>/close-workspace`, with a `Base:` of its HEAD and a `Workspace branch:` line. On a detached HEAD the line says to merge the writer's branch by hand. `build close` also prints the removal of that worktree and branch, and the writer's `Produces:` sits in the state folder when `build_root` is set.
+- **Fixed:** the `agent-gates` Red gate finds failing output in subfolders of the red folder, as `build collect` copies it. Its refusal now says whether the folder held no files or only files from before the run.
+
+## 0.9.3 — 2026-11-13
+
+0.9.3 fixes two faults a project reported on 0.9.2: the build gate skipped the document checks, and `build verify` warned about Scope entries that were not literal paths.
+
+**Upgrading:** nothing to configure. A document error already on a phase branch turns `build gate` red after the upgrade, and so blocks `build unit set <id> done` (scoped `unit_gate`) and `build review` until fixed or passed with `--accept-red`. Run `python3 .context-gate/bin/govern check --project <member>` (or `check` in a single repo) before upgrading in the middle of a build.
+
+- **Changed:** `govern build gate` (no `--cmd`) runs `full_gate`, then the project's `govern check` (`--project <member>` in a workspace), in process, appended to `gate/last.log` under `== govern check ==`. Red when either is red. The record gains `check_rc`; `rc` is full_gate's when non-zero, else 1 when the check failed. A red check prints `check: red (govern check [--project P])` and the check's error lines; a red full_gate prints its own last 15 lines. `--cmd` runs no check.
+- **Fixed:** `govern check` and `govern index` run in a linked git worktree of a workspace member act on that worktree (check: as `--project <member> --path <worktree gov> --history-from <worktree>`, ratchet keys at their real paths; index: only that member's blocks, written in the worktree, workspace blocks and the `.gitattributes` merge region left alone). Each says so on stderr. Single repos were already right.
+- **Fixed:** `build verify` reads Scope entries as patterns: `{a,b}` braces (spaces after commas allowed), `<stem>LO..HI<tail>` ranges (zero-padded, at most 1000), globs (`*`, `?`, `[...]` within a folder, `**` across), folders (a trailing `/`, or a path that is a changed file's folder). `**x**` bold is unwrapped; other stars kept. The comparison covers every file the branch's commits touched since the phase base, so earlier rounds count. An expanded entry with misses says `(n of m not changed: ...)`; unresolvable entries share one `could not resolve the report's Scope entries: ...` warning.
+
+## 0.9.2 — 2026-11-12
+
+0.9.2 fixes the papercuts of the 2026-11-11 review: the build loop checks its own hand-backs, and checks stop flagging what they should not.
+
+**Upgrading:** nothing is required. `forbidden_trailers`, `fast_checks` and `worktree_setup` are empty by default. Run `govern agents render` after upgrading to refresh the rendered agents and build rules.
+
+- **Added:** `govern build gate [--cmd CMD]` runs `full_gate` and records `<phase folder>/gate/last.json` (`status`, `rc`, `head`, `dirty`, `seconds`, `at`, `cmd`) and `gate/last.log`. HEAD and the dirty state are read before the run; a HEAD that moves during it leaves the record stale. `--cmd` runs another command and records nothing.
+- **Changed:** `build unit set <id> done` (with `full_gate` set and `unit_gate = "scoped"`) and `build review` (with `full_gate` set) refuse a red, missing or stale gate record. `--accept-red REASON` on both lets the step through and records a ruling. With `agent-gates` on, a coordinator `git push` is denied when the phase's last gate is red at HEAD.
+- **Added:** `govern check --quiet` (`-q`) shows errors only; each status line says `N warnings hidden, run without --quiet`. The exit status is unchanged.
+- **Added:** `govern build verify <id> --branch B`, read-only, also run by `unit set <id> done --branch B`. It refuses: no commit past the unit's base, an empty diff, uncommitted files in the branch's worktree, a git-ignored ledger (also refused at `launch` and `review`), a commit line matching `forbidden_trailers`. It warns: a report `Scope:` path the diff does not touch; ignored files in a folder the diff touches.
+- **Added:** `[checks.agent-roles]` params `forbidden_trailers` (list of regexes, default empty), `fast_checks` (list of commands, rendered for developer and senior-developer as the hand-back key `Fast checks`, not under `unit_gate = "full"`) and `worktree_setup` (one command, rendered as a line in developer, senior-developer and technical-writer).
+- **Added:** ledger unit keys `base` (stored by `launch`) and `agent` (`build unit set <id> done --agent ID`; cleared on `failed`, `blocked` and relaunch). `launch` prints `Phase branch: <branch>` after `Base:`.
+- **Changed:** `govern build fix --unit <id>` writes a fix brief with a `Unit: <id>` line. `build launch fix` prints `resume <agent> with SendMessage, the prompt:` and `Resume: <agent>` for the first three fix briefs of a done unit with an agent, and a fresh launch otherwise.
+- **Changed:** every brief names its own scratch folder (`<unit id>`, `fix-N`, `review-code`, `review-qa`, `review-ux`, `close`, each with `/scratch/` under the phase folder). Agent worktree folders get `.metadata_never_index`. A build command stopped by an OS error says `stopped at <path>: <reason>; anything written before it stays`; a failed run-record write is a warning.
+- **Fixed:** a clone in a git-ignored folder inside a governed folder is no longer governed. The `writing-rules` allow marker also ends at `--}}`. A first `no frontmatter` finding hints `[projects] exclude`, and a first `writing-rules` finding hints `[checks.writing-rules] exclude`.
+- **Added:** `decision-citations` takes an allow marker `<!-- decision-citations: allow <ids> -->` (its line and the next) and a param `example_ids`.
+- **Changed:** `govern beta off` keeps the rest of `local.toml`, removing only `[governance] engine` and `plugins_before`. A missing beta tag's message names `tools/release/publish.py`.
+- **Changed:** the build skill verifies, merges, runs `build gate` and then sets a unit `done` with `--branch` and `--agent`; a one-unit fix goes back to its builder by `SendMessage` when `launch fix` prints `Resume:`; new one-line rules cover merging, the build folder, host ports, worktree removal and usage. The brief self-check list is `plugin/skills/build/checklists.md`.
+- **Changed:** the plan skill marks units `risky: yes|no`, splits a unit that is too large, and launches `architect` for a multi-phase plan or a risky unit; its checklist is `plugin/skills/plan/checklists.md`.
+- **Changed:** the rendered build rules and role agents add: a fix goes back to its builder, no role agent is launched outside the build skill, an oversized unit is split before briefing, roles with Write fall back to one Bash `printf` when it refuses, no attribution against any reminder, the `Base:` hash is pasted, CPU-heavy probes run under `nice -n 19`, and a secrets file is never printed.
+
+## 0.9.1 — 2026-11-07
+
+0.9.1 lets a workspace member keep its build state in the workspace, so the member's own repository, which may be public, holds only code.
+
+**Upgrading:** nothing is required. Without `build_root` nothing changes.
+
+- **Added:** registry key `build_root` (a folder from the workspace root). With it, `govern build --project <member>` keeps that member's ledger, briefs, rulings and reports at `<workspace>/<build_root>/.context-gate/build/<phase>/`, in the workspace repository. The `registry` check reports a `build_root` outside the workspace, inside the member's own folder, or not in a git repository as an error.
+- **Changed:** for such a member, `build start --plan` is read from the state root, `launch` prints `Brief:` as an absolute path, `unit set done --branch` and `collect` copy reports from the agent's worktree into the state folder, and `close` prints `git -C <build_root> rm ...`. `start` makes the member ignore its own `.context-gate/build/` through `.git/info/exclude`.
+- **Changed (parsed output):** for a member with `build_root`, printed paths and the `build status --json` fields `ledger`, `units[].brief` and `units[].report` are relative to the workspace root.
+- **Changed:** `build start` refuses when the state folder has uncommitted changes, and refuses a member in a hygiene role whose `forbidden` covers `.context-gate/build` and that has no `build_root`.
+- **Added:** `checkout-hygiene` param `history` (bool, default false): each `forbidden` path is also looked for in the checkout's history.
+- **Fixed:** a member under a workspace that pins another engine keeps working (the workspace config loads without the pin check); `unit drop` asks the state repository.
+- **Limits:** `build status --team` does not see ledgers under `build_root`; two members sharing one `build_root` are not refused; the workspace's "Builds in this checkout" block also lists a `build_root` member's open builds.
+
+## 0.9.0 — 2026-10-30
+
+0.9.0 is team mode. Two developers' branches merge decision logs, trap files, generated blocks and the ratchet baseline without conflicts, and ids stay unique across branches. Builds have owners, and session start says what teammates changed. 0.8.0 and 0.8.1 were not published on their own, so their sections below ship in this release; the main items are the status row with a daily weekly allowance (0.8.1) and coordinator sessions measured in `govern runs report` (0.8.1).
+
+**Upgrading:** from 0.7.0.
+
+1. Raise the pin and run the upgrade.
+2. Run `python3 .context-gate/bin/govern usage install` again; the capture is copied at install.
+3. Where `agent-roles` is on, run `python3 .context-gate/bin/govern agents render`.
+4. Each clone that turns on the `merge-driver` check runs `python3 .context-gate/bin/govern merge-driver install`.
+5. A script that calls `govern baseline --allow-raise` must now pass `--reason TEXT`.
+6. A project that ran a beta with `CLAUDE_CONFIG_DIR` set runs `python3 tools/release/install-plugin.py <tag>` (or `govern beta on`) again, so the plugin lands in the profile Claude Code reads.
+
+**Merging**
+
+- **Added:** `govern merge-driver O A B P`, a merge driver for the version control system. It merges decision logs and trap files by entry id and keeps the log's own order, takes ours for generated blocks (`govern index` refills them), and merges `baseline.json` per key (the larger number wins) and `baseline-reasons.json` per key. Two branches adding the same id leave one conflict with a comment naming the id.
+- **Added:** opt-in check `merge-driver` (default off) keeping a `# context-gate:start/end` region in `.gitattributes`. `govern index` writes it when the check is on; uninstall removes it. A project that is its own checkout gets a warning that the driver does not cover it.
+- **Added:** `govern merge-driver install`: repository config plus `post-merge` and `post-rewrite` hooks that run `govern index`. A foreign hook or `core.hooksPath` is left alone. Session start says when a clone with the region is not wired. It records the Python that ran it in the driver line and hooks; run it again after moving Python.
+- **Changed (breaking for scripts):** `govern baseline --allow-raise` now takes optional keys and requires `--reason TEXT` (exit 1, nothing written, without it). Reasons are kept in `baseline-reasons.json` beside the baseline. Every hint now names the key and a reason.
+- **Changed (parsed output):** `govern diff --json` baseline rows `added` and `raised` carry the recorded `reason` (was always null); the text line ends ` - <reason>`.
+
+**Ids across branches**
+
+- **Added:** `govern next-id --fetch` and `govern trap-add --fetch`: fetch the remote first, then count ids used on every remote branch as well as the local tree, so two branches do not take the same next id. Without `--fetch` they read the remote branches already fetched. A fetch that fails prints a warning naming the cause and goes on with local refs.
+- **Added:** `govern check --siblings`: warns (exit 0) when an id added on this branch is also added on another branch, naming the branch and the other entry's title, and suggests `govern renumber`. It reads local refs only, never the network.
+- **Added:** session start says the same when the project has more than one author in the last 90 days (`plugin/hooks/siblings.py`, a child process with a time cap). A solo project pays one `git log`.
+- **Added:** `govern renumber OLD NEW [--project P]`: renames a decision or trap id and every citation of it in the project, all files written or none. Trap ids are per project.
+- **Added:** opt-in check `decision-citations` (default off): a citation of a decision or trap id that does not exist is a finding. Unreadable files are skipped with a note.
+
+**Builds and owners**
+
+- **Added:** a build ledger records its owner (`owner`, the `git config user.email` of whoever ran `build start`; nothing recorded without an email). Every `govern build` command but `status` refuses another person's phase: `<phase> belongs to <owner>; run with --take-over to take it`. `--take-over` records the ruling `taken over from <owner> on <UTC date>` and moves the owner. Emails compare without case.
+- **Added:** builds on fetched branches are seen. `govern build status --team [--json]` lists every open build, local and on fetched remote branches: phase, branch, owner, stage, done/total, last commit time (`{"builds": [...]}` in JSON). A remote ledger counts only when its own `branch` is that remote branch. Nothing fetches.
+- **Changed:** `govern phase close` and `govern sweep` keep a teammate's open build found on a fetched branch, its local namesake and branches merged into it. A remote ledger that does not parse keeps its branch, with a warning; a failing git call is an error, never "no builds".
+- **Changed:** `govern build start` refuses a phase name in flight on a fetched branch.
+- **Added:** `commit_reports` on `agent-roles` (default false): the build folder's `.gitignore` lets `*-report.md` be committed, so a reviewer on another machine reads unit reports after a fetch. `start` brings an engine-written `.gitignore` in line with the option (CRLF and BOM kept); a hand-edited one is left alone.
+- **Changed:** the phase-close brief names the phase's owner and their handoff.
+
+**What teammates did**
+
+- **Added:** session start in a team project (more than one author in 90 days) lists the decisions and traps teammates added, changed or superseded on the default branch since your last session, with the author's name. It reads local refs only, never lists your own changes and shows up to ten lines.
+- **Added:** `[checks.working-files] handoff` may be a glob (`docs/handoff/*.md`): one handoff per owner, each with its own word ratchet key, so two owners never fail each other's gate.
+- **Added:** a handoff's frontmatter may name an `owner`; `per_owner_max` caps each owner's handoff.
+- **Added:** a `team-state` generated block lists the open builds tracked in this checkout and their owners.
+
+**Status row**
+
+- **Fixed:** the weekly color follows the day's pace since its first figure, not the last hour, so one whole-point step early in a long day no longer turns it red.
+
+## 0.8.1 — 2026-10-28
+
+0.8.1 turns the weekly part of the status row into a daily allowance, weighted per weekday and per Claude profile, and measures the coordinator's own sessions in `govern runs report`.
+
+**Upgrading:** run `python3 .context-gate/bin/govern usage install` again; the capture is copied at install.
+
+- **The row:** the weekly part reads `Weekly: 40% · today 5/18%`: the week's figure, today's spend, today's allowance. The allowance is what was left at today's start times today's weighted share of the days left to the reset. The color follows where the last hour's rate ends your day: green within today's allowance; yellow when the overrun costs a later day at most `later_cut` (default 0.1) of its allowance; red beyond that, or when the week runs out. A zero-weight day reads `off day N%` in yellow (grey under 1%). A payload older than its weekly reset prints a grey `Weekly: N%` alone. The grey "too early" state is gone.
+- **Daily anchors:** the capture records, per profile, local date and weekly window, the first and highest weekly figure in `~/.local/state/context-gate/usage/days.json` (dates older than 35 days are dropped). `first` is raised to the freshest figure any session has seen, so an idle session after midnight cannot charge yesterday to today.
+- **Settings:** `~/.local/share/context-gate/usage-week.toml` holds `[weekly]` and `[weekly.profiles."<folder>"]` with `weights`, `day_end` and `later_cut`. It is read silently, with a default per key. A profile's `weights` replaces the whole table. Folder keys compare case-insensitively where the OS does. A UTF-8 BOM is accepted. See "Weekly allowance" in `docs/configuration.md`.
+- **`govern usage weights [--profile <folder>]`:** shows the settings in effect, or every fault in the file naming its key (exit 1). `--suggest` proposes weights from 14 or more recorded days (today left out) as a table to paste; it writes nothing.
+
+**Coordinator sessions (with `agent-measure` on)**
+
+- **Measured beside the agents:** a main session's transcript (Claude Code's projects folder, named from the project path with every character that is not an ASCII letter or digit turned into `-`) becomes rows per phase: requests, the four token kinds, peak context, compactions, owner turns, hand-backs, tools (calls, seconds, result KB) and the five largest results. Numbers only. A transcript of an unknown shape gives no row.
+- **Recording:** the plugin's `SessionEnd` hook records the ending session. `govern runs report` first catches up every main session since the oldest mark, the running one included, so a killed session is still counted.
+- **The report:** a `Coordinator` section per phase (`planning` for phase `""`), and coordinator rows in "By role and model".
+- **Planning mark:** `govern phase close` now ends by appending a planning mark when the project's run log exists. Sessions after a close count as `planning` until the next `govern runs mark`; the report reads `planning, since the last phase closed`.
+- **Housekeeping:** the skill's first step also runs `govern runs report` when `agent-measure` is on.
+- **Output changed:** `govern runs report --json` has coordinator rows in `runs` and a new `coordinator` key. `govern phase close` prints one new last line, the planning mark.
+
+## 0.8.0 — 2026-10-27
+
+0.8.0 adds an optional status row with usage projection, a faster test gate, field fixes for the build loop, `adopt`, `check` and `sweep`, and a usage history kept per Claude profile. It folds in 0.8.0-beta.1 to beta.4.
+
+**Upgrading:** from 0.7.0. Raise the pin and run the upgrade. Run `python3 .context-gate/bin/govern usage install` again for the row's changes, then `python3 .context-gate/bin/govern usage row on` to try the row. Where `agent-roles` is on, run `python3 .context-gate/bin/govern agents render` so the roles carry the new `brief_lines` text. A project that ran a beta with `CLAUDE_CONFIG_DIR` set runs `python3 tools/release/install-plugin.py <tag>` (or `govern beta on`) again, so the plugin lands in the profile Claude Code reads.
+
+**Status row and test gate (beta.1 to beta.4)**
+
+- **The row:** off until `govern usage row on`. It draws `<folder> │ <branch> │ <model> │ Ctx: N% │ Usage: N% <bar> → Reset: <time> │ Weekly: N%`, colored by the use projected at the reset from the last hour's rate across all sessions; with under 15 minutes of history, the average since the window opened is used. The weekly figure is grey (SGR 38;5;243) until there are 15 minutes of history to project. `govern usage install` sets a 60-second refresh timer, the row wraps to the terminal width, `NO_COLOR` is honored, and a usage part whose `resets_at` is missing is left out. `govern usage row on|off|status` writes, removes or reports the switch.
+- **Profile folder:** `CLAUDE_CONFIG_DIR` is followed when set (blank counts as unset, `~` expands); without it the profile is `~/.claude`. `govern usage install` and uninstall, the plugin notices, the memory check, `govern beta on` and `tools/release/install-plugin.py` use it.
+- **Test gate:** runs in parallel and unsets `CLAUDE_CONFIG_DIR`. The runner gives tests no stdin. Every launcher or release-tool subprocess in a test runs in a scratch folder, checked by `engine/tests/test_subprocess_cwd.py`.
+
+**Field fixes (phase 2)**
+
+- **`build launch`:** refuses when the default branch has commits the phase branch lacks (public issue 7). A retried unit's `Base:` holds its first attempt, merged into the unit's branch. Fix briefs no longer carry a `Base commit:` header.
+- **`build status`:** names planned units not yet added (public issue 3). `unit drop` records the id (ledger key `dropped`). Output changed: `build status --json` gains `unadded`.
+- **`agent-roles` param `brief_lines`:** lines every unit and fix brief carries under `## Project rules`.
+- **Locked worktrees:** `phase close` and `sweep` unlock and remove a worktree whose lock names a process that is gone or is this session (public issue 6).
+- **`check --project` in a single repo:** it runs the root's checks too; under `--path` only those that read the snapshot (today `writing-rules`) (public issue 4).
+- **Adopt and decision headings:** adopt reads `## X1: Title` and `## X-1: Title` headings in a decision log (a file named DECISIONS.md, holding a decision-index pair, or with "decision" in its name), proposes their prefix and migrates them (public issue 2).
+- **Plugin behind the engine:** session start and `govern upgrade` say when the context-gate plugin is older than the project's pin, with the commands that update it.
+- **`govern sweep`:** new verdict `PUSHED` (a local branch whose exact tip is on its remote, idle `[sweep] stale_days`, default 14). Remote branches of the default branch's remote are judged (`MERGED`, `PR-MERGED`, `STALE` after `[sweep] stale_remote_days`, default 30, else `REVIEW`), skipping long-lived names (develop, dev, staging, stage, production, prod, trunk) and keep globs. `--apply` deletes them on the remote with a lease after a bundle; `--apply --home` fetches, returns the checkout to the default branch and fast-forwards it. `[sweep]` has three keys: `auto_remove`, `stale_days` and `stale_remote_days`. `auto_remove` defaults to empty (ask before every removal). A principles profile may now set `[sweep]` (engine default, then profile, then project); the `auto-remove` line ends ` (profile)` when the list comes from the profile. Output changed: the `sweep` lines.
+- **Usage writer and history:** `usage install` stamps `capture.py` with the engine version and never replaces a newer one (engines before 0.8.0 do not read the stamp). The usage history is kept per Claude profile folder.
+
+## 0.8.0-beta.4 — 2026-10-27
+
+0.8.0-beta.4 follows `CLAUDE_CONFIG_DIR`, the folder Claude Code keeps its profile in when the variable is set (blank counts as unset, `~` expands); without it the profile is `~/.claude` as before. Now in that folder: `govern usage install` and uninstall (and the `settings.json` backup), the plugin notices, the memory check, the local plugin install that `govern beta on` runs, the launcher, and `tools/release/install-plugin.py`, which prints where it installed. The test gate unsets the variable, so a test run never touches your real profile. `govern usage install`'s error now reads `<path>: <reason>; it was not changed`.
+
+**Upgrading:** run `python3 tools/release/install-plugin.py <tag>` (or `govern beta on`) again with the variable set, so the plugin lands in the profile Claude Code reads. Launchers from before 0.8.0-beta.4 still look in `~/.claude`.
+
+## 0.8.0-beta.3 — 2026-10-15
+
+0.8.0-beta.3 adds an optional status row. When it is on, the capture draws `<folder> │ <branch> │ <model> │ Ctx: N% │ Usage: N% <bar> → Reset: <time> │ Weekly: N%`. Context is colored by level. Usage and weekly are colored by the use projected at the reset, from the last hour's rate across all your sessions; every session's capture appends to a shared history under `~/.local/state/context-gate/usage/`, so a stale session shows the fresh figure. With under 15 minutes of history, the average since the window opened is used. `govern usage install` sets a 60-second refresh timer on the statusline, so the row stays current while you wait. The row wraps to the terminal width, and `NO_COLOR` is honored. It is off until `govern usage row on`, it reads only the JSON Claude Code pipes to the status line, and any error falls back to your own statusline. A usage part whose `resets_at` is missing is left out. `govern usage row on|off|status` writes, removes or reports the switch; `on` needs the capture installed, `install` keeps the switch and `uninstall` removes it and the shared history and restores your statusline. The test gate now runs in parallel; the engine tests are in the public set.
+
+**Upgrading:** nothing required. Run `python3 .context-gate/bin/govern usage install` again to get the new capture and the refresh timer, then `python3 .context-gate/bin/govern usage row on` to try the row.
+
+## 0.7.0 — 2026-10-15
+
+0.7.0 makes the gate change-aware, so a team can hold a pull request to the rules of the records it touches. It adds agent roles and the `govern build` loop for running a plan phase by phase with role agents, workspace members that are repositories of their own, field reports, and `govern sweep` with a housekeeping skill for the end of a session.
+
+**Upgrading:** from 0.6.1.
+
+1. Raise the pin and run the upgrade. It refreshes the committed launcher `.context-gate/bin/govern`, which also replaces the old `context-gate@skills-dir` plugin id an older launcher wrote. A project that ran a 0.7.0 beta runs `python3 .context-gate/bin/govern beta off` first, then does the same.
+2. Where `agent-roles` is on, run `python3 .context-gate/bin/govern agents render`. Nothing turns red until then. The rendered roles gain a `## Finish` hand-back checklist, and developers stop running the full gate (the coordinator runs it after each merge); to keep the old behavior set `unit_gate = "full"` under `[checks.agent-roles]`. A project that never set `senior_triggers` drops four triggers the earlier list had (schemas and public APIs, deleting or moving files the project did not create, a release or migration path, and the old wording for credentials and outside input); to keep the old list, set `senior_triggers` before rendering.
+3. If `govern check` reports a generated block stale (the `agent-roster` block on a machine with local-only roles), run `python3 .context-gate/bin/govern index`.
+4. `decision-changes` arrives on, but no existing hook or CI job passes `--base`, so a project's runs gain warnings at most and exit as they did. To gate pull requests, run `python3 .context-gate/bin/govern check --base origin/<branch>` on a full clone, or commit the workflow `govern ci github` prints. From then on an edit to a locked decision carries a `**Revised:** YYYY-MM-DD (what changed)` line. A project whose statuses are not the standard ones sets `locked_statuses` under `[checks.decision-changes]`. `level = "error"` does not make plain `check` fail; to hold uncommitted work to the gate's rules locally, run `check --base HEAD`.
+5. The three agent options (`agent-roles`, `agent-gates`, `agent-measure`) are off until answered: `/context-gate:options` offers them and `govern options` shows them. `agent-gates` and `agent-measure` work only with the plugin installed. The plugin's hooks start one short Python process (about 19 ms measured on one machine) on every shell call and every tool call in every project with the plugin enabled, even with both options off. `agent-references`, `merged-branches` and `memory-index`'s new finding arrive as warnings, not errors.
+6. `bin/upgrade` and `bin/uninstall` now exit 2 on an argument they used to ignore, so a script that passes one must drop it. The `no frontmatter` finding's text changed, for anything that parses it.
+7. A project whose `.gitignore` ignores `build/` must add the line `govern build start` prints, or the ledger stays out of every commit. An engine older than 0.7.0 refuses the `[sweep]` config section, so set `auto_remove` in `local.toml` while the pin is older.
+
+**Change-aware gate**
+
+- **`decision-changes`, a check that reads what changed:** every other check reads the records as they are. This one compares the decision logs with git and reports three things. A locked decision whose text changed in place with no dated line saying so: ``<log>: P-12 (locked) changed without a new dated **Revised:** line — add `**Revised:** YYYY-MM-DD (what changed)`, or supersede it with a new decision``. A decision that was removed: ``<log>: P-12 (locked) was removed — a decision is superseded, not deleted: reduce it to `## P-12 - Replaced by <id>` ``. And, under `--base` only, a decision or trap id your branch added that the base branch has also added since, with different text: `<log>: P-31 was also added on origin/main since this branch began ("<their title>") — if it is the same entry, merge origin/main into this branch; if not, renumber yours to an id neither side uses and update what cites it`. Adding a decision, editing a provisional one, re-wrapping a paragraph, changing a heading's dash or an entry's `**Topic:**`, moving an entry to another log, renaming a log and regenerating a block are not changes. `locked_statuses` (default `["locked"]`) names the statuses that count as locked.
+- **`govern check --base <ref>`, the gate for a pull request:** it compares the branch with the commit where it left `<ref>` (the merge base), in each repository, so what landed on `<ref>` afterwards is not blamed on the branch. `decision-changes` then reports errors (a removed decision that was not locked stays a warning). `--base` combines with `--project`, `--workspace-only` and `--path` with `--history-from`. When the comparison cannot be made it fails: `decision-changes: could not compare with origin/main — <reason>`, where the reason for a shallow clone ends `fetch the full history (fetch-depth: 0)`. In a run of the whole workspace, a project that is its own repository and does not have the ref is a warning, `decision-changes: could not compare <project> with origin/main — <reason>`, and the rest is still compared. Under `--project NAME` that is an error, and so is `--path` with no `--history-from`: `decision-changes: could not compare <project> with origin/main — a snapshot needs --history-from to be compared`. Without `--base`, the check only advises: plain `govern check` compares uncommitted work with the last commit, everything it finds is a warning that goes once the edit is committed, and with nothing to compare with (no git, no commit yet) it says nothing.
+- **`govern diff [--base <ref>] [--json]`, what a branch changed:** one line per changed decision (`removed`, `added`, `superseded`, `moved`, `revised`, `status` or `changed`), trap (`added`, `removed`, `changed`) and ratchet baseline number (`raised`, `lowered`, `added`, `removed`), then the commit each repository was compared with (its first 12 characters), or `not compared (<reason>)`. A decision or trap line is `- <word> <log> <id>`, ending `, from <old log>` when the decision moved logs; an unreadable baseline file is `- unreadable <path> <reason>`; a control character in a title prints as `\xNN`. With no `--base` it compares with the last commit. It is a report and never fails: it exits 0 whatever changed, says `- nothing changed` or `- nothing compared` when there is nothing to report, and ends quietly when a reader closes the pipe. `--json` gives one object with the keys `base`, `compared`, `decisions`, `traps` and `baseline`, and the full commit id: a tool that needs fields reads that, not the text. `--project NAME` limits it to one project.
+- **`govern ci github`, a workflow for pull requests:** it prints a GitHub Actions workflow and writes nothing. The workflow checks out the pull request's own ref with the full history, runs `check --base` against the branch the pull request targets, and appends `govern diff` to the run's summary, also when the check failed. Put it in place with `python3 .context-gate/bin/govern ci github > .github/workflows/context-gate.yml`, from the top of the git repository. When `.context-gate/` is in a directory below the top, run it from that directory and write to `"$(git rev-parse --show-toplevel)/.github/workflows/context-gate.yml"` instead. The file is the project's from then on.
+
+**Agent roles and gates**
+
+- **Agent roles, rendered from the engine (`agent-roles`, an option):** `govern agents render [--check]` writes five role definitions (`developer`, `senior-developer`, `code-reviewer`, `qa-engineer`, `technical-writer`; `ux-reviewer` and `architect` through `extra_roles`) into the project's agents folder, and the coordinator's build rules into `.claude/rules/context-gate-build.md`. They come from engine templates, the check's params (`models`, `efforts`, `max_turns`, `scoped_test`, `full_gate`, `senior_triggers`, `high_risk_paths`, `operator_rules` and more) and the project's own text in `.context-gate/agents/`. Each file starts with a `context-gate:rendered` note and is re-rendered on upgrade and removed on uninstall. A file the engine did not render is never written over: render names it and exits 1. `--check` writes nothing and exits 1 when anything would change, ending with `note        run <the render command>`. Output changed: `govern agents render` prints the line kinds `excluded`, `tracked`, `untracked`, `kept`, `note` and `exclude`.
+- **Role behavior:** security is the only default `senior_triggers` item (credentials, keys, tokens, signing, sign-in and sessions, the code that decides who may read or change protected data, or input from outside the project); the coordinator may send a unit to `senior-developer` outside it, rarely and with a reason. The `agent-roles` parameter `unit_gate` is `"scoped"` by default: `developer` and `senior-developer` run only the tests their unit touches, and the build rules have the coordinator run the full gate on the phase branch after each merge and fail a unit that turns it red. Every role ends in one `## Finish` section with a numbered checklist answered as `Key: <answer>`: `Scope`, `Red`, `Gate`, `Commit`, `Not verified` and `Report` for the roles that write, the last two for the roles that review; `handback_checks` adds lines for every role. The report file is written before the hand-back message, which carries `Report: <full path>`. `qa-engineer` is given no diff and verifies on a running system, `ux-reviewer` measures and opens every screenshot, and a launch prompt with a `Base:` line has the agent fast-forward its worktree to it first. A relative `Brief:` resolves from the project root. The `agents` frontmatter accepts `maxTurns: false` as an explicit "no cap" that satisfies `require_max_turns`.
+- **Rendered files follow the settings that made them:** with `agent-roles` on only in `.context-gate/local.toml`, `govern agents render` records the files in `.context-gate/rendered.local.toml` and lists them in a marked block of the repository's `info/exclude`; `installed.toml` holds no rendered rows. Files git already tracks are named, and `govern agents render --untrack` stops tracking them. A param set in `local.toml` while committed config has the check on is refused. Turning the check off removes what was rendered locally, never a file git tracks and never an edited one. A failing git call is an error. `govern uninstall` removes the context-gate lines from the exclude file. A missing or stale role file says why (a machine-only file removed when a checkout crossed a commit that tracked it, or a committed one stale on a branch cut before the roles last changed); output changed: the finding text and `--check` output. The `agent-roster` block skips the files `rendered.local.toml` lists, and a non-UTF-8 role record reads as empty instead of failing; output changed: the `agent-roster` block on a machine with local-only roles.
+- **`agent-references`, a check that finds an agent nobody defined:** ``<file>:<line>: names agent `<name>`, which has no definition in <agents_dir> — define it or fix the name``. `builtin` lists the names Claude Code provides.
+- **Agent gates (`agent-gates`, an option; needs the plugin):** a role in `briefed` (default `developer`, `senior-developer`) is launched from a brief file, in one line, `Brief: <absolute path>`; a brief that still holds an unfilled skeleton line is refused. A subagent cannot stop while a file its brief's `Produces:` line promises is missing or empty, while its final message points at a file that does not exist, or, for a bug fix with a `Red:` folder, before the failing test output was saved ahead of the fix. A subagent cannot run `git push`. A gate refuses at most `max_refusals` times (default 2), then lets the agent go and tells the coordinator what was unmet: `[agent run] <type>: was stopped on an unmet contract and has not finished: ... Treat its report as not filed.` The new `checklist` option (off by default) also refuses a report that leaves a checklist line unanswered, and `python3 .context-gate/bin/govern runs resolve` then prints `checklist`, `checklist_keys` and `checklist_texts`.
+- **Agent measurement (`agent-measure`, an option; needs the plugin):** per-tool timing and result size inside subagents, and real token totals per run. The coordinator gets one line per finished run. `govern runs mark <label>` starts a phase; `govern runs report [--all] [--json]` prints the runs since the mark, totals by role, model and tool, the largest results and fixed `Suggestion:` lines. A run the stop gate blocks leaves a row marked unfinished, counted once and listed as `blocked on its contract and never ended` if it never stops again. The `senior-developer` suggestion reads `in <n> of <total> runs`, and an agent that starts again with no message from the coordinator is recorded under the new row key `woke`. Helper agents the harness starts itself write no row. Output changed: the suggestion text and the row key.
+- **Hooks say when they cannot act:** session start tells the coordinator when a build is in flight and what is next, and says the usage alerts, agent gates and run measurement are OFF when the project's settings cannot be read.
+
+**Running a plan: `govern build` and the skills**
+
+- **`govern build`, a ledger for one phase:** `start`, `unit add`, `unit set`, `unit drop <id>`, `launch`, `collect`, `ruling`, `status`, `review`, `fix` and `close`. The ledger is `.context-gate/build/<phase>/ledger.toml`, committed on the phase branch with the unit briefs; reports, diffs and failing-test output under that folder are ignored by git. A session that lost its place reads `govern build status`. `build start` refuses and prints the line to add when `.gitignore` ignores `build/`, and warns when the review base is more than 50 commits behind. `build launch fix` prints a prompt for every fix brief not yet launched (the ledger records them under the key `launched`). `build fix` over an unfilled fix brief exits 1 and changes nothing. A second `build close` brings the close brief's rulings up to date. `build fix` writes a `Red:` line into every fix brief, so with `agent-gates` on a fix pass must save failing output, and `build close` lists units with their commit and no report path. Output changed: both briefs.
+- **Briefs and review:** a unit brief starts with `## Context`. A fix brief says findings are copied in full and names its own red folder (`red-2`). `govern build review` writes `review/package-stat.txt` (commit list and stat), and the `qa-engineer` brief names that file in place of `package.diff`. The new `agent-roles` parameter `visual_paths` renders the `ux-reviewer` role; `build start --visual` marks a phase visual, and `build review` then writes a third brief, `review/ux-reviewer-brief.md`. `--visual` is refused when the role is not rendered. `govern build status --json` gained the key `visual`, for anything that parses it.
+- **In a workspace:** where members are repositories of their own, every `build` subcommand takes `--project <name>`; the ledger, the phase branch and the review package are the member's. `build start` without it refuses and lists the members; other subcommands find the one build in flight or refuse naming several. A member that is a folder of the root's repository works as before, and `--project` on it says to build without it. A failing repository call stops the command. `build launch` for a writing agent in a member makes its worktree and prints `Worktree: <path>` after `Brief:` and `Base:`. Output changed: the launch lines and printed commands in a workspace (`--project`, `-C <folder>`, `phase close --path <folder>`), and the new ledger key `project`. A single repository is unchanged.
+- **`govern phase close [--remote R] [--keep BRANCH] [--dry-run] [--path DIR]`:** pushes the phase branch to its remote, confirms the remote holds the commit, then removes the local branches and worktrees already contained in it. It opens no pull request, merges nothing upward and never forces a deletion; the reason for any refusal is printed, and it is not an error. It refuses a detached HEAD, the remote's default branch, uncommitted changes, and a branch whose upstream is the remote's default branch. It keeps the branches of a build that is still open (the build's own branch and every branch merged into it), each listed under `would keep` with its reason, finding open builds by their tracked ledgers anywhere in the repository. A ledger it cannot read, or a failing git call, stops the command with nothing changed.
+- **The skills:** the plugin's `plan` skill turns a spec into phases and units, each with a checkable "done when" line, routed by the project's triggers; every plan carries an `## Agents` table the owner reviews before a build. The `build` skill runs one phase with the rendered roles, resumes a build in flight, and carries on through later phases by default (`--one` stops after one; `--long` is accepted and changes nothing). It stops on an unreviewed table, takes `--visual`, `--from` and `--high-risk` (to have `qa-engineer` on a phase), checks a brief against itself before it is committed, never briefs an agent to run a command the pin lacks, and runs the run report before `phase close`. The build rules stop for the owner only at phases a plan marks `checkpoint: yes`. The `options` skill writes an option the pinned release lacks into `.context-gate/local.toml`. Neither `plan` nor `build` needs another plugin.
+
+**Housekeeping and field reports**
+
+- **`govern sweep` and the `housekeeping` skill:** `govern sweep [--project NAME]` is a read-only report, per repository, of every linked worktree and local branch with a verdict (`MERGED`, `PR-MERGED` via `gh`, `IN-USE`, `DIRTY`, `REVIEW`), plus `unpushed`, `build`, `finished`, `memory` and `auto-remove` lines. It fails closed: no `gh` means nothing unmerged is removable; no `lsof` (every Windows machine) means no worktree is removable without asking; a repository git cannot read prints an `error` line and exits 1. `govern sweep --apply --only NAME...` removes exactly the named items that are `MERGED` or `PR-MERGED`, after a bundle under `<git common dir>/context-gate/sweep/<date>/` that `git bundle verify` accepts, and prints a `restore with:` command; it never pushes, merges or forces. Branches the `merged-branches` check's `keep` list names are `IN-USE`, note `a protected branch (merged-branches keep)`, whatever the check's level. New config section `[sweep] auto_remove` (`merged`, `pr-merged`; default none), read only by the skill. The plugin's `housekeeping` skill runs at the end of a session, and the build skill runs it after `phase close`; the technical-writer role ends the handoff with the next step and its exact command. Output changed: the `sweep` command and its lines, and the handoff's last lines.
+- **`merged-branches`, a check that names merged branches:** names local branches merged into the default branch; arrives at `warn`, param `keep` (default `main`, `master`, `development`, `beta-*`, `release-*`). `finished-files` has a new param `ticked` (default true): a working file with every checkbox ticked and an unfinished status gets a warning to delete it, and the document-limit message names it. When a scope is over its governed-docs limit, the `governed-doc-count` warning and the ratchet's messages end with `Finished working files that could go:` and up to five names, from the `finished-files` check's own `finished_statuses` and `exempt`, only files git already holds. Output changed: those warnings.
 - **Field reports:** `govern report draft --title T` writes a git-ignored draft under `.context-gate/reports/` with four headings and three environment lines. `govern report check FILE` refuses a draft holding private text (paths, the project's and repository's names, git remotes, the git user, host and login names, email addresses, addresses off the public repository, secret shapes, terms from `.context-gate/report-private.txt`, a draft too long) and fails closed when git fails. `govern report send FILE [--print]` opens the public repository's new-issue page with the title and body filled in; the person submits it, the engine never calls the network and no flag skips the check. A `report` skill in the plugin walks an agent through it, and `.github/ISSUE_TEMPLATE/field-report.md` ships in the public set. New command, skill and template; no existing output changed.
+
+**Smaller changes**
+
+- **`memory-index` counts memories, not lines:** lines whose memory is of a kind in `exempt_types` (default `["feedback"]`) are not counted against `max_lines`, and a line that links two memories is a warning (`one_link_per_line`, default `true`). The per-line warning notes that an engine before 0.7.0 counts lines, not memories. Output changed: the warning text.
 - **`standard-overrides` names the key:** the warning says to add `reason = "<why>"` under `[checks.<id>]`. Output changed: the warning text.
-- **`memory-index` says which engine counts lines:** the per-line warning notes that an engine before 0.7.0 counts lines, not memories. Output changed: the warning text.
-- **`writing-rules` can reach excluded folders:** new param `include_excluded` checks files under an always-excluded folder such as `build/`, never the tool's own folder or `.claude/`. The `adopt` and `options` skills point at each other, and the build skill says to start a phase with `--high-risk` to have `qa-engineer` on it.
-- **0.7.0-beta.13 was never published:** it was tagged privately; beta.14 holds its content and is the next published beta.
-- **Phase close keeps an open build:** `govern phase close` keeps the branches of a build that is still open, the build's own branch and every branch merged into it, each listed under `would keep` with its reason. It finds open builds by their tracked ledgers anywhere in the repository, from any folder. A ledger it cannot read, or a failing git call while it looks, stops the command with nothing changed.
-- **Local-only roles stay local:** `govern uninstall` removes the context-gate lines from the repository's exclude file when the project has its own `.context-gate/rendered.local.toml`, and `upgrade` and `adopt` record rendered files where `agents render` would. No engine can reach the local-only path of `upgrade` or `adopt` today, so that part is a guard. This replaces the earlier note to run `govern agents render` after an upgrade.
-- **A missing or stale role file says why:** `agents render --check` and the `agent-roles` finding say that a machine-only file was removed when a checkout crossed a commit that tracked it, or that a committed one is stale on a branch cut before the roles last changed. A failing `--check` ends with `note        run <the render command>` when rendering would fix it. Output changed: the finding text and the check's output.
-- **Fix and close briefs name what they need:** `govern build fix` writes a `Red:` line into every fix brief, so with `agent-gates` on a fix pass must save failing output. `govern build close` lists units with their commit and no report path. Output changed: both briefs.
-- **The run report counts what happened:** in `govern runs report` the `senior-developer` suggestion reads `in <n> of <total> runs`. An agent that starts again with no message from the coordinator is recorded under the new row key `woke` and is not counted as resumed; a resume addressed by name is counted. Output changed: the suggestion text and the row key.
-- **Skills and roles:** the build skill says a gate red for a reason outside the unit's diff and green on a rerun is not the unit's failure, and to confirm which copy a command that removes data points at before running it.
-- **Rendered files follow the settings that made them:** with `agent-roles` on only in `.context-gate/local.toml`, `govern agents render` records the files in `.context-gate/rendered.local.toml` and lists them in a marked block of the repository's `info/exclude`; `installed.toml` holds no rendered rows. Files git already tracks are named, and `govern agents render --untrack` stops tracking them. A param set in `local.toml` while committed config has the check on is refused, and a level set in both counts as committed. Turning the check off removes what was rendered locally, never a file git tracks and never an edited one. A failing git call is an error, never "not a repository".
-- **A finished plan says so:** `finished-files` has a new param `ticked` (default true). A working file with every checkbox ticked and an unfinished status gets a warning to delete it, and the document-limit message names it.
-- **Merged branches are named:** new check `merged-branches` (arrives at `warn`, param `keep`) names local branches merged into the default branch.
-- **Build:** `govern build unit drop <id>` removes a unit. `build start` warns when the review base is more than 50 commits behind, and may be run again while the ledger has no unit. The brief skeleton's Tests hint says to name no whole-suite run.
-- **Skills and roles:** the plan skill says to search existing checks first. The build skill says a blocked first attempt travels by its own branch and that a plan is deleted when its last checkpoint passes. The technical-writer role re-dates the records it checked.
-- **Output another tool may parse changed:** `govern agents render` prints new line kinds: `excluded`, `tracked`, `untracked`, `kept`, `note` and `exclude`.
-- **A unit runs its own tests; the coordinator runs the gate:** new `agent-roles` parameter `unit_gate`, `"scoped"` by default. `developer` and `senior-developer` run only the tests their unit touches and are told not to run the full gate; their checklist's `Gate` line asks for the scoped command and its result. The build rules tell the coordinator to run the full gate on the phase branch after each merge, and that a unit that turns it red is failed; the build skill says what to do then (leave the merge, launch nothing else until green, a fresh agent). `unit_gate = "full"` keeps the earlier behavior. Role text changes for a project on upgrade: after `govern agents render`, developers stop running the full gate and the coordinator must run it after each merge; a project that wants the old behavior sets `unit_gate = "full"` under `[checks.agent-roles]`.
-- **The QA run reads no diff:** `govern build review` also writes `review/package-stat.txt` (commit list and stat), and the `qa-engineer` brief names that file in place of `package.diff`; the role says it is given no diff and opens the files it probes.
-- **A limit message names what could go:** when a scope is over its governed-docs limit, the `governed-doc-count` warning and the ratchet's messages end with `Finished working files that could go:` and up to five names. The names come from the `finished-files` check's own `finished_statuses` and `exempt`, and only files git already holds are named.
-- **The hooks never go quiet without saying so:** the machine's one beta plugin now reads a project's `local.toml` when it names any beta of the same release, so a project one beta behind keeps its usage alerts, agent gates and run measurement. Session start says `this project runs beta X; this machine's plugin is beta Y, and its hooks (...) follow Y` when they differ, and says the three are OFF when the project's settings cannot be read.
-- **A blocked run is measured:** a run the stop gate blocks leaves a row marked unfinished. `govern runs report` counts it once, and lists it as `blocked on its contract and never ended` if it never stops again.
-- **`govern build` fix and close do what the skill says:** `build launch fix` prints a prompt for every fix brief not yet launched (the ledger records them under the key `launched`), and the latest again when all were. `build fix` over an unfilled fix brief exits 1 and changes nothing, and works after `build close`. A second `build close` brings the close brief's rulings up to date and keeps everything else. The close brief says as-built notes go to the decision log.
-- **Visual phases and `ux-reviewer`:** the new `agent-roles` parameter `visual_paths` renders the `ux-reviewer` role and names it in the build rules. `build start --visual` marks a phase visual, and `build review` then writes a third brief, `review/ux-reviewer-brief.md`. `--visual` is refused when the role is not rendered. `govern build status --json` gained the key `visual`, for anything that parses it.
-- **Brief skeletons:** a unit brief starts with `## Context`. A fix brief says findings are copied in full, names its own red folder (`red-2`), and says a finding made on a running system is proved fixed on a running system.
-- **Role and rule text:** the security trigger is narrower (credentials, keys, tokens, signing, sign-in and sessions, the code that decides who may read or change protected data, or input from outside the project; a product rule about who may do what is not security). The rules say never stop a running agent to change its routing. Every role ends in one `## Finish` section instead of two or three. `qa-engineer` verifies rules and flow on a running system, `ux-reviewer` measures and opens every screenshot, and no role leaves a command running in the background.
-- **The skills:** plan says a phase is everything up to the next owner checkpoint, every plan carries an `## Agents` table the owner reviews before a build, and `govern check` runs before a plan is committed. Build stops on an unreviewed table, takes `--visual` and `--from`, and checks a brief against itself before it is committed.
-- **The beta line is said once an hour:** the launcher's `running beta ...` line is printed once an hour per project and beta. A project gets this when an upgrade next writes its launcher.
-- **One hand-back checklist in every role:** every role now ends with one binding sentence and a numbered checklist, in its `## Finish` section. The lines are `Scope`, `Red`, `Gate`, `Commit`, `Not verified` and `Report` for the roles that write, and the last two for the roles that review. It replaces the report paragraph earlier betas put in each role. A line is answered as `Key: <answer>`. A run that stops early still owes the file. `handback_checks` on `agent-roles` adds lines for every role.
-- **The stop gate can read the checklist:** `checklist` on `agent-gates`, off by default. With it on, the gate refuses a report that leaves a checklist line unanswered. `python3 .context-gate/bin/govern runs resolve` now prints `checklist`, `checklist_keys` and `checklist_texts`.
-- **Shorter role definitions:** the sentences the checklist now says are gone from the templates; no rule was removed. The note line in every brief and the stop gate's block reason have new wording.
-- **The report is part of the task, written before the hand-back:** every role's Report section now opens with one shared paragraph saying the report file is part of the work, is written before any final message, and that the message carries `Report: <full path>`. Every brief the build commands write says the same in one line above its `Produces:` line. The stop gate's block message says the run is not finished, nothing sent has been accepted, to put each line right now even after a summary was sent, and to send the final message again with the `Report:` line.
-- **A run blocked on its contract is said even when it never ends:** when the stop gate blocks a run
-  on an unmet contract, the launch record keeps what was unmet. If the run never stops again, the
-  completion notice says `[agent run] <type>: was stopped on an unmet contract and has not
-  finished: ... Treat its report as not filed.` A resume clears it.
-- **Helper agents are kept out of the run log:** a stop for an agent the launch hook never saw, with
-  no type, no contract and no tool calls (a helper the harness starts itself), writes no row, so
-  `govern runs report` stops listing ` (None): token totals unavailable` rows for them.
-- **A beta's plugin now loads:** Claude Code does not load a local plugin whose name an
-  installed plugin has, so the beta plugin, named like the release, never loaded where the release
-  was installed, and a project on a beta ran the beta engine with the release's hooks and skills.
-  The beta's plugin is now `context-gate-beta` (`context-gate-beta@skills-dir`, skills
-  `/context-gate-beta:<skill>`), and its hooks do nothing in a project that is not on a beta. A
-  launcher from 0.6.1 or earlier enables the old id; the beta engine corrects it on any `govern`
-  command and says so.
-- **Two plugin skills run the build loop:** `/context-gate-beta:plan` turns a spec into phases and
-  units, each with a checkable "done when" line, routed by the project's triggers.
-  `/context-gate-beta:build` runs one phase with the rendered roles, resumes a build in flight, and carries
-  on through later phases by default (`--one` stops after one). Neither needs another plugin.
-- **`govern build`, a ledger for one phase:** `start`, `unit add`, `unit set`, `launch`, `collect`, `ruling`,
-  `status`, `review`, `fix` and `close`. The ledger is `.context-gate/build/<phase>/ledger.toml`.
-  It is committed on the phase branch with the unit briefs. Reports, diffs and failing-test output
-  under that folder are ignored by git. A session that lost its place reads `govern build status`.
-- **A sixth gate in `agent-gates`:** a brief that still holds an unfilled skeleton line is
-  refused at launch.
-- **Session start tells the coordinator when a build is in flight** and what is next.
-- **Changed role definitions and build rules:** when the launch prompt has a `Base:` line, the
-  agent fast-forwards its worktree to it first, and a report is written inside the agent's own
-  working tree. The build rules point at the two skills, say to commit the ledger and push the
-  phase branch after each merged unit, and say they win over another plugin's way of launching or
-  reviewing agents. A project with `agent-roles` on re-renders them on upgrade;
-  `govern agents render` shows what changed.
-- **Security is the only default `senior_triggers`:** the default list that sends a unit to
-  `senior-developer` is now one item, security (credentials, tokens, signing, authentication,
-  access control, or input from outside the project). The build rules add two bullets after the
-  list: the coordinator may send a unit to `senior-developer` outside it when it can say why,
-  rarely; and a unit for `senior-developer` holds only the work that sends it there. The plan
-  skill's Routing paragraph says the second too.
-- **The options skill writes an option the pinned release does not have into
-  `.context-gate/local.toml`** when the project runs a beta.
-- **A `.gitignore` that ignores `build/`:** a project whose `.gitignore` ignores `build/` would keep the ledger out of every
-  commit. `govern build start` refuses and prints the line to add.
-
-- **`decision-changes`, a check that reads what changed:** every other check reads the records as
-  they are. This one compares the decision logs with git and reports three things. A locked
-  decision whose text changed in place with no dated line saying so: ``<log>: P-12 (locked)
-  changed without a new dated **Revised:** line — add `**Revised:** YYYY-MM-DD (what changed)`,
-  or supersede it with a new decision``. A decision that was removed: ``<log>: P-12
-  (locked) was removed — a decision is superseded, not deleted: reduce it to `## P-12 - Replaced
-  by <id>` ``. And, under `--base` only, a decision or trap id your branch added that the base
-  branch has also added since, with different text: `<log>: P-31 was also added on origin/main
-  since this branch began ("<their title>") — if it is the same entry, merge origin/main into
-  this branch; if not, renumber yours to an id neither side uses and update what cites it`.
-  Adding a decision, editing a provisional one, re-wrapping a paragraph, changing a heading's
-  dash or an entry's `**Topic:**`, moving an entry to another log, renaming a log and
-  regenerating a block are not changes. `locked_statuses` (default `["locked"]`) names the
-  statuses that count as locked.
-- **`govern check --base <ref>`, the gate for a pull request:** it compares the branch with the
-  commit where it left `<ref>` (the merge base), in each repository, so what landed on `<ref>`
-  afterwards is not blamed on the branch. `decision-changes` then reports errors (a removed
-  decision that was not locked stays a warning). `--base` combines with `--project`,
-  `--workspace-only` and `--path` with `--history-from`. When the comparison cannot be made it
-  fails: `decision-changes: could not compare with origin/main — <reason>`, where the reason for
-  a shallow clone ends `fetch the full history (fetch-depth: 0)`. In a run of the whole
-  workspace, a project that is its own repository and does not have the ref is a warning,
-  `decision-changes: could not compare <project> with origin/main — <reason>`, and the rest is
-  still compared. Under `--project NAME` that is an error, and so is `--path` with no
-  `--history-from`: `decision-changes: could not compare <project> with origin/main — a snapshot
-  needs --history-from to be compared`.
-- **Without `--base`, the check only advises:** plain `govern check` compares uncommitted work
-  with the last commit, and everything `decision-changes` finds is a warning that goes once the
-  edit is committed. When there is nothing to compare with (no git, no commit yet) it says
-  nothing.
-- **`govern diff [--base <ref>] [--json]`, what a branch changed:** one line per changed decision
-  (`removed`, `added`, `superseded`, `moved`, `revised`, `status` or `changed`), trap (`added`,
-  `removed`, `changed`) and ratchet baseline number (`raised`, `lowered`, `added`, `removed`),
-  then the commit each repository was compared with, or `not compared (<reason>)`. A baseline
-  file that cannot be read is one line, `- unreadable <path> <reason>`. Every decision and trap
-  line is `- <word> <log> <id>` and what the word needs, and a decision now in another log than
-  at the base ends `, from <old log>` whatever its word. With no `--base` it compares with the
-  last commit. It is a report and never fails: it exits 0 whatever changed and whatever could
-  not be compared, and a reader that closes the pipe early (`govern diff | head -1`) ends it
-  quietly. With nothing to report it says `- nothing changed`, or `- nothing compared` when no
-  repository could be compared. The layout (the words, the punctuation, the arrows) is ASCII
-  and the text is valid Markdown; titles and paths are the project's own text, and in the text
-  a control character in a title is printed as `\xNN`. It names a commit by its first 12
-  characters. `--json` gives the same report as one object with the keys `base`, `compared`,
-  `decisions`, `traps` and `baseline`, and the full commit id: a tool that needs fields reads
-  that, not the text. `--project NAME` limits it to one project: the entries whose log, at the
-  base or now, is that project's.
-- **`govern ci github`, a workflow for pull requests:** it prints a GitHub Actions workflow and
-  writes nothing. The workflow checks out the pull request's own ref with the full history, runs
-  `check --base` against the branch the pull request targets, and appends `govern diff` to the
-  run's summary, also when the check failed. Put it in place with
-  `python3 .context-gate/bin/govern ci github > .github/workflows/context-gate.yml`, from the top
-  of the git repository. When `.context-gate/` is in a directory below the top, run it from that
-  directory and write to `"$(git rev-parse --show-toplevel)/.github/workflows/context-gate.yml"`
-  instead. The file is the project's from then on.
-- **Agent roles, rendered from the engine (`agent-roles`, an option):** `govern agents render
-  [--check]` writes five role definitions (`developer`, `senior-developer`, `code-reviewer`,
-  `qa-engineer`, `technical-writer`; `ux-reviewer` and `architect` through `extra_roles`) into the
-  project's agents folder, and the coordinator's build rules into
-  `.claude/rules/context-gate-build.md`. They come from engine templates, the check's params
-  (`models`, `efforts`, `max_turns`, `scoped_test`, `full_gate`, `senior_triggers`,
-  `high_risk_paths` and more) and the project's own text in `.context-gate/agents/all.md` and
-  `.context-gate/agents/<role>.md`. Each file starts with a `context-gate:rendered` note and is
-  re-rendered on upgrade and removed on uninstall. A file the engine did not render is never
-  written over: render names it and exits 1. `--check` writes nothing and exits 1 when anything
-  would change.
-- **`agents` accepts `maxTurns: false`:** it is an explicit "no cap" and satisfies
-  `require_max_turns`. A missing key still does not.
-- **`agent-references`, a check that finds an agent nobody defined:** ``<file>:<line>: names agent
-  `<name>`, which has no definition in <agents_dir> — define it or fix the name``. `builtin` lists
-  the names Claude Code provides.
-- **Agent gates (`agent-gates`, an option; needs the plugin):** a role in `briefed` (default
-  `developer`, `senior-developer`) is launched from a brief file, in one line, `Brief: <absolute
-  path>`; the path may be quoted or contain spaces. A subagent cannot stop while a file its
-  brief's `Produces:` line promises is missing or empty, while its final message points at a file
-  (`report`, `written to`, `saved to` or `wrote`, then an absolute path) that does not exist, or,
-  for a bug fix with a `Red:` folder, before the failing test output was saved ahead of the fix.
-  A subagent cannot run `git push`. A gate refuses at most `max_refusals` times (default 2), then
-  lets the agent go and tells the coordinator what was unmet.
-- **Agent measurement (`agent-measure`, an option; needs the plugin):** per-tool timing and result
-  size inside subagents, and real token totals per run, summed over its requests. The figure in a
-  completion notice is only the context size at the last request. The coordinator gets one line
-  per finished run. `govern runs mark <label>` starts a phase; `govern runs report [--all]
-  [--json]` prints the runs since the mark, totals by role, model and tool, the largest results
-  and fixed `Suggestion:` lines. Per-session state is swept after 30 days.
-- **`govern phase close [--remote R] [--keep BRANCH] [--dry-run] [--path DIR]`:** pushes the phase
-  branch to its remote, confirms the remote holds the commit, then removes the local branches and
-  worktrees already contained in it. It opens no pull request, merges nothing upward and never
-  forces a deletion; the reason for any refusal is printed, and it is not an error. It refuses a
-  detached HEAD, the remote's default branch, uncommitted changes, and a branch whose upstream is
-  the remote's default branch.
-- **`memory-index` counts memories, not lines:** lines whose memory is of a kind in `exempt_types`
-  (default `["feedback"]`) are not counted against `max_lines`, and a line that links two
-  memories is a warning (`one_link_per_line`, default `true`).
-- **The build, plan and options skills gain four lines:** the build skill confirms each role is launchable in this session before the phase branch is cut, tells the coordinator to open the files a brief names and never to brief an agent to run a beta-only command (an agent's worktree runs the committed pin), runs a unit's gate without moving the coordinator's shell, and runs the run report before `phase close`. The options skill says the roles can be launched only from a new session. The plan skill says planning is a phase of its own. The build rules now run the run report before `phase close`.
-
-- **`operator_rules`, a rule for every role:** a list on `agent-roles`, settable in a profile, rendered at the top of every role's project rules.
-- **The build stops for the owner only at checkpoints:** the build rules stop only at phases a plan marks `checkpoint: yes`, and a build carries on from phase to phase by default. The build skill's `--long` section is now "Carrying on"; `--long` is still accepted and changes nothing, and `--one` stops after the phase.
-- **The developer roles say how to work under the worktree guard:** the `developer` and `senior-developer` roles say to run one plain git command per call and to put multi-line scripts in a scratch file.
-- **A relative `Brief:` resolves from the project root:** the launch gate reads it from the session's project root first, then the hook's working folder.
-- **The launcher reads its arguments first:** `bin/upgrade` and `bin/uninstall` print usage and exit 0 on `-h` or `--help`, and exit 2 on an argument they do not know, before anything is fetched or written.
+- **`writing-rules` can reach excluded folders:** new param `include_excluded` checks files under an always-excluded folder such as `build/`, never the tool's own folder or `.claude/`.
 - **Adopt says what the gate will do with untyped docs:** when no directory is fully typed, adopt asks what to do with a directory of markdown without frontmatter (`leave them out` writes `<dir>/*.md` to `[projects] exclude`; `govern them` says the gate will fail them), once per directory. The `no frontmatter` finding names the required keys and, when they are required, the allowed `doc_type` and `audience` values.
-- **A contract paired with the wrong agent is corrected:** a starting agent claims its held launch by a rename, and at stop a contract paired with the wrong brief is corrected from the agent's own first prompt (not for a resumed agent, and only when the named brief exists).
-
-- A beta: run it in a project on 0.6.1 or later with `python3 .context-gate/bin/govern beta on`.
-
-**Upgrading:** a project already on a beta runs `govern beta on <this beta>` again, then any
-`govern` command, then restarts Claude Code. Otherwise nothing to do. `decision-changes` arrives on, but no existing hook or CI job passes
-`--base`, so a project's runs gain warnings at most and exit as they did. To gate pull requests,
-run `python3 .context-gate/bin/govern check --base origin/<branch>` on a full clone, or commit
-the workflow `govern ci github` prints. From then on an edit to a locked decision carries a
-`**Revised:** YYYY-MM-DD (what changed)` line. A project whose statuses are not the standard ones
-sets `locked_statuses` under `[checks.decision-changes]`. `level = "error"` does not make plain
-`check` fail; to hold uncommitted work to the gate's rules locally, run `check --base HEAD`. Role text changes on upgrade: after `govern agents render`, developers stop running the full gate and the coordinator must run it after each merge; a project that wants the old behavior sets `unit_gate = "full"` under `[checks.agent-roles]`.
-
-A project with `agent-roles` on that never set `senior_triggers` drops four triggers the earlier list had (schemas and public APIs, deleting or moving files the project did not create, a release or migration path, and the old wording for credentials and outside input) and its rendered files read as out of date until `govern agents render` is run; to keep the old list, set `senior_triggers` in the project's config before rendering.
-
-The three agent options (`agent-roles`, `agent-gates`, `agent-measure`) are off until answered:
-`/context-gate-beta:options` offers (`/context-gate:options` outside a beta) them and `govern options` shows them. `agent-gates` and
-`agent-measure` work only with the plugin installed. The plugin's new hooks start one short
-Python process (about 19 ms measured on one machine) on every shell call and every tool call in
-every project with the plugin enabled, even with both options off. `agent-references` and
-`memory-index`'s new finding (a line that links two memories) arrive as warnings, not errors.
-A project with `agent-roles` on, or that turns it on, runs
-`python3 .context-gate/bin/govern agents render` to pick up the rules' and roles' new text, and to get the hand-back checklist into the role files; nothing turns red until then. After moving to 0.7.0-beta.10, run `govern agents render` again: role files gain `## Finish`. `bin/upgrade` and `bin/uninstall` now exit 2 on an argument they used to ignore, so a script that passes one must drop it. The `no frontmatter` finding's text changed, for anything that parses it.
+- **The launcher reads its arguments first:** `bin/upgrade` and `bin/uninstall` print usage and exit 0 on `-h` or `--help`, and exit 2 on an argument they do not know, before anything is fetched or written.
 
 ## 0.6.1 — 2026-10-06
 

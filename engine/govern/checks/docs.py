@@ -10,6 +10,7 @@ from datetime import date
 from fnmatch import fnmatch
 from pathlib import Path
 
+from govern.context import EXCLUDE_HINT
 from govern.decisions import mask_lines
 from govern.findings import Findings
 from govern.manifest import Param, check
@@ -24,6 +25,12 @@ def status_keyword(status) -> str:
         status = " ".join(status)
     words = str(status or "").strip().split()
     return words[0].rstrip(",").lower() if words else ""
+
+
+def owner_name(value) -> str:
+    """A frontmatter `owner` as a name, or "" when it is not text (a list) or is empty. Any
+    non-empty text is a name, a number-like one (`owner: 2024`) included."""
+    return value.strip() if isinstance(value, str) else ""
 
 
 def check_doc(ctx, params: dict, path: Path, label: str, f: Findings) -> None:
@@ -42,6 +49,8 @@ def check_doc(ctx, params: dict, path: Path, label: str, f: Findings) -> None:
             msg += f"; doc_type is one of {', '.join(params['doc_types'])}"
         if "audience" in keys:
             msg += f"; audience is one of {', '.join(params['audiences'])}"
+        if ctx is None or ctx.hint_once("exclude"):
+            msg += f" \u2014 {EXCLUDE_HINT}"
         f.error(msg)
         return
     for key in params["required_keys"]:
@@ -63,6 +72,8 @@ def check_doc(ctx, params: dict, path: Path, label: str, f: Findings) -> None:
         if status_keyword(status) not in params["working_statuses"]:
             f.error(f"{label}: status '{status}' does not start with one of "
                     f"{tuple(params['working_statuses'])}")
+    if fm.get("owner") is not None and not owner_name(fm.get("owner")):
+        f.warn(f"{label}: owner is not a name, so the file counts as unowned")
     lr = fm.get("last_reviewed")
     if lr:
         if not isinstance(lr, str) or not DATE_RE.match(lr):

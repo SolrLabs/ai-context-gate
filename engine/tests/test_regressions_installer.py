@@ -14,6 +14,8 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import profile_guard  # noqa: E402,F401
+
 from regressions_support import *  # noqa: E402,F401,F403
 
 class LocalLayer(Base):
@@ -571,7 +573,7 @@ class UnlimitedDeclaration(Base):
 class Notice(Base):
     def test_release_at_the_source_is_announced_once_checked(self):
         from unittest import mock
-        src = make_source(self.tmp, (__version__, "0.9.0"))
+        src = make_source(self.tmp, (__version__, "99.0.0"))
         w = self.ws()
         cfg = w.root / CFG
         wtext(cfg, cfg.read_text(encoding="utf-8").replace(
@@ -579,7 +581,7 @@ class Notice(Base):
         os.environ.pop(notice.NO_UPDATE_CHECK, None)
         with mock.patch.object(notice, "__version__", "0.5.0"):   # a stable engine, whatever this is
             code, _, err = w.run("check")
-        self.assertIn("context-gate 0.9.0 available", err)
+        self.assertIn("context-gate 99.0.0 available", err)
         self.assertTrue((w.home / ".cache" / layout.TOOL / "releases.json").is_file())
         os.environ["CONTEXT_GATE_NO_UPDATE_CHECK"] = "1"
         self.addCleanup(os.environ.pop, "CONTEXT_GATE_NO_UPDATE_CHECK", None)
@@ -761,7 +763,7 @@ class InstallReportAndUpgrade(Base):
         env = {k: v for k, v in os.environ.items() if k != "GOVERN_ENGINE"}
         env["HOME"] = str(w.home)
         res = subprocess.run([sys.executable, str(w.root / layout.GOV_DIR / "bin" / "upgrade")],
-                             env=env, capture_output=True, text=True)
+                             env=env, capture_output=True, text=True, cwd=w.root)
         self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
         self.assertIn(f"upgraded context-gate {__version__} -> {newer}", res.stdout)
         self.assertIn(f'engine = "{newer}"', (w.root / CFG).read_text(encoding="utf-8"))
@@ -810,7 +812,8 @@ class PublicBetaTagsAtTheSource(Base):
 
     def _upgrade(self, w, env, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run([sys.executable, str(w.root / layout.GOV_DIR / "bin" / "upgrade"),
-                               *args], env=env, capture_output=True, text=True)
+                               *args], env=env, capture_output=True, text=True,
+                              cwd=w.root)
 
     def _engines_installed(self, w) -> list[str]:
         d = layout.engines_dir(w.home)
@@ -879,7 +882,7 @@ class PublicBetaTagsAtTheSource(Base):
     def test_a_missing_engine_bootstraps_the_pinned_release_beside_beta_tags(self):
         w, entry, env, _ = self._project((self.OWN, __version__, self.AHEAD))
         res = subprocess.run([sys.executable, str(entry), "check"], env=env,
-                             capture_output=True, text=True)
+                             capture_output=True, text=True, cwd=w.root)
         self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
         self.assertIn(f"installing engine {__version__} from", res.stderr)
         self.assertNotIn("beta", res.stderr)

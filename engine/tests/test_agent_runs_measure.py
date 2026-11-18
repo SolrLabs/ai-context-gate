@@ -14,6 +14,8 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import profile_guard  # noqa: E402,F401
+
 from agent_runs_support import *  # noqa: E402,F401,F403
 
 class Rows(HookCase):
@@ -32,6 +34,7 @@ class Rows(HookCase):
         self.assertEqual(self.rows()[-1]["tokens"]["requests"], 1)
 
     def test_a_resumed_run_reports_only_its_own_tokens_and_calls(self):
+        self.resolve({**GATES, "deny_resume": False}, MEASURE)
         self.launch("Run date.")
         self.tool("Bash", command="date")
         self.stop(transcript=self.transcript([("m1", USAGE, "done")]))
@@ -45,6 +48,7 @@ class Rows(HookCase):
         self.assertEqual(second["tokens"]["cache_read_input_tokens"], 1000)
 
     def test_a_resume_is_gated_on_its_own_message_not_the_first_brief(self):
+        self.resolve({**GATES, "deny_resume": False}, MEASURE)
         first, second = self.work / "one.md", self.work / "two.md"
         self.launch(f"Produces: {first}")
         first.write_text("x")
@@ -754,7 +758,7 @@ class HeldLaunchPairing(HookCase):
         self.assertEqual(out["decision"], "block")
         self.assertIn(str(self.tree / ".context-gate/build/p/u2/developer-report.md"),
                       out["reason"])
-        self.assertNotIn("u1", out["reason"])
+        self.assertNotIn("/build/p/u1/", out["reason"])
 
     def test_a_rightly_paired_contract_is_left_alone(self):
         transcript = self.paired_with_u1(f"Brief: {self.U1}")
@@ -774,6 +778,7 @@ class HeldLaunchPairing(HookCase):
 
 
     def test_a_resumed_agent_keeps_its_resume_contract_at_stop(self):
+        self.resolve({**GATES, "deny_resume": False}, MEASURE)
         transcript = self.paired_with_u1(f"Brief: {self.U1}")
         (self.tree / ".context-gate/build/p/u1/developer-report.md").write_text(
             "done\n", encoding="utf-8")
@@ -918,6 +923,7 @@ class ReportCountsWhatHappened(HookCase):
         self.assertIn("in 1 of 9 runs", found[0])
 
     def second_run(self, message, to="a1", age=0):
+        self.resolve({**GATES, "deny_resume": False}, MEASURE)
         self.launch("Run date.")
         self.stop(transcript=self.transcript([("m1", USAGE, "done")]))
         if message:

@@ -7,6 +7,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import profile_guard  # noqa: E402,F401
+
 from govern import __version__, releases  # noqa: E402
 
 SAMPLE = """# Notes

@@ -17,6 +17,8 @@ ENGINE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ENGINE))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import profile_guard  # noqa: E402,F401
+
 from govern import phase  # noqa: E402
 from base_support import Case, Tree  # noqa: E402
 

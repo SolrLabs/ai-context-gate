@@ -67,9 +67,8 @@ If the report has a **New options** section, offer those options the way the opt
 
 For each new check, and each finding that implies a policy choice, ask the user, recommending
 one answer. Options are usually: fix the findings, adjust the setting in
-`.context-gate/config.toml` (a loosening needs a `reason`), turn the check off
-(`level = "off"`, with a reason), or accept current breaches into the ratchet
-(`bin/govern baseline --allow-raise`).
+`.context-gate/config.toml`, turn the check off (`level = "off"`), each with a `reason`, or
+accept a breach into the ratchet (`bin/govern baseline --allow-raise <key> --reason "<why>"`).
 
 **Price every choice that changes the project before taking it.** Count what it touches from the
 findings or with Grep, and say it: "Fixing these touches 18 entries in 1 file", or "Tightening
