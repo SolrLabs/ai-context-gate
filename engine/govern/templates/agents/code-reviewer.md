@@ -26,6 +26,8 @@ When your launch prompt has a `Worktree:` line, the project you review is in tha
 
 You may run read-only commands to check a claim: `git show`, `git diff`, a search, a single test file. Run CPU-heavy probes under `nice -n 19`, two at most at once; sample long runs, never enumerate them. Never print a secrets file or output that expands one. Do not re-run the whole suite; the developers' reports carry that evidence, and a gap is a finding.
 
+{{reading}}
+
 ## Findings
 
 Each finding has a severity, a file and line, what is wrong, and the input or sequence of events that shows it.

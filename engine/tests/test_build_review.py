@@ -304,7 +304,7 @@ class FixAndClose(Build):
         out = self.ok("fix")
         brief = self.dir() / "fix" / "brief.md"
         text = brief.read_text(encoding="utf-8")
-        self.assertEqual(agent_runs.unfilled(text), ["Fixes", "Out of scope"])
+        self.assertEqual(agent_runs.unfilled(text), ["Fixes", "Out of scope", "Tests"])
         self.assertIn("ranked, five at most", text)
         self.assertIn("the test to write first and see fail", text)
         self.assertNotIn("Base commit:", text)
@@ -362,7 +362,7 @@ class FixAndClose(Build):
         second = folder / "brief-2.md"
         self.assertEqual(first.read_text(encoding="utf-8"), "1. the ranked list\n")
         text = second.read_text(encoding="utf-8")
-        self.assertEqual(agent_runs.unfilled(text), ["Fixes", "Out of scope"])
+        self.assertEqual(agent_runs.unfilled(text), ["Fixes", "Out of scope", "Tests"])
         self.assertEqual(text.splitlines()[-3:], [RELATIVE, f"Red: {at('fix', 'red-2')}",
                                                   f"Produces: {at('fix', 'developer-report-2.md')}"])
         self.assertIn(f"wrote {BUILD / 'p1' / 'fix' / 'brief-2.md'}", out)

@@ -1147,7 +1147,7 @@ Red: /work/briefs/unit-3/red
 ```
 
 The launch prompt is one line, `Brief: <absolute path>`; the path may be quoted or contain
-spaces. A relative `Produces:` or `Red:` path resolves against the brief file's folder.
+spaces. A relative `Produces:` or `Red:` path is read from the root of the agent's working tree, then beside the brief file.
 
 ```toml
 [governance]
@@ -1157,6 +1157,8 @@ engine = "0.4.0"
 level = "error"
 briefed = ["developer", "senior-developer"]
 max_refusals = 2
+deny_resume = true
+read_lines = 400
 ```
 
 | Gate | What is refused |
@@ -1166,11 +1168,14 @@ max_refusals = 2
 | Claims | With `claims` on: a stop whose final message says `report`, `written to`, `saved to` or `wrote`, then an absolute path that does not exist |
 | Red | A bug fix's stop with no failing test output in the `Red:` folder saved before its last edit |
 | Push | With `deny_push` on: a subagent's `git push` |
+| Resume | With `deny_resume` on: a `SendMessage` to an agent that has finished |
+| Read | With `read_lines` above 0: a `Read` of a file longer than that with no `offset` or `limit`; images, PDFs, notebooks and binary files pass |
 | Checklist | With `checklist` on: a stop whose report leaves a hand-back checklist line unanswered |
 
 A refusal names every unmet item. A stop is refused at most `max_refusals` times in one run; then
 the agent is let go and the coordinator is told what was unmet. A gate never traps an agent, and
-nothing in the main session is refused except a briefed role launched without a brief.
+the main session is refused only three things: a briefed role launched without a brief, a
+resume of a finished agent, and a whole-file `Read` of a large file.
 
 Claude Code's Write tool refuses a subagent a file named `report.md`, `findings.md`, `summary.md`
 or `analysis.md`, and no hook sees the attempt. A brief names its report `<role>-report.md`, and a
@@ -1273,7 +1278,7 @@ attempts = 0
 | `build ruling <text>` | Records a decision made without the owner: what, why, cost if wrong |
 | `build status [--json]` | The phase, a line per unit, and what is next |
 | `build review [--accept-red REASON]` | Writes the review package and the reviewers' briefs; with `full_gate` set it is refused on a red, missing or stale gate record |
-| `build fix [--role R] [--unit ID]` | Writes a ranked fix brief; `--unit` adds a `Unit: <id>` line, and `launch fix` then resumes the unit's agent with SendMessage (first three fix briefs of a done unit with an agent) |
+| `build fix [--role R] [--unit ID]` | Writes a ranked fix brief; `--unit` adds a `Unit: <id>` line; every fix brief gets a fresh agent |
 | `build close` | Writes the technical writer's brief and prints the `phase close` command |
 
 The brief contract: the launch prompt carries `Brief:`, a path from the repository root (or an

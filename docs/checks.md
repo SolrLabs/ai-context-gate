@@ -42,7 +42,7 @@ Each check has a level: `off`, `warn` or `error`. At `error`, a check reports wh
 | [`git-repo`](#git-repo) | `warn` | The governance root is inside a git repository. |
 | [`tool-files`](#tool-files) | `warn` | Git ignores none of the files the gate needs committed: its config, baseline, install record and entry points. |
 | [`local-layer`](#local-layer) | `error` | Git does not track .context-gate/local.toml, the machine-local beta layer. |
-| [`agent-gates`](#agent-gates) | `off` | Refuses launching a briefed role without a brief file, ends a subagent's run only when the files its brief promised exist, and keeps subagents from running `git push`. |
+| [`agent-gates`](#agent-gates) | `off` | Refuses launching a briefed role without a brief file, ends a subagent's run only when the files its brief promised exist, and keeps subagents from running `git push`, resuming a finished agent, and reading a whole large file. |
 | [`agent-measure`](#agent-measure) | `off` | Records what each subagent run cost (tokens summed over its requests, tool calls and time, largest results) and tells the coordinator in one line per run; `govern runs report` summarizes a phase. |
 | [`agent-roles`](#agent-roles) | `off` | The engine's agent roles and the coordinator's build rules are rendered into the project, and each rendered file matches what `agents render` would write. |
 | [`agent-references`](#agent-references) | `warn` | Every agent a governed doc, a skill, an agent definition or the build rules names has a definition in the agents directory. |
@@ -729,7 +729,7 @@ No parameters: set its `level` only.
 
 ### `agent-gates`
 
-Refuses launching a briefed role without a brief file, ends a subagent's run only when the files its brief promised exist, and keeps subagents from running `git push`.
+Refuses launching a briefed role without a brief file, ends a subagent's run only when the files its brief promised exist, and keeps subagents from running `git push`, resuming a finished agent, and reading a whole large file.
 
 | | |
 |---|---|
@@ -748,6 +748,8 @@ Refuses launching a briefed role without a brief file, ends a subagent's run onl
 | `claims` | bool | `true` | — | Refuse a final message that points at a file that does not exist |
 | `checklist` | bool | `false` | — | Refuse a report that leaves a line of the role's hand-back checklist unanswered |
 | `deny_push` | bool | `true` | — | Deny a subagent's `git push` |
+| `deny_resume` | bool | `true` | — | Deny a `SendMessage` to an agent that has finished; a fix goes to a fresh agent |
+| `read_lines` | int | `400` | raised | Deny a whole-file `Read` of a file longer than this many lines; 0 turns it off |
 | `max_refusals` | int | `2` | lowered | Refusals in one run before the agent is let go and the unmet items go to the coordinator |
 
 ### `agent-measure`

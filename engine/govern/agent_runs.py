@@ -25,7 +25,10 @@ from pathlib import Path, PurePath
 from govern.layout import TOOL
 
 GATE_DEFAULTS = {"briefed": ["developer", "senior-developer"], "claims": True,
-                 "deny_push": True, "max_refusals": 2, "checklist": False}
+                 "deny_push": True, "max_refusals": 2, "checklist": False,
+                 "deny_resume": True, "read_lines": 400}
+# Files `Read` shows as images, pages or cells: a line count means nothing for them.
+READ_EXEMPT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".pdf", ".ipynb"}
 MEASURE_DEFAULTS = {"notice": True}
 SESSION_STATE_DAYS = 30     # per-session state untouched this long is swept at session start
 HELD_BRIEF_SECONDS = 30     # a held brief older than this belongs to a launch that never started
@@ -526,21 +529,69 @@ def on_launch_failed(home, sid, data) -> None:
             pending.unlink(missing_ok=True)
 
 
-def on_pre_resume(home, sid, data) -> None:
+def on_pre_resume(home, sid, data, gates=None) -> dict | None:
     """A message to an agent this session launched resumes it. Its contract is the message's
-    own `Produces:` and `Red:` lines, never the first brief's again."""
+    own `Produces:` and `Red:` lines, never the first brief's again. A message to an agent that
+    has finished is denied with `deny_resume`: a fresh agent with a tight brief is cheaper."""
     inp = data.get("tool_input") or {}
     to = inp.get("to")
     if not _safe(to):
-        return
+        return None
     d = state_dir(home, sid)
-    if (d / f"launch-{to}.json").is_file():
+    launch = d / f"launch-{to}.json"
+    if launch.is_file():
+        if gates and gates.get("deny_resume", GATE_DEFAULTS["deny_resume"]):
+            record = read_json(launch, {})
+            if isinstance(record, dict) and record.get("ended"):
+                return _deny(f"{to} has finished. A finished agent re-reads its whole history on "
+                             "every turn: launch a fresh agent with a brief that names the file, "
+                             "the lines, the input that shows the fault, and the branch with the "
+                             "earlier attempt.")
         write_json(d / f"resume-{to}.json", contract(inp.get("message") or "", data.get("cwd")))
     else:
         # Addressed by name, which no launch record holds: the next start of an agent that
         # already has one claims it (see `on_start`).
         write_json(d / "resume-by-name.json",
                    {**contract(inp.get("message") or "", data.get("cwd")), "t": time.time()})
+    return None
+
+
+def on_pre_read(gates, data) -> dict | None:
+    """Deny a whole-file `Read` of a file longer than `read_lines`. Silent on any doubt: a file
+    that cannot be opened, a binary or an image, a read with `offset` or `limit`, any error."""
+    try:
+        limit = gates.get("read_lines", GATE_DEFAULTS["read_lines"]) if gates else 0
+        inp = data.get("tool_input") or {}
+        if (not isinstance(limit, int) or isinstance(limit, bool) or limit < 1
+                or inp.get("offset") is not None or inp.get("limit") is not None):
+            return None
+        name = inp.get("file_path")
+        if not isinstance(name, str) or not name:
+            return None
+        path = Path(name)
+        if path.suffix.lower() in READ_EXEMPT:
+            return None
+        if not path.is_absolute() and isinstance(data.get("cwd"), str) and data["cwd"]:
+            path = Path(data["cwd"]) / path
+        lines = 0
+        with open(path, "rb") as f:
+            if b"\0" in f.read(8192):
+                return None
+            f.seek(0)
+            last = b"\n"
+            while lines <= limit:
+                chunk = f.read(65536)
+                if not chunk:
+                    lines += last != b"\n"      # a last line with no newline counts
+                    break
+                lines += chunk.count(b"\n")
+                last = chunk[-1:]
+            if lines > limit:
+                return _deny(f"{path} has more than {limit} lines. Grep for what you need, or "
+                             "Read it with offset/limit, in parts if you need all of it.")
+    except Exception:
+        return None
+    return None
 
 
 def _red_gate(root) -> str | None:
@@ -878,13 +929,15 @@ def missing(launch: dict, tools: list[dict], final: str, claims: bool,
     edits = [r["t"] for r in tools if r.get("tool") in EDIT_TOOLS and not r.get("failed")]
     for raw in launch.get("red") or []:
         paths = where(launch, "red", raw)
-        found = [[f for f in q.glob("*") if f.is_file() and f.stat().st_size
-                  and f.stat().st_mtime >= since - 1] if q.is_dir() else [] for q in paths]
+        every = [[f for f in q.rglob("*") if f.is_file() and f.stat().st_size]
+                 if q.is_dir() else [] for q in paths]
+        found = [[f for f in fs if f.stat().st_mtime >= since - 1] for fs in every]
         files = next((f for f in found if f), [])
         if not files:
-            problems.append(f"{paths[0]} holds no failing-test output from this run. Run the "
-                            "test against the code before your fix and save its real output "
-                            "there.")
+            what = ("holds only files from before this run" if any(every)
+                    else "holds no files")
+            problems.append(f"{paths[0]} {what}. Run the test against the code before your "
+                            "fix and save its real output there.")
         elif edits and min(f.stat().st_mtime for f in files) > max(edits):
             problems.append(f"the output in {paths[0]} was saved after your last edit, so it "
                             "does not show the test failing before the change.")
@@ -1112,9 +1165,11 @@ def handle(home: Path, resolved: dict, data: dict) -> dict | None:
         if tool == "Agent":
             return on_pre_launch(home, sid, gates, data)
         if tool == "SendMessage":
-            on_pre_resume(home, sid, data)
-        elif tool == "Bash":
+            return on_pre_resume(home, sid, data, gates)
+        if tool == "Bash":
             return on_pre_bash(gates, data, root)
+        if tool == "Read":
+            return on_pre_read(gates, data)
         return None
     if event in ("PostToolUse", "PostToolUseFailure"):
         out = None

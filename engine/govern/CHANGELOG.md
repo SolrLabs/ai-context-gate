@@ -4,6 +4,19 @@ Newest first. Each release says what changed and, under **Upgrading**, anything 
 do or decide. The upgrade report quotes every entry between the engine a project ran and the one
 it upgraded to.
 
+## 0.9.4 — 2026-11-17
+
+Agent hygiene: a fresh agent for every fix, two new refusals under `agent-gates`, and workspace builds that brief and close correctly.
+
+**Upgrading:** a project with `agent-gates` on gets two new refusals after upgrading: a `SendMessage` to a finished agent, and a whole-file `Read` of a file over 400 lines. `deny_resume = false` and `read_lines = 0` turn them off. `build launch fix` no longer prints `Resume:` or resumes a unit's builder; the 0.9.2 entries that mention it are history. Run `govern agents render` to refresh the rendered agents and build rules. In a workspace, `build launch close` now prints two launches, and the second writer's branch (`build/<slug>/close-workspace`) is merged in the workspace repository by you or the coordinator.
+
+- **Changed:** `govern build launch fix` always launches a fresh agent and never prints `Resume:`. The fix brief gains a `Tests` section; the build rules say a finished agent is never resumed and every brief names a scoped test command.
+- **Added:** every role reads large files by search or line range (`{{reading}}` in each role template).
+- **Added:** `[checks.agent-gates]` params `deny_resume` (bool, default true) and `read_lines` (int, default 400; below 1 is off). The PreToolUse matcher is now `Agent|SendMessage|Bash|Read`.
+- **Changed:** in a workspace, every unit, fix, review and close brief says its contract paths are from the root of the `Worktree:` folder, a checkout of the member.
+- **Changed:** in a workspace, `govern build close` also writes `close/workspace-brief.md` (the workspace repository's handoff, decision log and roadmap), and `govern build launch close` prints a second technical-writer launch: a worktree of the workspace repository on `build/<slug>/close-workspace`, with a `Base:` of its HEAD and a `Workspace branch:` line. On a detached HEAD the line says to merge the writer's branch by hand. `build close` also prints the removal of that worktree and branch, and the writer's `Produces:` sits in the state folder when `build_root` is set.
+- **Fixed:** the `agent-gates` Red gate finds failing output in subfolders of the red folder, as `build collect` copies it. Its refusal now says whether the folder held no files or only files from before the run.
+
 ## 0.9.3 — 2026-11-13
 
 0.9.3 fixes two faults a project reported on 0.9.2: the build gate skipped the document checks, and `build verify` warned about Scope entries that were not literal paths.

@@ -296,7 +296,7 @@ class Render(unittest.TestCase):
         self.assertNotIn("The first gate of a build phase", rules)
 
     def test_rules_carry_on_by_default(self):
-        self.assertIn("Carry on from one phase to the next without asking.",
+        self.assertIn("Carry on to the next phase without asking.",
                       rendered(roles.RULES))
 
     def test_authority_defaults_to_the_plan_or_spec_the_brief_names(self):
@@ -331,7 +331,7 @@ class Render(unittest.TestCase):
 
     def test_rules_never_stop_a_running_agent_for_routing(self):
         rules = rendered(roles.RULES)
-        self.assertIn("A fix to one unit goes to the agent that built it, by SendMessage, for fix rounds 1 to 3; a fourth round, a new unit, or a failed or blocked agent gets a fresh one.\n- Never stop a running agent to change "
+        self.assertIn("A fix, a retry or new work always goes to a fresh agent, whose brief names the file, the lines, the input that shows the fault, and the branch with the earlier attempt.\n- Never stop a running agent to change "
                       "its routing: let it finish, or let it fail.\n- `developer` takes", rules)
 
     def test_visual_paths_turn_on_ux_reviewer(self):
@@ -465,11 +465,12 @@ class Render(unittest.TestCase):
                 self.assertNotIn(sentence, text)
                 self.assertIn("with a shell heredoc (you have no Write tool)", text)
 
-    def test_the_review_section_sends_a_fix_to_its_builder_or_a_fresh_developer(self):
+    def test_the_review_section_sends_every_fix_to_a_fresh_developer(self):
         rules = " ".join(rendered(roles.RULES).split())
-        self.assertIn("one unit's goes to its builder (see Routing), one across units to a fresh "
-                      "`developer`", rules)
-        self.assertIn("A fix to one unit goes to the agent that built it", rules)
+        self.assertIn("each to a fresh `developer` (see Routing)", rules)
+        self.assertNotIn("fix rounds 1 to 3", rules)
+        self.assertIn("Every brief names the command that runs only the tests its change touches", rules)
+        self.assertIn("Read large files by search or line range, never whole", rules)
 
     def test_the_rules_never_launch_outside_the_build_skill_and_split_a_big_unit(self):
         rules = " ".join(rendered(roles.RULES).split())

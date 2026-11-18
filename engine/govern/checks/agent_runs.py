@@ -11,7 +11,7 @@ from govern.manifest import Param, check
 @check("agent-gates", scope="workspace", since="0.7.0", default="off",
        summary="Refuses launching a briefed role without a brief file, ends a subagent's run only "
                "when the files its brief promised exist, and keeps subagents from running "
-               "`git push`.",
+               "`git push`, resuming a finished agent, and reading a whole large file.",
        question="Should a subagent be held to its brief: launched only with a brief file, and "
                 "stopped from finishing until the files it promised are written?",
        rationale="A coordinator drops contract lines when it retypes them into a prompt, and a "
@@ -28,6 +28,12 @@ from govern.manifest import Param, check
                               "checklist unanswered"),
            "deny_push": Param("bool", GATE_DEFAULTS["deny_push"],
                               "Deny a subagent's `git push`"),
+           "deny_resume": Param("bool", GATE_DEFAULTS["deny_resume"],
+                                "Deny a `SendMessage` to an agent that has finished; a fix goes "
+                                "to a fresh agent"),
+           "read_lines": Param("int", GATE_DEFAULTS["read_lines"],
+                               "Deny a whole-file `Read` of a file longer than this many lines; "
+                               "0 turns it off", looser="higher"),
            "max_refusals": Param("int", GATE_DEFAULTS["max_refusals"],
                                  "Refusals in one run before the agent is let go and the unmet "
                                  "items go to the coordinator", looser="lower"),

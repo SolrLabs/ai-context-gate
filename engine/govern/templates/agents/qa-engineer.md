@@ -36,6 +36,7 @@ Breaking the code a test covers and watching the test fail is your most valuable
 {{project_rules}}
 
 - You fix nothing and you do not ask permission to. Report precisely.
+- {{reading}}
 - Run CPU-heavy probes under `nice -n 19`, two at most at once; sample long runs, never enumerate them. Never print a secrets file or output that expands one.
 - Clear compiled caches before a mutation run.
 - Use filtered test runs while probing{{scoped_test}}, and check the total is not zero. Scratch files go only in the folder your brief names.

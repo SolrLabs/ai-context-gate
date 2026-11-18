@@ -6,6 +6,9 @@ tree from that line.
 """
 from __future__ import annotations
 
+import os
+import shlex
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -25,6 +28,32 @@ def fill(brief: Path) -> None:
     text = "".join("Filled.\n" if line.startswith(agent_runs.FILL) else line + "\n"
                    for line in brief.read_text(encoding="utf-8").splitlines())
     brief.write_text(text, encoding="utf-8")
+
+
+def run_printed(case, w, out: str) -> None:
+    """Run every `git ...` line `build close` printed, from the workspace root; each must exit 0."""
+    env = {**os.environ, "HOME": str(w.home), "GIT_CONFIG_NOSYSTEM": "1"}
+    for line in out.splitlines():
+        if line.startswith("git "):
+            row = [a.strip("'\"") for a in shlex.split(line, posix=os.name != "nt")]
+            res = subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *row[1:]],
+                                 cwd=w.root, env=env, capture_output=True)
+            case.assertEqual(res.returncode, 0, (line, res.stdout, res.stderr))
+
+
+def close_cleanup(case, w, close_out: str, report: str) -> Path:
+    """`launch close`; the workspace writer commits `report` on its branch; its branch is merged;
+    the printed lines run. Returns the writer's worktree path."""
+    out = case.ok("--project", "alpha", "launch", "close")
+    tree = Path([l for l in out.splitlines() if l.startswith("Worktree: ")][-1][10:])
+    (tree / report).parent.mkdir(parents=True, exist_ok=True)
+    (tree / report).write_text("report\n", encoding="utf-8")
+    # -f: a state folder's own `.gitignore` keeps reports out unless the writer forces one in.
+    w.git("add", "-f", "--", report, at=tree)
+    w.git("commit", "-qm", "report", at=tree)
+    w.git("merge", "-q", "--no-edit", "build/p1/close-workspace", at=w.root)
+    run_printed(case, w, close_out)
+    return tree
 
 
 class Worktree(ws.Workspace):
@@ -115,6 +144,121 @@ class Worktree(ws.Workspace):
             f"Worktree: {member}"])
         self.assertFalse((self.w.root / ".claude").exists())
 
+    def closing(self) -> Path:
+        """Alpha with its review done, `close` run and both close briefs filled and committed."""
+        member = self.ready()
+        self.ok("--project", "alpha", "unit", "set", "u1", "done")
+        self.w.write("alpha/src/a.py", "print(1)\n")
+        self.w.commit("code", at=member, index=False)
+        self.ok("--project", "alpha", "review")
+        for brief in (member / BUILD / "p1" / "review").glob("*-brief.md"):
+            fill(brief)
+        self.w.commit("review briefs", at=member, index=False)
+        self.ok("--project", "alpha", "close")
+        for brief in (member / BUILD / "p1" / "close").glob("*brief.md"):
+            fill(brief)
+        self.w.commit("close briefs", at=member, index=False)
+        return member
+
+    def close_tree(self, what: str = "close") -> Path:
+        return self.w.root / ".claude" / "worktrees" / f"alpha-p1-{what}"
+
+    def test_a_workspace_close_writes_a_second_brief_for_the_workspace_documents(self):
+        member = self.ready()
+        self.ok("--project", "alpha", "unit", "set", "u1", "done")
+        self.w.write("alpha/src/a.py", "print(1)\n")
+        self.w.commit("code", at=member, index=False)
+        self.ok("--project", "alpha", "review")
+        out = self.ok("--project", "alpha", "close")
+        folder = member / BUILD / "p1" / "close"
+        self.assertIn(f"wrote {Path(BUILD, 'p1', 'close', 'workspace-brief.md')}", out)
+        first = (folder / "brief.md").read_text(encoding="utf-8")
+        second = (folder / "workspace-brief.md").read_text(encoding="utf-8")
+        self.assertIn("Produces: .context-gate/build/p1/close/technical-writer-report.md", first)
+        self.assertIn("Produces: .context-gate/build/p1/close/technical-writer-workspace-report.md",
+                      second)
+        self.assertIn("a checkout of the workspace repository (not of `alpha`)", second)
+        self.assertIn("Unit u1, One", second)
+        self.assertIn("handoff, decision log and roadmap", second)
+        self.assertNotIn("workspace repository's own documents", first)
+        # A second `close` keeps both.
+        again = self.ok("--project", "alpha", "close")
+        self.assertIn("kept", again)
+        self.assertNotIn("wrote", again)
+
+    def test_a_workspace_close_launch_prints_a_launch_for_each_repository(self):
+        member = self.closing()
+        head = self.w.git("rev-parse", "HEAD", at=member).strip()
+        top = self.w.git("rev-parse", "HEAD").strip()
+        out = self.ok("--project", "alpha", "launch", "close")
+        self.assertEqual(out.splitlines(), [
+            "launch technical-writer with the prompt:",
+            f"Brief: {BUILD.as_posix()}/p1/close/brief.md",
+            f"Base: {head}", "Phase branch: phase/p1",
+            f"Worktree: {self.close_tree()}", NOTE,
+            "launch technical-writer with the prompt:",
+            f"Brief: {member / BUILD / 'p1' / 'close' / 'workspace-brief.md'}",
+            f"Base: {top}", "Workspace branch: main",
+            f"Worktree: {self.close_tree('close-workspace')}", NOTE])
+        branches = {self.close_tree(): ("build/p1/close", member),
+                    self.close_tree("close-workspace"): ("build/p1/close-workspace", self.w.root)}
+        for tree, (branch, repo) in branches.items():
+            self.assertEqual(self.w.git("rev-parse", "--abbrev-ref", "HEAD", at=tree).strip(), branch)
+            self.assertIn(branch, build.phase._worktrees(repo))
+        self.assertTrue((self.close_tree("close-workspace") / "projects.toml").is_file())
+        # A second launch reuses both.
+        marker = self.close_tree("close-workspace") / "kept.txt"
+        marker.write_text("mine\n", encoding="utf-8")
+        self.assertEqual(self.ok("--project", "alpha", "launch", "close"), out)
+        self.assertTrue(marker.is_file())
+
+    def test_a_workspace_close_also_prints_the_workspace_repositorys_cleanup(self):
+        member = self.ready()
+        self.ok("--project", "alpha", "unit", "set", "u1", "done")
+        self.w.write("alpha/src/a.py", "print(1)\n")
+        self.w.commit("code", at=member, index=False)
+        self.ok("--project", "alpha", "review")
+        out = self.ok("--project", "alpha", "close").splitlines()
+        folder = f"{BUILD.as_posix()}/p1"
+        commit = 'commit -m "Close phase p1: remove its build folder"'
+        at = out.index("once its branch is merged, run:")
+        self.assertEqual(out[at + 1:at + 5], [
+            f"git -C alpha rm -r -q {folder}", f"git -C alpha {commit}",
+            f"git -C . rm -r -q --ignore-unmatch {folder}", f"git -C . {commit}"])
+        tree = self.close_tree("close-workspace").resolve()
+        self.assertEqual(out[at + 5:at + 7], [
+            f"git -C . worktree remove {shlex.quote(str(tree))}",
+            "git -C . branch -d build/p1/close-workspace"])
+        self.assertTrue(out[at + 7].endswith("phase close --path alpha"), out[at + 7])
+
+    def test_the_printed_cleanup_removes_the_workspace_writers_worktree_and_branch(self):
+        self.closing()
+        out = self.ok("--project", "alpha", "close")
+        self.assertIn("fill in the briefs, commit it", out)
+        tree = close_cleanup(self, self.w, out,
+                             f"{BUILD.as_posix()}/p1/close/technical-writer-workspace-report.md")
+        self.assertFalse(tree.exists())
+        self.assertNotIn("build/p1/close-workspace", build.phase._worktrees(self.w.root))
+        self.assertNotIn("build/p1/close-workspace",
+                         self.w.git("branch", "--format=%(refname:short)").split())
+
+    def test_the_workspace_brief_asks_its_writer_to_commit_the_report(self):
+        member = self.closing()
+        folder = member / BUILD / "p1" / "close"
+        self.assertIn("Commit your report on your branch together with your document changes; "
+                      "if git says the report is ignored, leave it uncommitted and do not force it.",
+                      (folder / "workspace-brief.md").read_text(encoding="utf-8"))
+        self.assertNotIn("Commit your report on your branch",
+                         (folder / "brief.md").read_text(encoding="utf-8"))
+
+    def test_a_detached_workspace_head_is_named_in_the_workspace_branch_line(self):
+        self.closing()
+        self.w.git("checkout", "-q", "--detach")
+        short = self.w.git("rev-parse", "--short", "HEAD").strip()
+        out = self.ok("--project", "alpha", "launch", "close")
+        self.assertIn(f"Workspace branch: none (detached at {short}): merge the writer's branch "
+                      "by hand", out.splitlines())
+
     def test_unit_set_branch_copies_a_report_written_in_the_members_worktree(self):
         member = self.ready()
         self.ok("--project", "alpha", "launch", "u1")
@@ -148,6 +292,27 @@ class Single(Build):
             "launch developer with the prompt:", f"Brief: {BUILD.as_posix()}/p1/u1/brief.md",
             f"Base: {self.head()}", "Phase branch: phase/p1"])
         self.assertNotIn("Worktree", out)
+        self.assertFalse((self.w.root / ".claude").exists())
+
+    def test_a_single_repository_close_writes_one_brief_and_prints_one_launch(self):
+        self.started()
+        self.unit("u1", "done")
+        self.code()
+        self.ok("review")
+        for brief in (self.dir() / "review").glob("*-brief.md"):
+            fill(brief)
+        self.w.commit("review briefs", at=self.w.top, index=False)
+        closed = self.ok("close")
+        self.assertNotIn("--ignore-unmatch", closed)
+        self.assertEqual(closed.count("git rm -r -q"), 1)
+        self.assertEqual([p.name for p in (self.dir() / "close").glob("*.md")], ["brief.md"])
+        fill(self.dir() / "close" / "brief.md")
+        self.w.commit("close brief", at=self.w.top, index=False)
+        out = self.ok("launch", "close")
+        self.assertEqual(out.splitlines(), [
+            "launch technical-writer with the prompt:",
+            f"Brief: {BUILD.as_posix()}/p1/close/brief.md",
+            f"Base: {self.head()}", "Phase branch: phase/p1"])
         self.assertFalse((self.w.root / ".claude").exists())
 
 
