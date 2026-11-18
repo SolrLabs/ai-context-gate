@@ -31,7 +31,15 @@ from govern.text import read
                               "What a brief answers to (a plan, a spec); empty renders "
                               f"\"{roles.NO_AUTHORITY}\""),
            "scoped_test": Param("str", "", "The command that runs only the tests a unit touches"),
-           "full_gate": Param("str", "", "The command that runs the project's full gate"),
+           "full_gate": Param("str", "", "The command that runs the project's local suite"),
+           "docs_paths": Param("list", ["docs/**", "*.md"],
+                               "Paths whose changes alone never make the last local suite run "
+                               "stale; `build gate` runs only `govern check` for them (and "
+                               "`docs_gate`); a project whose suite reads its docs sets "
+                               "`docs_gate` or narrows `docs_paths`"),
+           "docs_gate": Param("str", "", "A command run beside govern check when only docs_paths "
+                              "changed since a green run; a project whose tests read its docs "
+                              "names them here"),
            "senior_triggers": Param("list", list(roles.SENIOR_TRIGGERS),
                                     "What sends a unit to senior-developer instead of developer"),
            "operator_rules": Param("list", [],
@@ -59,9 +67,11 @@ from govern.text import read
            "escalate_after": Param("int", 2,
                                    "Failed or handed-back attempts by developer before a unit "
                                    "goes to senior-developer"),
-           "unit_gate": Param("str", "scoped",
-                              "What a unit runs before it hands back: `scoped` (its own tests; "
-                              "the coordinator runs the full gate after the merge) or `full`"),
+           "unit_gate": Param("str", "phase",
+                              "What a unit runs before it hands back: `phase` (its own tests; "
+                              "the coordinator runs the local suite once per phase, before "
+                              "review), `scoped` (its own tests, then build gate; the "
+                              "coordinator runs the local suite after each merge) or `full`"),
            "housekeeping": Param("bool", True,
                                  "Whether the rules tell the coordinator to launch "
                                  "technical-writer and close the phase when a fix pass closes"),

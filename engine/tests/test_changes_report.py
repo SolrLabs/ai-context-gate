@@ -14,6 +14,8 @@ import profile_guard  # noqa: E402,F401
 
 from changes_support import *  # noqa: E402,F401,F403
 
+TIER = "e2e"
+
 # ---------------------------------------------------------------------------- compared
 
 class Compared(Diff):

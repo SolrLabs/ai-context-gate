@@ -4,6 +4,25 @@ Newest first. Each release says what changed and, under **Upgrading**, anything 
 do or decide. The upgrade report quotes every entry between the engine a project ran and the one
 it upgraded to.
 
+## 0.9.5-beta.3 — 2026-11-18
+
+Fewer suite runs per build, a beta channel, and the drive band in the plugin. The local test suite is also faster, and the slowest tests are a separate tier.
+
+**Upgrading:** `[checks.agent-roles] unit_gate` changes default (below). Set `unit_gate = "scoped"` or `"full"` to keep per-merge runs. Re-run `govern agents render` to refresh the rendered roles.
+
+- **Changed default:** `[checks.agent-roles] unit_gate` now defaults to `"phase"`. Units run only their own tests; the coordinator runs the local suite once per phase, before review, and once after the fix pass. Existing projects that never set `unit_gate` change behavior on upgrade. Set `unit_gate = "scoped"` (per-merge runs, with a unit's own record accepted) or `"full"` to opt out.
+- **Changed:** rendered text says "local suite", not "full gate". The technical-writer runs `govern check` only, and the build skill no longer dispatches CI before review.
+- **Added:** `docs_paths` (default `["docs/**", "*.md"]`) and `docs_gate`. After a green run, a change only to docs runs `govern check` (and `docs_gate` when set) instead of the suite, recorded with `scope: "docs"`.
+- **Added:** under `scoped`, `build gate` runs in a unit's linked worktree, and `build unit set <id> done --branch <b>` takes that record.
+- **Added:** `[governance] channel = "beta"` and `python3 -m govern.installer channel --root DIR stable|beta`. Every machine and CI run the newest beta newer than the pin, and Claude Code loads `context-gate@context-gate-beta`. One note line shows when the channel runs a beta.
+- **Added:** publishing: the public `beta` branch carries a `context-gate-beta` marketplace, and a release also moves it.
+- **Added:** the driver writes `status.json` in its run folder and prints a `run folder:` line. With no `--cap` it stops at today's line (`cap N% (today)`).
+- **Added:** the drive band ships in the plugin (`plugin/hooks/drive_band.tsx`, `drive_status.py`): green running, orange stale or ended without a stop, blue stopped.
+
+- **Changed:** `tools/ci/run-tests.sh --host` runs in about 170 s, down from about 270 s. Tests are split across workers and run slowest first. `-j` sets the worker count and defaults to 6, or the CPU count when lower.
+- **Added:** an `e2e` tier holds the slow launcher and install tests. `--host` skips it. Run `--host --all` before a pull request; CI runs it.
+- **Changed:** the engine reuses read-only git answers within one command, so commands that ask git the same thing repeatedly run faster. Results are unchanged.
+
 ## 0.9.5-beta.2 — 2026-11-18
 
 Four driver faults found in the first overnight run.

@@ -795,7 +795,9 @@ The engine's agent roles and the coordinator's build rules are rendered into the
 | `load_claude_md` | list | `[]` | — | Roles rendered with `omitClaudeMd: false` |
 | `authority` | str | `""` | — | What a brief answers to (a plan, a spec); empty renders "the plan or spec it names" |
 | `scoped_test` | str | `""` | — | The command that runs only the tests a unit touches |
-| `full_gate` | str | `""` | — | The command that runs the project's full gate |
+| `full_gate` | str | `""` | — | The command that runs the project's local suite |
+| `docs_paths` | list | `["docs/**", "*.md"]` | — | Paths whose changes alone never make the last local suite run stale; `build gate` runs only `govern check` for them (and `docs_gate`); a project whose suite reads its docs sets `docs_gate` or narrows `docs_paths` |
+| `docs_gate` | str | `""` | — | A command run beside govern check when only docs_paths changed since a green run; a project whose tests read its docs names them here |
 | `senior_triggers` | list | `["security: credentials, keys, tokens, signing, sign-in and sessions, the code that decides who may read or change protected data, or input from outside the project (a download, an archive, pasted text). A product rule about who may do what is not security."]` | — | What sends a unit to senior-developer instead of developer |
 | `operator_rules` | list | `[]` | — | Rules the operator gives every role, rendered above the project's own |
 | `handback_checks` | list | `[]` | — | Lines the operator adds to every role's hand-back checklist, each `Key: text` |
@@ -805,7 +807,7 @@ The engine's agent roles and the coordinator's build rules are rendered into the
 | `high_risk_paths` | list | `[]` | — | Paths that make a phase high-risk, so qa-engineer runs beside code-reviewer |
 | `visual_paths` | list | `[]` | — | Paths whose change means someone must look at the running product |
 | `escalate_after` | int | `2` | — | Failed or handed-back attempts by developer before a unit goes to senior-developer |
-| `unit_gate` | str | `"scoped"` | — | What a unit runs before it hands back: `scoped` (its own tests; the coordinator runs the full gate after the merge) or `full` |
+| `unit_gate` | str | `"phase"` | — | What a unit runs before it hands back: `phase` (its own tests; the coordinator runs the local suite once per phase, before review), `scoped` (its own tests, then build gate; the coordinator runs the local suite after each merge) or `full` |
 | `housekeeping` | bool | `true` | — | Whether the rules tell the coordinator to launch technical-writer and close the phase when a fix pass closes |
 | `fast_checks` | list | `[]` | — | Cheap whole-tree commands developer and senior-developer run once after their scoped tests and report; not rendered under `unit_gate = "full"` |
 | `worktree_setup` | str | `""` | — | One command the code and writing roles run in their worktree right after the Base merge, before the first edit |

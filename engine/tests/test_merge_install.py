@@ -27,6 +27,8 @@ from base_support import LOG, TRAPS, Case, Tree, decision, fm, rtext, trap, wtex
 from team_support import TwoClones  # noqa: E402
 import test_nested_checkout as nested  # noqa: E402
 
+TIER = "e2e"
+
 PLUGIN = ENGINE.parent / "plugin"
 ON = '\n[checks.merge-driver]\nlevel = "error"\n'
 CAP = "\n[checks.doc-frontmatter]\nmax_working_words = 2\n"
@@ -237,6 +239,19 @@ class Install(Case):
             self.assertIn(name, out)
         again = w.run("merge-driver", "install")
         self.assertEqual(again[0], 0, again[1] + again[2])      # ours already there: rewritten
+
+    def test_a_git_dir_in_the_environment_does_not_move_the_hooks(self):
+        w = self.solo(extra=ON)
+        other = self.tmp / "elsewhere"
+        other.mkdir()
+        subprocess.run(["git", "init", "-q", str(other)], check=True, cwd=self.tmp,
+                       env={**os.environ, "HOME": str(self.tmp / "home")})
+        code, out, err = w.run("merge-driver", "install",
+                               env={"GIT_DIR": str(other / ".git")})
+        self.assertEqual(code, 0, out + err)
+        for name in ("post-merge", "post-rewrite"):
+            self.assertTrue((hooks_dir(w) / name).is_file(), name)
+            self.assertFalse((other / ".git" / "hooks" / name).exists(), name)
 
     def test_a_foreign_hook_is_kept(self):
         w = self.solo(extra=ON)

@@ -18,6 +18,8 @@ import profile_guard  # noqa: E402,F401
 from plugin_support import *  # noqa: E402,F401,F403
 from build_support import Build, GATES  # noqa: E402
 
+TIER = "e2e"
+
 
 class Plugin(unittest.TestCase):
     def setUp(self) -> None:
@@ -116,8 +118,7 @@ class Plugin(unittest.TestCase):
 
     def test_build_skill_says_what_a_red_gate_after_the_merge_means(self):
         text = self.build_text()
-        self.assertIn('have no "After you merge a unit" line, the agent ran the full gate itself',
-                      text)
+        self.assertIn("With no bullet, the agent ran the suite: read its result", text)
         self.assertIn("Green: record it with `python3 .context-gate/bin/govern build unit set "
                       "<id> done", text)
         self.assertIn("Red: the unit you just merged is failed; leave the merge in place, launch "
@@ -1074,7 +1075,7 @@ class BetaStandsDown(unittest.TestCase):
 
 
 class PushGuard(Build):
-    """A coordinator's `git push` is refused while the phase's last full gate is red at HEAD."""
+    """A coordinator's `git push` is refused while the phase's last local suite run is red at HEAD."""
     CONFIG = '\n[checks.agent-roles]\nlevel = "warn"\nfull_gate = "exit 3"\n'
 
     def setUp(self) -> None:
@@ -1097,7 +1098,7 @@ class PushGuard(Build):
         out = self.push()
         self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
         self.assertEqual(self.reason(out),
-                         f"push refused: the last full gate on this phase is red (rc 3 at "
+                         f"push refused: the last local suite run on this phase is red (rc 3 at "
                          f"{self.head()[:7]}). Run python3 .context-gate/bin/govern build gate.")
 
     def test_no_record_a_running_record_or_another_head_never_blocks(self):

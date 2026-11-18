@@ -14,6 +14,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import profile_guard  # noqa: E402,F401
 
 from regressions_support import *  # noqa: E402,F401,F403
+from fixture_cache import copy_of  # noqa: E402
+
+TIER = "e2e"
 
 class BetaCommand(Base):
     """`govern beta`, handled by the entry point before any engine loads: on checks everything
@@ -21,17 +24,32 @@ class BetaCommand(Base):
 
     def setUp(self) -> None:
         super().setUp()
-        w = self.ws()
-        self.entry, self.env = self._installed(w)
-        self._engines(w, (__version__, BETA))
+
+        def build(template: Path) -> None:
+            """The real install and the engines, run once per process in a directory of their own."""
+            self.tmp, outer = template, self.tmp
+            try:
+                w = self.ws()
+                _, env = self._installed(w)
+                self._engines(w, (__version__, BETA))
+                self.git("init", "-q", str(w.root), env={**env, "XDG_CONFIG_HOME": str(w.home)})
+                (w.root / ".claude").mkdir()
+                release = w.home / ".claude/skills/context-gate-beta/govern/RELEASE"
+                release.parent.mkdir(parents=True)
+                wtext(release, f"v{BETA}\n")
+            finally:
+                self.tmp = outer
+
+        copy_of(("beta-command", "installed"), self.tmp, build)
+        w = Workspace.__new__(Workspace)   # the tree is on disk: attach, write nothing
+        w.root, w.home = self.tmp / "ws", self.tmp / "home"
+        self.entry = w.root / layout.ENTRYPOINT
+        self.env = {k: v for k, v in os.environ.items() if k != "GOVERN_ENGINE"}
+        self.env["HOME"] = str(w.home)
         self.root, self.home = w.root, w.home
         self.env = {**self.env, "XDG_CONFIG_HOME": str(self.home)}
-        self.git("init", "-q", str(self.root))
-        (self.root / ".claude").mkdir()
         self.settings = self.root / ".claude" / "settings.local.json"
         self.plugin_release = self.home / ".claude/skills/context-gate-beta/govern/RELEASE"
-        self.plugin_release.parent.mkdir(parents=True)
-        wtext(self.plugin_release, f"v{BETA}\n")
 
     def git(self, *args: str, env=None) -> subprocess.CompletedProcess:
         """git under the temp HOME: the developer's own git config never reaches a test."""

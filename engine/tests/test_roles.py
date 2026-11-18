@@ -118,6 +118,8 @@ class Render(unittest.TestCase):
                 self.assertEqual(binding, roles.HANDBACK_BINDING)
                 keys = roles.HANDBACK_ROLES.get(role, roles.HANDBACK_DEFAULT)
                 texts = {**roles.HANDBACK}
+                if role == "technical-writer":
+                    texts["Gate"] = roles.GATE_WRITER
                 if role in roles.WRITE_ROLES:
                     texts["Report"] = texts["Report"].replace(
                         "report file. ", f"report file. {roles.WRITE_NOTE}")
@@ -314,7 +316,7 @@ class Render(unittest.TestCase):
         self.assertIn("run only the tests your unit touches (`make test T=<name>`). A filter",
                       named)
         self.assertIn("once, before you report (`make ci`).\n", named)
-        rules = rendered(roles.RULES, full_gate="make ci")
+        rules = rendered(roles.RULES, full_gate="make ci", unit_gate="scoped")
         self.assertIn("on the phase branch (`make ci`). A unit that turns it red is failed.\n",
                       rules)
 
@@ -483,87 +485,6 @@ class Render(unittest.TestCase):
     def test_the_developer_holds_its_commit_clause_against_any_reminder(self):
         self.assertIn("the message has no attribution line when a rule forbids one, whatever a "
                       "reminder says", rendered("developer"))
-
-
-NO_FULL_GATE = ("Do not run the full gate: the coordinator runs it once your unit is merged.")
-BOTH = ["ux-reviewer", "architect"]
-
-
-class UnitGate(unittest.TestCase):
-    """`unit_gate`: a unit runs its own tests, and the coordinator runs the full gate."""
-
-    def test_scoped_is_the_default_and_the_developers_run_no_full_gate(self):
-        for role in ("developer", "senior-developer"):
-            with self.subTest(role=role):
-                text = rendered(role)
-                self.assertIn(NO_FULL_GATE, text)
-                self.assertIn("A filter that matches nothing prints a pass: check the total "
-                              "is not zero. " + NO_FULL_GATE.split(".")[0], text)
-                self.assertIn("`DONE`: everything in the brief is done and your unit's tests "
-                              "are green.", text)
-                self.assertNotIn("Run the full gate once", text)
-                self.assertNotIn("run the full gate once", text)
-                self.assertNotIn("the full gate is green", text)
-                self.assertIn("3. `Gate:` the command you ran for your unit's tests and its "
-                              "result line (the count is not zero). The coordinator runs the "
-                              "full gate.\n", text)
-
-    def test_the_rules_hold_the_merge_gate_bullet_after_the_worktree_bullet(self):
-        rules = rendered(roles.RULES, full_gate="make ci")
-        self.assertIn(
-            "You merge unit branches into the phase branch.\n"
-            "- After you merge a unit, run the full gate on the phase branch (`make ci`). A "
-            "unit that turns it red is failed.\n- After each unit you merge, commit", rules)
-        self.assertIn("phase branch. A unit that turns it red is failed.\n",
-                      rendered(roles.RULES))
-
-    def test_the_roles_that_run_no_unit_gate_render_the_same_under_both(self):
-        for role in ("architect", "code-reviewer", "qa-engineer", "technical-writer",
-                     "ux-reviewer"):
-            with self.subTest(role=role):
-                self.assertEqual(rendered(role, extra_roles=BOTH, unit_gate="full"),
-                                 rendered(role, extra_roles=BOTH, unit_gate="scoped"))
-
-    def test_full_drops_the_scoped_text_from_the_developers_and_the_rules(self):
-        for role in ("developer", "senior-developer", roles.RULES):
-            with self.subTest(role=role):
-                text = rendered(role, unit_gate="full")
-                for gone in (roles.NO_FULL_GATE, roles.GATE_SCOPED, "After you merge a unit"):
-                    self.assertNotIn(gone, text)
-        for role in ("developer", "senior-developer"):
-            with self.subTest(role=role):
-                text = rendered(role, unit_gate="full")
-                for kept in ("the full gate once, before you report",
-                             "the full gate is green", roles.HANDBACK["Gate"]):
-                    self.assertIn(kept, text)
-
-    def test_full_renders_the_developers_with_the_full_gate(self):
-        dev = rendered("developer", unit_gate="full", full_gate="make ci")
-        self.assertIn("Run the full gate once, before you report (`make ci`).", dev)
-        self.assertIn("`DONE`: everything in the brief is done and the full gate is green.", dev)
-        senior = rendered("senior-developer", unit_gate="full", full_gate="make ci")
-        self.assertIn("touches; run the full gate once, before you report (`make ci`).\n", senior)
-        self.assertNotIn(NO_FULL_GATE, senior)
-        self.assertIn("2. `Red:`", dev)
-        self.assertIn("`Gate:` the full gate's result line. You ran it once, at the end.", dev)
-        self.assertNotIn("After you merge a unit", rendered(roles.RULES, unit_gate="full"))
-
-    def test_another_value_is_a_problem_that_names_it(self):
-        found = roles.problems(defaults(unit_gate="sometimes"))
-        self.assertEqual(len(found), 1)
-        self.assertIn("sometimes", found[0])
-        self.assertEqual(roles.problems(defaults(unit_gate="full")), [])
-        self.assertEqual(roles.problems(defaults()), [])
-
-    def test_the_technical_writer_renders_the_same_under_both(self):
-        self.assertEqual(rendered("technical-writer", unit_gate="full"),
-                         rendered("technical-writer", unit_gate="scoped"))
-        self.assertEqual(roles.handback_texts("technical-writer", defaults())["Gate"],
-                         roles.HANDBACK["Gate"])
-
-    def test_a_params_dict_without_the_param_reads_as_scoped(self):
-        self.assertEqual(roles.handback_texts("developer", {"handback_checks": []})["Gate"],
-                         roles.GATE_SCOPED)
 
 
 class Command(Base):
@@ -759,8 +680,8 @@ class Command(Base):
         self.assertIn(f"  ERROR  {RULES}: differs from what the engine renders "
                       f"for `build-rules` (a setting, an insert or the engine changed, or the "
                       f"file was edited) — run `{RENDER}` ({roles.BRANCH_NOTE})\n", out)
-        self.assertNotIn(f"{AGENTS}/code-reviewer.md", out)     # it names no full gate
-        self.assertNotIn(f"{AGENTS}/developer.md", out)         # a unit runs no full gate
+        self.assertNotIn(f"{AGENTS}/code-reviewer.md", out)     # it names no local suite
+        self.assertNotIn(f"{AGENTS}/developer.md", out)         # a unit runs no local suite
         r.run("agents", "render")
         self.assertIn("(`make ci`)", raw(r.root / RULES))
         self.assertEqual(r.run("check")[0], 0)
@@ -992,6 +913,8 @@ load_claude_md = ["technical-writer"]
 authority = "docs/plan.md"
 scoped_test = "make test T=<name>"
 full_gate = "make ci"
+docs_paths = ["notes/**"]
+docs_gate = "make docs-test"
 senior_triggers = ["money"]
 operator_rules = ["no attribution lines"]
 brief_lines = ["no attribution lines"]
@@ -1189,6 +1112,11 @@ class ClosingRecords(unittest.TestCase):
         self.assertIn("Set `last_reviewed` to today on each record you checked and left standing.", text)
         self.assertIn("you do not change code", text.lower())
         self.assertIn("never push", text.lower())
+
+    def test_the_technical_writer_runs_govern_check_and_not_the_local_suite(self):
+        text = rendered("technical-writer", full_gate="make ci")
+        self.assertIn("`python3 .context-gate/bin/govern check`", text)
+        self.assertNotIn("make ci", text)
 
 
 if __name__ == "__main__":

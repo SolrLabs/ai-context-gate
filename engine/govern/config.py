@@ -67,7 +67,7 @@ FACT_LISTS = {("registry", "required_keys")}
 LAYOUT = {
     "governance": {"engine": "str", "source": "str", "profile": "str", "schema": "int",
                    "extensions": "list",
-                   "require_reasons": "bool"},
+                   "require_reasons": "bool", "channel": "str"},
     "dialect": {**{k: "str" for k in DIALECT_DEFAULTS}, "reasons": "table"},
     # `skip`: registry entries, by name, this governance root leaves out entirely (each name is
     # checked against the registry file when `registry.load` reads it).
@@ -107,6 +107,10 @@ SWEEP_STALE_REMOTE_DAYS_DEFAULT = 30
 RETIRED = {("blocks", "placeholder"): "no longer used (it was never read): remove it"}
 
 TYPES = {"str": str, "int": int, "bool": bool, "list": list, "table": dict, "tables": list}
+
+# `[governance] channel`: which engines the launcher runs. "stable" (the default) runs the pin;
+# "beta" runs the newest beta newer than the pinned release, on every machine and in CI.
+CHANNELS = ("stable", "beta")
 
 
 class ConfigError(Exception):
@@ -164,11 +168,14 @@ def series(version: str) -> tuple[int, int]:
     return int(parts[0]), int(parts[1])
 
 
-def check_pin(pin, local: bool = False) -> str | None:
+def check_pin(pin, local: bool = False, channel: str | None = None) -> str | None:
     """A project runs exactly the engine it pins: the same commit gets the same engine on every
     machine and in CI, and upgrading is a deliberate step. A series pin ("0.4") runs within its
     series, with a note, until the project upgrades. Returns that note, or None. `local`: the beta
-    that local.toml names runs whatever release is pinned, so only the version match is skipped."""
+    that local.toml names runs whatever release is pinned, so only the version match is skipped.
+    `channel`: on "beta", the launcher runs a beta newer than the pinned release, so a beta
+    engine whose release is newer than an exact pin, or whose series is newer than a series
+    pin, is accepted; the pin itself is still never a beta."""
     if pin is None:
         raise ConfigError(f"{CONFIG_NAME}: [governance] engine is required — pin the exact "
                           f"engine version this policy was written for (this engine is "
@@ -182,6 +189,13 @@ def check_pin(pin, local: bool = False) -> str | None:
     if local:
         return None
     parts = pin.split(".")
+    if channel == "beta" and versions.is_beta(__version__):
+        release, exact = versions.parse(__version__)[:3], versions.parse(pin)
+        if exact and release > exact[:3]:
+            return None
+        if len(parts) == 2 and all(p.isascii() and p.isdigit() for p in parts) \
+                and release[:2] > tuple(int(p) for p in parts):
+            return None
     if len(parts) == 3:
         if pin != __version__:
             raise ConfigError(f"{CONFIG_NAME} pins engine {pin}, but this is engine "
@@ -420,6 +434,10 @@ def _validate_layout(raw: dict, name: str) -> None:
         v = raw.get("dialect", {}).get(key)
         if v is not None and v not in choices:
             raise ConfigError(f"{name}: [dialect] {key} = '{v}' is not one of {choices}")
+    channel = raw.get("governance", {}).get("channel")
+    if channel is not None and channel not in CHANNELS:
+        raise ConfigError(f"{name}: [governance] channel = {channel!r} is not "
+                          f'"{CHANNELS[0]}" or "{CHANNELS[1]}"')
     for key, value in raw.get("registry", {}).get("keys", {}).items():
         if key not in REGISTRY_KEYS:
             raise ConfigError(f"{name}: [registry.keys] '{key}' is not a key the engine reads "
@@ -786,7 +804,8 @@ def load(root: Path, home: Path, *, pin_check: bool = True) -> Config:
     # The beta local.toml names runs whatever the committed pin is; that pin is for every
     # other machine and CI.
     local = _local_layer(root)
-    pin_note = check_pin(gov.get("engine"), local=bool(local)) if pin_check else None
+    pin_note = check_pin(gov.get("engine"), local=bool(local), channel=gov.get("channel")) \
+        if pin_check else None
     if gov.get("schema", SCHEMA) != SCHEMA:
         raise ConfigError(f"{CONFIG_NAME}: schema {gov.get('schema')} is not supported "
                           f"(this engine reads schema {SCHEMA})")

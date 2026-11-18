@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import contextlib
 import io
+import shutil
 import signal
 import subprocess
 import sys
 import time
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -19,10 +21,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import profile_guard  # noqa: E402,F401
 
 from build_support import *  # noqa: E402,F401,F403
-from govern import drive, drive_log  # noqa: E402
+from govern import drive, drive_log, usage_week  # noqa: E402
+from fixture_cache import copy_of  # noqa: E402
 
 FAKE = '''\
-import json, os, subprocess, sys, time
+import glob, json, os, shutil, subprocess, sys, time
 script = json.load(open(os.environ["FAKE_SCRIPT"], encoding="utf-8"))
 log = os.environ["FAKE_LOG"]
 with open(log, "a", encoding="utf-8") as fh:
@@ -41,6 +44,9 @@ if entry.get("grandchild"):
     child = subprocess.Popen(["sh", "-c", "trap '' TERM; sleep %d" % entry["grandchild"]])
     with open(os.environ["FAKE_PID"], "a", encoding="utf-8") as fh:
         fh.write("%d\\n" % child.pid)
+if entry.get("snapshot"):
+    found = glob.glob(os.path.join(os.environ["FAKE_RUNS"], "*", "status.json"))
+    shutil.copy(found[0], entry["snapshot"])
 for line in entry.get("lines", []):
     print(json.dumps(line), flush=True)
 time.sleep(entry.get("sleep", 0))
@@ -73,7 +79,17 @@ def entry(text=None, pct=40.0, **more) -> dict:
 class Drive(Build):
     def setUp(self) -> None:
         super().setUp()
-        self.w = self.started()
+
+        def make(template: Path) -> None:
+            """The project with `build start p1` run, made once per process."""
+            self.tmp, outer = template, self.tmp
+            try:
+                self.started()
+            finally:
+                self.tmp = outer
+
+        copy_of(("drive.started",), self.tmp, make)
+        self.w = Solo.attach(self.tmp)
         shim = self.w.root / ".context-gate" / "bin" / "govern"
         shim.parent.mkdir(parents=True, exist_ok=True)
         shim.write_text(SHIM.format(engine=str(ENGINE)), encoding="utf-8")
@@ -85,11 +101,12 @@ class Drive(Build):
         path = self.tmp / "script.json"
         path.write_text(json.dumps(script), encoding="utf-8")
         env = {"HOME": str(self.w.home), "FAKE_SCRIPT": str(path), "FAKE_LOG": str(self.log),
-               "FAKE_PID": str(self.tmp / "fake.pids"), "CONTEXT_GATE_NO_UPDATE_CHECK": "1"}
+               "FAKE_PID": str(self.tmp / "fake.pids"), "CONTEXT_GATE_NO_UPDATE_CHECK": "1",
+               "FAKE_RUNS": str(drive_log.log_path(self.w.home).parent / "runs")}
         out = io.StringIO()
         with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(out):
             ctx = self.w.context()
-            code = drive.run(ctx, "plan.md", **{"claude": str(self.fake), **kw})
+            code = drive.run(ctx, "plan.md", **{"claude": str(self.fake), "cap": 90.0, **kw})
         calls = [json.loads(x) for x in self.log.read_text(encoding="utf-8").splitlines()] \
             if self.log.exists() else []
         return code, out.getvalue(), calls
@@ -119,7 +136,8 @@ class Drive(Build):
 
         def fail_check(argv, *a, **kw):
             if "render" in argv:
-                return subprocess.CompletedProcess(argv, 1, "", "roles differ\n")
+                return subprocess.CompletedProcess(
+                    argv, 1, "", "1 file(s) would change\nroles differ\n")
             return real(argv, *a, **kw)
 
         with mock.patch.object(drive.subprocess, "run", fail_check), \
@@ -154,7 +172,7 @@ class Drive(Build):
         runs = list((drive_log.log_path(self.w.home).parent / "runs").iterdir())
         self.assertEqual(len(runs), 1)
         self.assertEqual(sorted(p.name for p in runs[0].iterdir()),
-                         ["1.err", "1.jsonl", "2.err", "2.jsonl"])
+                         ["1.err", "1.jsonl", "2.err", "2.jsonl", "status.json"])
 
     def test_stop_reason_is_printed(self):
         code, out, calls = self.drive([entry(pct=40), entry("x\nLOOP: stop need the owner",
@@ -232,7 +250,7 @@ class Drive(Build):
             entry("c\nLOOP: continue", pct=60, ruling="r3")], cap=75.0)
         self.assertEqual(code, 0, out)
         self.assertEqual(len(calls), 3)
-        self.assertIn("cap reached: 7d at 60%, last step", out)
+        self.assertIn("cap reached: 7d at 60%, cap 75% (--cap), last step", out)
 
     def test_no_event_in_a_session_triggers_a_probe(self):
         code, out, calls = self.drive([entry(pct=40),
@@ -292,7 +310,7 @@ class Drive(Build):
         self.assertEqual(len(calls), 1)
         self.log.unlink()
         code, out, calls = self.drive([entry(pct=95)], cap=90.0)
-        self.assertIn("cap reached: 7d at 95%, before the first session", out)
+        self.assertIn("cap reached: 7d at 95%, cap 90% (--cap), before the first session", out)
 
     @unittest.skipIf(os.name == "nt", "process groups and signals are POSIX")
     def test_hours_kills_a_grandchild_that_ignores_term(self):
@@ -337,7 +355,7 @@ class Drive(Build):
                "CONTEXT_GATE_NO_UPDATE_CHECK": "1"}
         shim = self.w.root / ".context-gate" / "bin" / "govern"
         proc = subprocess.Popen([sys.executable, str(shim), "build", "drive", "plan.md",
-                                 "--claude", str(self.fake)], cwd=str(self.w.root), env=env,
+                                 "--cap", "90", "--claude", str(self.fake)], cwd=str(self.w.root), env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.addCleanup(proc.kill)
         end = time.time() + 30
@@ -352,6 +370,219 @@ class Drive(Build):
         self.assertEqual(proc.returncode, 130, err)
         self.assertIn("interrupted", out)
         self.assertTrue(self.gone(pid, 15))
+
+    def status(self) -> dict:
+        found = list((drive_log.log_path(self.w.home).parent / "runs").glob("*/status.json"))
+        self.assertEqual(len(found), 1)
+        return json.loads(found[0].read_text(encoding="utf-8"))
+
+    KEYS = {"pid", "project", "cwd", "plan", "cap", "cap_source", "hours", "started", "state", "session",
+            "session_started", "seven_day", "last", "next", "units", "stop_reason", "updated"}
+
+    def test_status_file_after_plan_done(self):
+        code, out, calls = self.drive([
+            entry(pct=40),
+            entry("did a step\nLOOP: continue", ruling="step one"),
+            entry("all closed\nLOOP: plan-done", ruling="step two", end=True)])
+        self.assertEqual(code, 0, out)
+        runs = drive_log.log_path(self.w.home).parent / "runs"
+        self.assertIn(f"run folder: {next(runs.iterdir())}\n", out)
+        doc = self.status()
+        self.assertEqual(set(doc), self.KEYS)
+        self.assertEqual((doc["state"], doc["stop_reason"], doc["session"]),
+                         ("stopped", "plan done", 2))
+        self.assertEqual(doc["last"]["kind"], "plan-done")
+        self.assertEqual(doc["project"], self.w.root.name)
+        self.assertEqual(doc["cwd"], str(self.w.root))
+        self.assertEqual(doc["plan"], "plan.md")
+        self.assertEqual(doc["cap"], 90.0)
+        self.assertIsNone(doc["hours"])
+        self.assertEqual(doc["seven_day"], 40.0)
+        self.assertIsNotNone(doc["session_started"])
+        self.assertTrue(doc["updated"])
+        self.assertFalse(next(runs.iterdir()).joinpath("status.json.tmp").exists())
+
+    def test_status_stop_reasons(self):
+        cases = [
+            ("cap reached", [entry(pct=95)], {}),
+            ("session limit", [entry(pct=40), entry("a\nLOOP: continue", ruling="r")],
+             {"max_sessions": 1}),
+            ("time limit", [entry(pct=40), {"lines": [rl(41)], "sleep": 60}], {"hours": 0.001}),
+            ("stop: need the owner", [entry(pct=40), entry("x\nLOOP: stop need the owner",
+                                                           ruling="r")], {}),
+            ("no progress", [entry(pct=40), entry("a\nLOOP: continue"),
+                             entry("b\nLOOP: continue"), entry("c\nLOOP: continue")], {}),
+            ("cap unknown: no usage reading", [{"lines": []}], {}),
+        ]
+        for reason, script, kw in cases:
+            with self.subTest(reason):
+                shutil.rmtree(drive_log.log_path(self.w.home).parent / "runs", ignore_errors=True)
+                self.log.unlink(missing_ok=True)
+                code, out, calls = self.drive(script, **kw)
+                doc = self.status()
+                self.assertEqual(doc["state"], "stopped")
+                self.assertTrue(doc["stop_reason"].startswith(reason), doc["stop_reason"])
+                self.assertIn(doc["stop_reason"], out)
+
+    def test_status_says_in_session_while_the_session_runs(self):
+        seen = self.tmp / "seen.json"
+        code, out, calls = self.drive([
+            entry(pct=40),
+            entry("x\nLOOP: stop r", ruling="r", snapshot=str(seen))])
+        self.assertEqual(code, 0, out)
+        doc = json.loads(seen.read_text(encoding="utf-8"))
+        self.assertEqual((doc["state"], doc["session"]), ("in_session", 1))
+        self.assertIsNotNone(doc["session_started"])
+        self.assertIsNone(doc["last"])
+
+    def test_status_says_interrupted(self):
+        with mock.patch.object(drive, "_session", side_effect=drive._Interrupted):
+            code, out, calls = self.drive([entry(pct=40)])
+        self.assertEqual(code, 130)
+        doc = self.status()
+        self.assertEqual((doc["state"], doc["stop_reason"]), ("stopped", "interrupted"))
+        self.assertEqual(doc["session"], 1)
+
+    def test_a_stop_before_the_run_folder_writes_nothing(self):
+        code, out, calls = self.drive([entry(pct=40)], compact_pct="5")
+        self.assertEqual(code, 1)
+        self.assertFalse((drive_log.log_path(self.w.home).parent / "runs").exists())
+
+    def test_roles_check_render_check_that_cannot_start_exits_1(self):
+        err = io.StringIO()
+        real = subprocess.run
+
+        def cannot_start(argv, *a, **kw):
+            if "render" in argv:
+                raise OSError("no such interpreter")
+            return real(argv, *a, **kw)
+
+        with mock.patch.object(drive.subprocess, "run", cannot_start), \
+                contextlib.redirect_stderr(err):
+            code, out, calls = self.drive([entry(pct=40)])
+        self.assertEqual((code, calls), (1, []))
+        self.assertIn("agents render --check failed", err.getvalue())
+        self.assertIn("no such interpreter", err.getvalue())
+        self.assertNotIn("are stale", err.getvalue())
+
+    def test_roles_check_a_failing_check_without_changes_is_not_called_stale(self):
+        err = io.StringIO()
+        real = subprocess.run
+
+        def broken(argv, *a, **kw):
+            if "render" in argv:
+                return subprocess.CompletedProcess(argv, 2, "", "Traceback\nboom\n")
+            return real(argv, *a, **kw)
+
+        with mock.patch.object(drive.subprocess, "run", broken), \
+                contextlib.redirect_stderr(err):
+            code, out, calls = self.drive([entry(pct=40)])
+        self.assertEqual((code, calls), (1, []))
+        self.assertIn("error: agent roles: python3 .context-gate/bin/govern agents render "
+                      "--check failed\nboom\n", err.getvalue())
+        self.assertNotIn("are stale", err.getvalue())
+
+    def test_roles_check_rendered_roles_let_the_driver_start(self):
+        config = self.w.root / layout.CONFIG
+        config.write_text(config.read_text(encoding="utf-8")
+                          + '\n[checks.agent-roles]\nlevel = "warn"\n', encoding="utf-8")
+        code, out, err = self.w.run("agents", "render")
+        self.assertEqual(code, 0, out + err)
+        code, out, calls = self.drive([entry(pct=40), entry("x\nLOOP: stop r", ruling="r")])
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(calls), 2)
+
+    NOON = datetime(2026, 7, 15, 12, 0, 0)
+
+    def seed_week(self, start=44.0, weight_today=None, reset=True):
+        """A home whose window resets at midnight three days on (three days of weight 1 are left, so
+        the allowance is (100 - start) / 3), with `start` as the figure when today began."""
+        cap = usage_week.load_capture(self.w.home)
+        today = self.NOON.date()
+        r = int(cap.midnight(today + timedelta(days=3)))
+        state = self.w.home / ".local" / "state" / "context-gate" / "usage"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "days.json").write_text(json.dumps(
+            {"": {today.isoformat(): [[r, start, start]]}}), encoding="utf-8")
+        if reset:
+            (state / "sess.json").write_text(json.dumps(
+                {"rate_limits": {"seven_day": {"resets_at": r}}}), encoding="utf-8")
+        if weight_today is not None:
+            share = self.w.home / ".local" / "share" / "context-gate"
+            share.mkdir(parents=True, exist_ok=True)
+            day = cap.DAY_NAMES[today.weekday()]
+            (share / "usage-week.toml").write_text(
+                f"[weekly]\nweights = {{ {day} = {weight_today} }}\n", encoding="utf-8")
+        return r
+
+    def drive_today(self, script, clock=None, **kw):
+        """`drive` with no cap; the clock reads each of `clock`, then stays on the last."""
+        times = list(clock or [self.NOON.timestamp()])
+        with mock.patch("govern.drive._now", side_effect=lambda: times.pop(0) if len(times) > 1
+                        else times[0]):
+            return self.drive(script, cap=None, **kw)
+
+    def test_default_cap_is_todays_line(self):
+        self.seed_week(start=40.0)
+        code, out, calls = self.drive_today([
+            entry(pct=50), entry("a\nLOOP: continue", pct=50, ruling="r1"),
+            entry("b\nLOOP: continue", pct=60, ruling="r2")])
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(calls), 3)
+        self.assertIn("session 1: continue", out)
+        self.assertIn("7d 50%, cap 60% (today)", out)
+        self.assertIn("cap reached: 7d at 60%, cap 60% (today), last step", out)
+        doc = self.status()
+        self.assertEqual((doc["cap"], doc["cap_source"]), (60.0, "today"))
+
+    def test_explicit_cap_wins_and_ignores_the_line(self):
+        self.seed_week(reset=False)
+        code, out, calls = self.drive([entry(pct=50), entry("a\nLOOP: plan-done", pct=51,
+                                                            end=True)], cap=75.0)
+        self.assertEqual(code, 0, out)
+        self.assertIn("7d 51%, cap 75% (--cap)", out)
+        doc = self.status()
+        self.assertEqual((doc["cap"], doc["cap_source"]), (75.0, "--cap"))
+
+    def test_a_run_past_midnight_takes_the_new_days_line(self):
+        self.seed_week(start=40.0)
+        noon = self.NOON.timestamp()
+        code, out, calls = self.drive_today([
+            entry(pct=50), entry("a\nLOOP: continue", pct=50, ruling="r1"),
+            entry("b\nLOOP: plan-done", pct=70, ruling="r2", end=True)],
+            clock=[noon, noon + 86400, noon + 86400])
+        self.assertEqual(code, 0, out)
+        self.assertIn("7d 50%, cap 60% (today)", out)
+        self.assertIn("7d 70%, cap 75% (today)", out)
+
+    def test_an_off_day_stops_as_cap_unknown(self):
+        self.seed_week(weight_today=0)
+        code, out, calls = self.drive_today([entry(pct=50)])
+        self.assertEqual((code, len(calls)), (0, 1))
+        self.assertIn("cap unknown: off day", out)
+        doc = self.status()
+        self.assertEqual((doc["cap"], doc["cap_source"], doc["stop_reason"]),
+                         (None, "today", "cap unknown: off day"))
+
+    def test_no_reset_time_stops_as_cap_unknown(self):
+        self.seed_week(reset=False)
+        code, out, calls = self.drive_today([entry(pct=50)])
+        self.assertEqual((code, len(calls)), (0, 1))
+        self.assertIn("cap unknown: no reset time", out)
+
+    def test_no_reading_stops_as_cap_unknown(self):
+        self.seed_week()
+        code, out, calls = self.drive_today([{"lines": []}])
+        self.assertIn("cap unknown: no usage reading", out)
+
+    def test_stream_reset_reads_the_window_next_to_the_utilization(self):
+        def event(**week):
+            return json.dumps({"type": "rate_limit_event", "rate_limit_info": {
+                "unifiedWindows": {"seven_day": {"utilization": 0.4, **week}}}})
+        self.assertEqual(drive.stream_reset([event(resets_at=1800000000)]), 1800000000.0)
+        self.assertEqual(drive.stream_reset([event(resetsAt=1800000000000)]), 1800000000.0)
+        self.assertIsNone(drive.stream_reset([event()]))
+        self.assertIsNone(drive.stream_reset(["not json"]))
 
     def test_cli_drive_report(self):
         code, out, err = self.w.run("build", "drive-report")

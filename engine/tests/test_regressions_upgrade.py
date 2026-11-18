@@ -17,6 +17,8 @@ import profile_guard  # noqa: E402,F401
 
 from regressions_support import *  # noqa: E402,F401,F403
 
+TIER = "e2e"
+
 class UpgradeRefreshesBlocks(Base):
     """An upgrade regenerates every generated block with the engine it pins, so it never turns a
     project red: a doc under a nested `build/` that 0.4.1 governed (its excludes matched only at

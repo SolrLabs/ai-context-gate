@@ -31,7 +31,7 @@ import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from govern import agent_runs, config, layout, phase, profile, registry, roles, tomlw
+from govern import agent_runs, config, gitq, layout, phase, profile, registry, roles, tomlw
 from govern.decisions import mask_lines
 from govern.text import Markers
 
@@ -448,7 +448,7 @@ def _state_repo(state: Path) -> Path:
     folder = state
     while not folder.is_dir() and folder != folder.parent:
         folder = folder.parent
-    res = phase._git(folder, "rev-parse", "--show-toplevel")
+    res = gitq.toplevel(folder)
     if res is None or res.returncode != 0:
         raise BuildError(f"{state} is not in a git repository: "
                          + ("git could not run" if res is None else phase._reason(res)))
@@ -460,7 +460,7 @@ def _team(root: Path) -> tuple[list[tuple[Ledger, str]], list[tuple[str, str]], 
     protects its own branch, and one warning names it on stderr."""
     from govern import base
     try:
-        remotes = sorted(phase._ask(root, "remote").split(), key=len, reverse=True)
+        remotes = sorted(gitq.remotes(root), key=len, reverse=True)
         res = phase._run(root, "for-each-ref", "--format=%(refname)", "refs/remotes")
     except phase.PhaseError as exc:
         return [], [], [BuildError(str(exc))]
@@ -515,7 +515,7 @@ def open_builds(path: Path, remote: bool = True) -> tuple[list[tuple[str, str]],
     branch (`team_ledgers`) not already listed. When git cannot name the top (no repository, or
     git cannot run) it is `([], [])` and the caller's own check refuses. A git call that fails
     after that is an error, never an empty answer."""
-    top = phase._git(path, "rev-parse", "--show-toplevel")
+    top = gitq.toplevel(path)
     if top is None or top.returncode != 0:
         return [], []     # no repository, or git cannot run: `phase.plan` refuses on its own check
     root = Path(phase._out(top))
@@ -573,7 +573,7 @@ def current(root: Path, branch: str) -> Ledger | None:
 
 def checked_out(root: Path) -> str:
     """The checked-out branch, or "" on a detached HEAD. Raises when git cannot say."""
-    if not phase._test(root, "rev-parse", "--git-dir"):
+    if not gitq.git_dir_ok(root):
         raise BuildError("not inside a git repository")
     res = phase._run(root, "symbolic-ref", "--quiet", "--short", "HEAD")
     return phase._out(res) if res.returncode == 0 else ""
@@ -586,7 +586,7 @@ def _known(root: Path, ref: str) -> bool:
 def _remote(root: Path, branch: str) -> str | None:
     """The remote whose default branch this repository answers to: the branch's upstream's,
     else the only one, else `origin`. None when the repository has no remote."""
-    remotes = phase._ask(root, "remote").split()
+    remotes = gitq.remotes(root)
     if not remotes:
         return None
     mine = phase._ask(root, "for-each-ref", "--format=%(upstream:remotename)",
@@ -613,7 +613,7 @@ def default_branch(root: Path, branch: str) -> tuple[str, list[str]]:
             raise BuildError("cannot tell which branch is the default: this repository has no "
                              "remote, and no branch named main or master")
         return local[0], [f"refs/heads/{local[0]}"]
-    name = phase._default_branch(root, remote)
+    name = gitq.default_branch(root, remote)
     refs = [r for r in (f"refs/remotes/{remote}/{name}", f"refs/heads/{name}") if _known(root, r)]
     if not refs and name != branch:
         raise BuildError(f"{remote}/{name} is not known here: run git fetch {remote}")
@@ -1061,7 +1061,7 @@ def _top(folder: Path) -> bool:
     lock) raises `BuildError`, never False."""
     if not folder.is_dir():
         return False
-    res = phase._git(folder, "rev-parse", "--show-toplevel")
+    res = gitq.toplevel(folder)
     if res is None:
         raise BuildError(f"cannot tell whether {folder} is a repository: git could not run")
     if res.returncode != 0:
@@ -1139,10 +1139,27 @@ def _folder(ctx, project: str | None) -> str:
     return str(scope.get("dir")) if scope is not None and scope.get("dir") else ""
 
 
-def _need(ctx, project: str | None = None) -> Ledger:
-    """The checked-out branch's ledger, for a command that has nothing to do without one."""
+def _linked_worktree(root: Path) -> bool:
+    """True when `root` is in a linked git worktree, not the main checkout; False when git cannot
+    say."""
+    try:
+        here = phase._out(phase._run(root, "rev-parse", "--git-dir"))
+        common = phase._out(phase._run(root, "rev-parse", "--git-common-dir"))
+    except phase.PhaseError:
+        return False
+    if not here or not common:
+        return False
+    return (root / here).resolve() != (root / common).resolve()
+
+
+def _need(ctx, project: str | None = None, lone: bool = False) -> Ledger:
+    """The checked-out branch's ledger, for a command that has nothing to do without one. With
+    `lone`, a linked worktree on a branch no ledger names uses the one ledger it holds."""
     branch = checked_out(ctx.root)
     ledger = current(ctx.root, branch) if branch else None
+    if ledger is None and lone and _linked_worktree(ctx.root):
+        good, _ = ledgers(ctx.root)
+        ledger = good[0] if len(good) == 1 else None
     if ledger is None:
         said = nothing_in_flight(branch, project)
         raise BuildError(said[0].lower() + said[1:])
@@ -1170,7 +1187,7 @@ def _commits_since(root: Path, base: str) -> int:
 def git_email(root: Path) -> str | None:
     """`git config user.email` in `root`; None when git cannot say or it is not set."""
     try:
-        res = phase._run(root, "config", "user.email")
+        res = gitq.config_get(root, "user.email")
     except phase.PhaseError:
         return None
     text = phase._out(res)
@@ -1491,7 +1508,7 @@ def unit_drop(ctx, uid: str, project: str | None = None) -> int:
 def _branch_tree(root: Path, branch: str) -> Path | None:
     """The project's folder in the other worktree that has `branch` checked out; None when no
     worktree has it, or it is the checkout the command runs in."""
-    here = Path(phase._ask(root, "rev-parse", "--show-toplevel")).resolve()
+    here = Path(gitq.toplevel_text(root)).resolve()
     tree = phase._worktrees(root).get(branch)
     if tree is None or Path(tree).resolve() == here:
         return None
@@ -1698,7 +1715,7 @@ def _handback(ctx, ledger: Ledger, unit: dict, branch: str) -> tuple[list[str], 
     tree = _branch_tree(root, branch)
     top = None
     if tree is not None:
-        top = Path(phase._ask(tree, "rev-parse", "--show-toplevel"))
+        top = Path(gitq.toplevel_text(tree))
         res = phase._run(tree, "status", "--porcelain", "-z", "--untracked-files=all")
         if res.returncode != 0:
             raise BuildError(f"git status failed in {tree}: {phase._reason(res)}")
@@ -1818,7 +1835,7 @@ def _full_gate(ctx) -> str:
 
 
 def _unit_gate(ctx) -> str:
-    return _gate_params(ctx).get("unit_gate", "scoped")
+    return _gate_params(ctx).get("unit_gate", roles.DEFAULT_UNIT_GATE)
 
 
 def _gate_record(ledger: Ledger) -> dict | None:
@@ -1846,6 +1863,50 @@ def _outside_build(root: Path, *args: str) -> list[str] | None:
     if res.returncode != 0:
         return None
     return [ln for ln in phase._out(res).splitlines() if ln.strip()]
+
+
+def _docs_paths(ctx) -> list[str]:
+    value = _gate_params(ctx).get("docs_paths", ["docs/**", "*.md"])
+    return [str(p) for p in value] if isinstance(value, list) else []
+
+
+@functools.lru_cache(maxsize=None)
+def _glob(pattern: str) -> re.Pattern:
+    """`pattern` as a regex: `*` and `?` stay inside one path part, `**` crosses any number of
+    parts, none included (`a/**/b` matches `a/b`)."""
+    out, i = [], 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return re.compile("".join(out))
+
+
+def _is_docs(path: str, patterns: list[str]) -> bool:
+    """Whether `path` (from the repository root, `/` separated) matches one of `patterns`."""
+    return any(_glob(p).fullmatch(path) for p in patterns)
+
+
+def _code_changes(ctx, head: str) -> list[str] | None:
+    """The paths changed between `head` and HEAD outside the build folder and `docs_paths`; None
+    when git cannot say."""
+    moved = _outside_build(ctx.root, "diff", "--name-only", head, "HEAD")
+    if moved is None:
+        return None
+    docs = _docs_paths(ctx)
+    return [m for m in moved if not _is_docs(m, docs)]
 
 
 def _now() -> str:
@@ -1876,17 +1937,76 @@ def _run_check(session: Path | None, ctx, project: str | None) -> tuple[int, str
     return (rc or 0), out.getvalue()
 
 
+def _docs_only(ctx, ledger: Ledger) -> bool:
+    """Whether the last record is green and clean, the tree has no uncommitted change outside the
+    build folder, and every path changed since the record's head is a `docs_paths` path (at least
+    one): then only `govern check` has to run."""
+    rec = _gate_record(ledger)
+    if rec is None or rec.get("status") != "done" or rec.get("rc") != 0 \
+            or rec.get("dirty") is not False or not rec.get("head"):
+        return False
+    if _outside_build(ctx.root, "status", "--porcelain") != []:
+        return False
+    head = str(rec["head"])
+    moved = _outside_build(ctx.root, "diff", "--name-only", head, "HEAD")
+    code = _code_changes(ctx, head)
+    return bool(moved) and code == []
+
+
+def _gate_docs(ctx, ledger: Ledger, project: str | None, session: Path | None) -> int:
+    """`build gate` for a docs-only change: `govern check`, and `docs_gate` when one is set,
+    recorded at HEAD."""
+    root = ctx.root
+    record, log = ledger.dir / GATE_RECORD, ledger.dir / GATE_LOG
+    log.parent.mkdir(parents=True, exist_ok=True)
+    head = _head(root)
+    started = time.monotonic()
+    check_rc, check_text = _run_check(session, ctx, project)
+    log.write_text("== govern check ==\n" + check_text, encoding="utf-8")
+    docs_cmd = str(_gate_params(ctx).get("docs_gate", "") or "").strip()
+    docs_rc = 0
+    if docs_cmd:
+        with open(log, "ab") as out:
+            out.write(b"\n== docs_gate ==\n")
+            out.flush()
+            docs_rc = subprocess.run(docs_cmd, shell=True, cwd=root, stdin=subprocess.DEVNULL,
+                                     stdout=out, stderr=subprocess.STDOUT).returncode
+    rc = docs_rc or check_rc
+    cmd = f"govern check; {docs_cmd}" if docs_cmd else "govern check"
+    seconds = round(time.monotonic() - started)
+    dirty = _head(root) != head
+    _write_record(record, {"status": "done", "rc": rc, "check_rc": check_rc, "head": head,
+                           "dirty": dirty, "seconds": seconds, "at": _now(),
+                           "cmd": cmd, "scope": "docs"})
+    what = "govern check" + (" and docs_gate" if docs_cmd else "")
+    lines = [f"gate {'green' if rc == 0 else 'red'} (docs only: {what}, rc "
+             f"{rc}, {seconds} s, head {head[:7]})",
+             f"log: {_local(_base(root, log), log)}"]
+    if docs_rc:
+        lines.append(f"docs_gate: red (rc {docs_rc}): {docs_cmd}")
+    if check_rc:
+        lines.append("check: red (govern check" + (f" --project {project}" if project else "") + ")")
+        wrong = [ln for ln in check_text.splitlines() if re.search(r"error|ERROR|FAIL", ln)]
+        lines += wrong[:GATE_TAIL] if wrong else check_text.splitlines()[-GATE_TAIL:]
+    _say(lines)
+    return 0 if rc == 0 else 1
+
+
 def gate(ctx, cmd: str | None = None, project: str | None = None,
          session: Path | None = None) -> int:
-    """Run the project's full gate and its `govern check`; record the result for this phase
-    unless `cmd` is given, which runs only that command."""
-    ledger = _need(ctx, project)
+    """Run the project's local suite and its `govern check`; record the result for this phase
+    unless `cmd` is given, which runs only that command. After a green, clean run, a tree whose
+    only changes since are `docs_paths` runs only `govern check`. In a linked worktree on a branch
+    no ledger names, the one ledger there is used."""
+    ledger = _need(ctx, project, lone=True)
     root = ctx.root
     run_cmd = cmd or _full_gate(ctx)
     if not run_cmd:
         print("no full_gate set under [checks.agent-roles]; nothing was run")
         return 1
     record, log = ledger.dir / GATE_RECORD, ledger.dir / GATE_LOG
+    if not cmd and _docs_only(ctx, ledger):
+        return _gate_docs(ctx, ledger, project, session)
     if not cmd:
         _write_record(record, {"status": "running", "at": _now()})
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -1913,7 +2033,7 @@ def gate(ctx, cmd: str | None = None, project: str | None = None,
     if not cmd:
         _write_record(record, {"status": "done", "rc": rc, "check_rc": check_rc, "head": head,
                                "dirty": dirty, "seconds": seconds,
-                               "at": _now(), "cmd": run_cmd})
+                               "at": _now(), "cmd": run_cmd, "scope": "full"})
     lines = [f"gate {'green' if rc == 0 else 'red'} (rc {rc}, {seconds} s, head {head[:7]})"]
     lines.append(f"log: {_local(_base(root, log), log)}")
     if gate_rc:
@@ -1926,33 +2046,75 @@ def gate(ctx, cmd: str | None = None, project: str | None = None,
     return 0 if rc == 0 else 1
 
 
-def _need_green(ctx, ledger: Ledger, step: str) -> str | None:
-    """Why `step` may not go on: the phase's last full gate is red, missing or stale; None when
-    it is green for this tree. Work under the build folder does not make a record stale."""
-    tail = f": {AFTER_RED}"
-    rec = _gate_record(ledger)
+def _why_not_green(ctx, rec: dict | None) -> str | None:
+    """Why the gate record `rec` does not vouch for this tree: red, missing or stale; None when
+    it does. Work under the build folder and `docs_paths` does not make a record stale."""
     if rec is None or rec.get("status") != "done":
-        return f"cannot {step}: no full gate has run on this phase{tail}"
+        return "no local suite run on this phase"
     head = str(rec.get("head") or "")
     short = head[:7]
     if rec.get("rc") != 0:
-        return f"cannot {step}: the last full gate is red (rc {rec.get('rc')} at {short}){tail}"
+        return f"the last local suite run is red (rc {rec.get('rc')} at {short})"
     if rec.get("dirty") is not False:
-        return (f"cannot {step}: the last full gate is stale: the tree had uncommitted changes "
-                f"at {short}{tail}")
-    moved = _outside_build(ctx.root, "diff", "--name-only", head, "HEAD") if head else None
+        return (f"the last local suite run is stale: the tree had uncommitted changes "
+                f"at {short}")
+    moved = _code_changes(ctx, head) if head else None
     if moved is None:
-        return (f"cannot {step}: the last full gate is stale: git cannot compare {short} with "
-                f"HEAD{tail}")
+        return f"the last local suite run is stale: git cannot compare {short} with HEAD"
     if moved:
-        return (f"cannot {step}: the last full gate is stale: {len(moved)} files changed since "
-                f"{short}{tail}")
+        return (f"the last local suite run is stale: {len(moved)} files changed since "
+                f"{short}")
     return None
+
+
+def _unit_note(ctx, ledger: Ledger) -> str:
+    """`; gate/<id>.json ...` for the newest unit record that does not vouch for this tree: still
+    running, red or stale; empty when there is none."""
+    paths = []
+    for path in (ledger.dir / "gate").glob("*.json"):
+        if path.name != Path(GATE_RECORD).name:
+            try:
+                paths.append((path.stat().st_mtime, path))
+            except OSError:
+                continue
+    for _, path in sorted(paths, reverse=True):
+        try:
+            rec = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("status") == "running":
+            return f"; gate/{path.name} is still running"
+        why = _why_not_green(ctx, rec)
+        if why and rec.get("status") == "done":
+            return f"; gate/{path.name} " + why.removeprefix("the last local suite run ")
+    return ""
+
+
+def _need_green(ctx, ledger: Ledger, step: str) -> str | None:
+    """Why `step` may not go on: neither the phase's last local suite run nor any unit's own
+    record (`gate/<id>.json`, handed over by `unit set done --branch`) is green for this tree;
+    None when one is. The refusal reports on the last run."""
+    tail = f": {AFTER_RED}"
+    why = _why_not_green(ctx, _gate_record(ledger))
+    if why is None:
+        return None
+    for path in sorted((ledger.dir / "gate").glob("*.json")):
+        if path.name == Path(GATE_RECORD).name:
+            continue
+        try:
+            rec = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(rec, dict) and _why_not_green(ctx, rec) is None:
+            return None
+    return f"cannot {step}: {why}{_unit_note(ctx, ledger)}{tail}"
 
 
 def _gated(ctx, ledger: Ledger, step: str, accept_red: str | None,
            project: str | None) -> Ledger:
-    """Refuse `step` unless the full gate is green; `accept_red` lets it through with a ruling.
+    """Refuse `step` unless the local suite is green; `accept_red` lets it through with a ruling.
     Returns the ledger to go on with: reloaded when the ruling changed it."""
     refusal = _need_green(ctx, ledger, step)
     if refusal is None:
@@ -1962,6 +2124,21 @@ def _gated(ctx, ledger: Ledger, step: str, accept_red: str | None,
     what = refusal.split(": ", 1)[1].rsplit(": " + AFTER_RED, 1)[0]
     ruling(ctx, f"{step} accepted although {what}. Reason: {accept_red}", project)
     return _need(ctx, project)
+
+
+def _take_unit_gate(ctx, ledger: Ledger, uid: str, branch: str) -> list[str]:
+    """Copy the gate record `branch`'s worktree holds for this phase to `gate/<uid>.json` here;
+    the worktree is only read. The line to say: what was copied, or why nothing was."""
+    tree = _branch_tree(ctx.root, branch)
+    if tree is None:
+        return [f"no worktree has {branch} checked out; no gate record copied"]
+    src = tree / BUILD_DIR / ledger.dir.name / GATE_RECORD
+    if not src.is_file():
+        return [f"the worktree of {branch} has no gate record; none copied"]
+    dest = ledger.dir / "gate" / f"{uid}.json"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest)
+    return [f"copied the gate record of {branch} to {_local(_base(ctx.root, dest), dest)}"]
 
 
 def unit_set(ctx, uid: str, status: str, branch: str | None, commit: str | None,
@@ -1982,7 +2159,10 @@ def unit_set(ctx, uid: str, status: str, branch: str | None, commit: str | None,
                              + " — nothing was changed")
         for w in warnings:
             print(f"warning: {w}", file=sys.stderr)
+    handed: list[str] = []
     if status == "done" and _full_gate(ctx) and _unit_gate(ctx) == "scoped":
+        if branch:
+            handed = _take_unit_gate(ctx, ledger, uid, branch)
         ledger = _gated(ctx, ledger, f"mark {uid} done", accept_red, project)
         unit = ledger.unit(uid)
     earlier, unit["role"] = unit["role"], role
@@ -2005,6 +2185,7 @@ def unit_set(ctx, uid: str, status: str, branch: str | None, commit: str | None,
     said = [f"unit {uid} is {status}"
             + (f" (attempt {unit['attempts']})" if status == "running" else "")
             + (f", now for {role}" if role != earlier else "")]
+    said += handed
     if status == "done" and branch:
         said += _copy_from_branch(ctx.root, branch, f"{BUILD_DIR}/{ledger.dir.name}/{uid}", False,
                                   state_root(ctx.root))

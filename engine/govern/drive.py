@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -17,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import govern
-from govern import coordinator_runs, drive_log, versions
+from govern import coordinator_runs, drive_log, usage, usage_week, versions
 from govern.build import _say as _say_raw
 
 PROMPT = Path(__file__).resolve().parent / "templates" / "drive-prompt.md"
@@ -64,6 +65,25 @@ def stream_reading(lines) -> float | None:
     return None
 
 
+def stream_reset(lines) -> float | None:
+    """The seven-day window's reset, as epoch seconds, from the first `rate_limit_event` of a
+    stream that carries one next to the utilization; None when it does not."""
+    for event in _events(lines):
+        if event.get("type") != "rate_limit_event":
+            continue
+        info = event.get("rate_limit_info")
+        windows = info.get("unifiedWindows") if isinstance(info, dict) else None
+        week = windows.get("seven_day") if isinstance(windows, dict) else None
+        if not isinstance(week, dict):
+            return None
+        for key in ("resets_at", "resetsAt", "reset_at", "resetAt"):
+            value = week.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+                return float(value) / 1000 if value > 1e11 else float(value)
+        return None
+    return None
+
+
 def _argv(claude: str, *args: str) -> list[str]:
     return [sys.executable, claude, *args] if claude.endswith(".py") else [claude, *args]
 
@@ -71,6 +91,13 @@ def _argv(claude: str, *args: str) -> list[str]:
 def probe_reading(claude: str, cwd: Path | None = None) -> tuple[float | None, str | None]:
     """The weekly usage as one cheap throwaway session reports it: (reading, why). `why` says
     the probe did not run or failed; a probe that ran cleanly with no event gives (None, None)."""
+    reading, _reset, why = probe_full(claude, cwd)
+    return reading, why
+
+
+def probe_full(claude: str, cwd: Path | None = None) -> tuple[float | None, float | None,
+                                                               str | None]:
+    """`probe_reading` and the seven-day reset the same event carries: (reading, reset, why)."""
     argv = _argv(claude, "-p", "Reply with OK.", "--model", "haiku", "--max-turns", "1",
                  "--output-format", "stream-json", "--verbose")
     try:
@@ -78,15 +105,16 @@ def probe_reading(claude: str, cwd: Path | None = None) -> tuple[float | None, s
                              encoding="utf-8", errors="replace", timeout=PROBE_TIMEOUT,
                              cwd=str(cwd) if cwd else None)
     except subprocess.TimeoutExpired:
-        return None, f"timeout after {PROBE_TIMEOUT}s"
+        return None, None, f"timeout after {PROBE_TIMEOUT}s"
     except (OSError, subprocess.SubprocessError) as exc:
-        return None, f"did not start ({exc})"
-    reading = stream_reading(res.stdout.splitlines())
+        return None, None, f"did not start ({exc})"
+    lines = res.stdout.splitlines()
+    reading = stream_reading(lines)
     if reading is not None:
-        return reading, None
+        return reading, stream_reset(lines), None
     if res.returncode != 0:
-        return None, f"exit status {res.returncode}"
-    return None, None
+        return None, None, f"exit status {res.returncode}"
+    return None, None, None
 
 
 def over_cap(readings: list[float], cap: float) -> bool:
@@ -96,6 +124,53 @@ def over_cap(readings: list[float], cap: float) -> bool:
         return True
     rises = [b - a for a, b in zip(readings, readings[1:]) if b > a]
     return readings[-1] + max(rises, default=0) >= cap
+
+
+def _now() -> float:
+    return time.time()
+
+
+def _state_reset(home: Path, now: float) -> float | None:
+    """The seven-day reset, still ahead, in the newest usage snapshot that holds one."""
+    try:
+        files = sorted(usage.state_dir(home).glob("*.json"), key=lambda p: p.stat().st_mtime,
+                       reverse=True)
+    except OSError:
+        return None
+    for path in files:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            week = data["rate_limits"]["seven_day"]["resets_at"]
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if isinstance(week, (int, float)) and not isinstance(week, bool) and week > now:
+            return float(week)
+    return None
+
+
+def today_line(home: Path, reading: float | None, reset: float | None,
+               now: float) -> tuple[float | None, str | None]:
+    """(today's line, why not): the weekly figure when today began plus today's allowance, with
+    the numbers the status row uses. The line is None, with the reason, on an off day or with no
+    reading or no reset time."""
+    if reading is None:
+        return None, "no usage reading"
+    if reset is None:
+        reset = _state_reset(home, now)
+    if reset is None:
+        return None, "no reset time"
+    cap = usage_week.load_capture(home)
+    weights, day_end, _cut = cap.week_settings(cap.PROFILE)
+    date = time.strftime("%Y-%m-%d", time.localtime(now))
+    start = cap.day_start(cap.read_days(), cap.PROFILE, reset, date)
+    allow, _ends, zero = cap.allowance(reading, reset, now, weights, day_end, start)
+    if zero:
+        return None, "off day"
+    if reset - cap.WEEK >= cap.midnight(datetime.fromtimestamp(now).date()):
+        start = 0.0                       # the window opened today
+    elif start is None:
+        start = reading
+    return start + allow, None
 
 
 def _status(ctx, project: str | None) -> tuple[str, dict] | None:
@@ -121,18 +196,18 @@ def skill_command(plan: str) -> str:
 
 
 def _roles_stale(ctx) -> str | None:
-    """None when `agents render --check` passes; else the reason, its last output line if any."""
+    """None when `agents render --check` passes; else its whole output (the error's text when
+    the check could not start)."""
     argv = [sys.executable, str(ctx.root / ".context-gate" / "bin" / "govern"), "agents",
             "render", "--check"]
     try:
         res = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
                              encoding="utf-8", errors="replace", cwd=str(ctx.root))
-    except OSError:
-        return ""
+    except OSError as exc:
+        return str(exc)
     if res.returncode == 0:
         return None
-    lines = [ln.strip() for ln in (res.stdout + res.stderr).splitlines() if ln.strip()]
-    return lines[-1] if lines else ""
+    return res.stdout + res.stderr
 
 
 def _exit_line(result: dict | None) -> str | None:
@@ -225,7 +300,47 @@ def _confirmed_done(data: dict) -> bool:
                     for u in (units if isinstance(units, list) else [])))
 
 
-def run(ctx, plan, cap=90.0, hours=None, max_sessions=50, compact_pct="50",
+class _Status:
+    """`status.json` in the run folder: one small file that says what the driver is doing, kept
+    current by atomic replace. Nothing is written before `begin`."""
+
+    def __init__(self, ctx, plan, cap, hours) -> None:
+        self.folder: Path | None = None
+        self.doc = {
+            "pid": os.getpid(), "project": ctx.root.name, "cwd": str(ctx.root), "plan": plan,
+            "cap": cap, "cap_source": "today" if cap is None else "--cap", "hours": hours, "started": _utc(time.time()), "state": "starting",
+            "session": 0, "session_started": None, "seven_day": None, "last": None,
+            "next": None, "units": None, "stop_reason": None, "updated": None}
+
+    def begin(self, folder: Path, data: dict) -> None:
+        self.folder = folder
+        self.write(**self.progress(data))
+
+    @staticmethod
+    def progress(data: dict) -> dict:
+        nxt, done, total = data.get("next"), data.get("done"), data.get("total")
+        ok = all(isinstance(v, int) and not isinstance(v, bool) for v in (done, total))
+        return {"next": nxt if isinstance(nxt, str) else None,
+                "units": f"{done}/{total} units done" if ok else None}
+
+    def write(self, **fields) -> None:
+        if self.folder is None:
+            return
+        self.doc.update(fields)
+        self.doc["updated"] = _utc(time.time())
+        path = self.folder / "status.json"
+        tmp = path.with_name("status.json.tmp")
+        try:
+            tmp.write_text(json.dumps(self.doc, indent=2) + "\n", encoding="utf-8", newline="\n")
+            os.replace(tmp, path)
+        except OSError:
+            pass            # the file is a view of the run; losing a write must not stop it
+
+    def stop(self, reason: str) -> None:
+        self.write(state="stopped", stop_reason=reason)
+
+
+def run(ctx, plan, cap=None, hours=None, max_sessions=50, compact_pct="50",
         permission_mode="auto", claude="claude", project=None) -> int:
     """Drive the plan. SIGTERM and SIGINT end the running session's group, then return 130."""
     old: dict[int, object] = {}
@@ -238,10 +353,12 @@ def run(ctx, plan, cap=90.0, hours=None, max_sessions=50, compact_pct="50",
             old[sig] = signal.signal(sig, handler)
     except ValueError:      # not the main thread: no handlers, the caller owns the signals
         pass
+    status = _Status(ctx, plan, cap, hours)
     try:
         return _run(ctx, plan, cap, hours, max_sessions, compact_pct, permission_mode, claude,
-                    project)
+                    project, status)
     except (_Interrupted, KeyboardInterrupt):
+        status.stop("interrupted")
         _say(["interrupted"])
         return 130
     finally:
@@ -250,7 +367,7 @@ def run(ctx, plan, cap=90.0, hours=None, max_sessions=50, compact_pct="50",
 
 
 def _run(ctx, plan, cap, hours, max_sessions, compact_pct, permission_mode, claude,
-         project) -> int:
+         project, status) -> int:
     home = ctx.home
     name = ctx.root.name
     auto = str(compact_pct) == "auto"
@@ -276,22 +393,29 @@ def _run(ctx, plan, cap, hours, max_sessions, compact_pct, permission_mode, clau
         return 1
     stale = _roles_stale(ctx)
     if stale is not None:
-        print("error: agent roles are stale: run python3 .context-gate/bin/govern agents "
-              "render, commit, and start the driver again", file=sys.stderr)
-        if stale:
-            print(stale, file=sys.stderr)
+        changes = [int(m.group(1)) for m in re.finditer(r"(\d+) file\(s\) would change", stale)]
+        if any(changes):
+            print("error: agent roles are stale: run python3 .context-gate/bin/govern agents "
+                  "render, commit, and start the driver again", file=sys.stderr)
+        else:
+            print("error: agent roles: python3 .context-gate/bin/govern agents render --check "
+                  "failed", file=sys.stderr)
+        lines = [ln.strip() for ln in stale.splitlines() if ln.strip()]
+        if lines:
+            print(lines[-1], file=sys.stderr)
         return 1
-    folder = None
     prompt = PROMPT.read_text(encoding="utf-8")
     env = {**os.environ, "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": str(pct),
            "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "0"}
     deadline = None if hours is None else time.time() + float(hours) * 3600
     readings: list[float] = []
+    reset: list[float | None] = [None]
 
     def probe() -> str | None:
-        value, why = probe_reading(claude, ctx.root)
+        value, found, why = probe_full(claude, ctx.root)
         if value is not None:
             readings.append(value)
+            reset[0] = found if found is not None else reset[0]
         return why
 
     why = probe()
@@ -299,30 +423,50 @@ def _run(ctx, plan, cap, hours, max_sessions, compact_pct, permission_mode, clau
         print(f"error: usage probe failed: {why}", file=sys.stderr)
         return 1
     text, data = first
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    folder = drive_log.log_path(home).parent / "runs" / f"{name}-{stamp}"
+    folder.mkdir(parents=True, exist_ok=True)
+    print(f"run folder: {folder}")
+    sys.stdout.flush()
+    status.begin(folder, data)
     last_next = str(data.get("next", ""))
     idle = 0
     n = 0
     while True:
-        if over_cap(readings, cap):
+        if cap is None:
+            in_force, why = today_line(home, readings[-1] if readings else None, reset[0], _now())
+            source = "today"
+        else:
+            in_force, why, source = cap, None, "--cap"
+        status.write(cap=None if in_force is None else round(in_force, 1), cap_source=source)
+        if why:
+            status.stop(f"cap unknown: {why}")
+            _say([f"cap unknown: {why}"])
+            return 0
+        tag = f"cap {in_force:.0f}% ({source})"
+        if over_cap(readings, in_force):
             if not readings:
+                status.stop("cap unknown: no usage reading")
                 _say(["cap unknown: no usage reading"])
                 return 0
             where = "before the first session" if n == 0 else f"last step {last_next} finished"
-            _say([f"cap reached: 7d at {readings[-1]:.0f}%, {where}"])
+            reason = f"cap reached: 7d at {readings[-1]:.0f}%, {tag}, {where}"
+            status.stop(reason)
+            _say([reason])
             return 0
         if n >= max_sessions:
-            _say([f"session limit: {n} sessions run"])
+            reason = f"session limit: {n} sessions run"
+            status.stop(reason)
+            _say([reason])
             return 0
         if deadline is not None and time.time() >= deadline:
+            status.stop("time limit")
             _say(["time limit"])
             return 0
         n += 1
-        if folder is None:
-            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            folder = drive_log.log_path(home).parent / "runs" / f"{name}-{stamp}"
-            folder.mkdir(parents=True, exist_ok=True)
         before_next = str(data.get("next", ""))
         started = time.time()
+        status.write(state="in_session", session=n, session_started=_utc(started))
         argv = _argv(claude, "-p", skill_command(plan), "--output-format",
                      "stream-json", "--verbose", "--permission-mode", permission_mode,
                      "--append-system-prompt", prompt)
@@ -366,27 +510,39 @@ def _run(ctx, plan, cap, hours, max_sessions, compact_pct, permission_mode, clau
         if reading is None and not killed:
             why = probe()
             if why:
+                status.stop(f"error: usage probe failed: {why}")
                 print(f"error: usage probe failed: {why}", file=sys.stderr)
                 return 1
         elif reading is not None:
             readings.append(reading)
+            found = stream_reset(lines)
+            reset[0] = found if found is not None else reset[0]
         shown = readings[-1] if readings else None
         _say([f"session {n}: {kind} after {round(ended - started)}s, peak "
               f"{_pct(row['peak_pct'])}%, {_pct(row['compacts'])} compacts, 7d "
-              f"{'n/a' if shown is None else f'{shown:.0f}'}%"])
+              f"{'n/a' if shown is None else f'{shown:.0f}'}%, {tag}"])
         last_next = before_next
         progressed = after[0] != text
         text, data = after
+        status.write(state="between", seven_day=shown, **status.progress(data),
+                     last={"kind": kind, "seconds": round(ended - started),
+                           "peak_pct": row["peak_pct"]})
         if killed:
+            status.stop("time limit")
             _say(["time limit"])
             return 0
         if kind == "plan-done":
+            status.stop("plan done")
             _say(["plan done"])
             return 0
         if kind == "stop":
-            _say([f"stop: {exit_line[len('stop'):].strip()}"])
+            reason = f"stop: {exit_line[len('stop'):].strip()}"
+            status.stop(reason)
+            _say([reason])
             return 0
         idle = 0 if progressed else idle + 1
         if idle >= 2:
-            _say([f"no progress: {data.get('next', '')}"])
+            reason = f"no progress: {data.get('next', '')}"
+            status.stop(reason)
+            _say([reason])
             return 1

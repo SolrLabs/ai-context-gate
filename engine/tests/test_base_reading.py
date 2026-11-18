@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import collections
+import dataclasses
 import os
 import shutil
 import stat
@@ -753,6 +754,45 @@ class OrdinaryDay(Case):
         w.commit("an ordinary change", at=at)
         self.silent(w)
         self.silent(w, "--base", "main")
+
+    def test_silent_matches_the_engine_without_the_check(self):
+        w = self.solo()
+        w.edit(LOG, "## P-1 - Title 1\n\n**Status:** locked\n\n**Rule:** always write the rule "
+                    "down before acting on it.\n",
+               "## P-1 - Title 1\n\n**Status:** locked\n\n\n**Rule:** always write\nthe rule   down "
+               "before\nacting on it.   \n\n")
+        self.silent_full(w)
+        self.silent_full(w, "--base", "main")
+        w.git("checkout", "-qb", "ordinary")
+        w.commit("an ordinary change")
+        self.silent_full(w)
+        self.silent_full(w, "--base", "main")
+
+    def test_a_check_that_reports_fails_silent(self):
+        real = manifest.CHECKS[CHECK].fn
+
+        def warns(*args, **kw):
+            found = real(*args, **kw)
+            found.warn("something it should not say")
+            return found
+
+        def prints(*args, **kw):
+            print("a line on stdout")
+            return real(*args, **kw)
+
+        def raises(*args, **kw):
+            from govern.text import Unreadable
+            raise Unreadable(Path("a-file"), "not readable")
+
+        w = self.solo()
+        self.silent(w)
+        for noisy in (warns, prints, raises):
+            with self.subTest(noisy=noisy.__name__):
+                with mock.patch.dict(manifest.CHECKS, {CHECK: dataclasses.replace(
+                        manifest.CHECKS[CHECK], fn=noisy)}):
+                    with self.assertRaises(AssertionError):
+                        self.silent(w)
+        self.assertIs(manifest.CHECKS[CHECK].fn, real)
 
     def test_rewrapping_a_paragraph(self):
         w = self.solo()
