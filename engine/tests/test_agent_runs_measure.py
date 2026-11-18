@@ -903,13 +903,13 @@ class ChecklistUnitGate(unittest.TestCase):
         return agent_runs.resolve(cfg, Path("/p"))["gates"]["checklist_texts"]
 
     def test_a_developer_answering_the_scoped_gate_line_passes(self):
-        texts = self.texts()["developer"]
-        self.assertIn("The coordinator runs the full gate.", texts["Gate"])
+        texts = self.texts(unit_gate="scoped")["developer"]
+        self.assertIn("and the result line of build gate.", texts["Gate"])
         report = "Gate: python3 -m unittest -k roles: Ran 9 tests, OK\n"
         self.assertTrue(agent_runs.answers(report, "Gate", texts))
 
     def test_full_keeps_the_old_gate_line(self):
-        self.assertIn("the full gate's result line", self.texts(unit_gate="full")["developer"]["Gate"])
+        self.assertIn("the local suite's result line", self.texts(unit_gate="full")["developer"]["Gate"])
 
 
 class ReportCountsWhatHappened(HookCase):

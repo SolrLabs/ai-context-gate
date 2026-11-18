@@ -17,6 +17,8 @@ import profile_guard  # noqa: E402,F401
 from regressions_support import *  # noqa: E402,F401,F403
 from fixture_cache import copy_of  # noqa: E402
 
+TIER = "e2e"
+
 class BetaFetch(Base):
     """`govern beta on` installs what is missing from the project's `[governance] source`: the
     beta's engine, as a pinned release is fetched, and the local plugin, assembled by that beta's
@@ -63,29 +65,35 @@ class BetaFetch(Base):
         version in `without_module` is a beta from before the engine could assemble its plugin;
         one in `mismatched` has a plugin.json that disagrees with its engine. With
         `plugin_name`, every tag's plugin.json gives that name instead of this plugin's."""
+        def build(src: Path) -> None:
+            """The repository, made once per process in a directory of its own."""
+            ignore = shutil.ignore_patterns("__pycache__")
+            shutil.copytree(ENGINE / "govern", src / "engine" / "govern", ignore=ignore)
+            shutil.copytree(REPO / "plugin", src / "plugin", ignore=ignore)
+            git = lambda *a: self.source_git(src, *a)
+            git("init", "-q")
+            init = src / "engine" / "govern" / "__init__.py"
+            module = src / "engine" / "govern" / "local_plugin.py"
+            manifest = src / "plugin" / ".claude-plugin" / "plugin.json"
+            engine = init.read_text(encoding="utf-8")
+            assembler = module.read_text(encoding="utf-8")
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            data["name"] = plugin_name or data["name"]
+            for version in tags:
+                wtext(init, engine.replace(f'__version__ = "{__version__}"',
+                                           f'__version__ = "{version}"'))
+                data["version"] = "0.0.1" if version in mismatched else version
+                wtext(manifest, json.dumps(data, indent=2) + "\n")
+                module.unlink(missing_ok=True)
+                if version not in without_module:
+                    wtext(module, assembler)
+                git("add", "-A")
+                git("commit", "-qm", version, "--allow-empty")
+                git("tag", f"v{version}")
+
         src = self.tmp / "source"
-        ignore = shutil.ignore_patterns("__pycache__")
-        shutil.copytree(ENGINE / "govern", src / "engine" / "govern", ignore=ignore)
-        shutil.copytree(REPO / "plugin", src / "plugin", ignore=ignore)
-        git = lambda *a: self.source_git(src, *a)
-        git("init", "-q")
-        init = src / "engine" / "govern" / "__init__.py"
-        module = src / "engine" / "govern" / "local_plugin.py"
-        manifest = src / "plugin" / ".claude-plugin" / "plugin.json"
-        engine, assembler = init.read_text(encoding="utf-8"), module.read_text(encoding="utf-8")
-        data = json.loads(manifest.read_text(encoding="utf-8"))
-        data["name"] = plugin_name or data["name"]
-        for version in tags:
-            wtext(init, engine.replace(f'__version__ = "{__version__}"',
-                                       f'__version__ = "{version}"'))
-            data["version"] = "0.0.1" if version in mismatched else version
-            wtext(manifest, json.dumps(data, indent=2) + "\n")
-            module.unlink(missing_ok=True)
-            if version not in without_module:
-                wtext(module, assembler)
-            git("add", "-A")
-            git("commit", "-qm", version, "--allow-empty")
-            git("tag", f"v{version}")
+        copy_of(("beta-fetch", "source", tags, without_module, mismatched, plugin_name),
+                src, build)
         self.name_source(src.as_posix())
         return src
 

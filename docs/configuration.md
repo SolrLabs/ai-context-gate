@@ -3,7 +3,7 @@ doc_type: reference
 purpose: Every table and key .context-gate/config.toml accepts, with types, defaults and examples.
 audience: human
 load_when: writing or changing a project's config.toml or a profile's principles.toml
-last_reviewed: 2026-10-14
+last_reviewed: 2026-11-18
 ---
 
 # Configuration reference
@@ -58,6 +58,7 @@ The tables:
 | `schema` | integer | `1` | The config schema version. This engine reads schema 1 only. |
 | `extensions` | list of strings | `[]` | Directories, relative to the governance root, whose `*.py` files register extension checks. Each directory must exist. See [Extensions](#extensions). |
 | `require_reasons` | boolean | `true` | Whether a loosened setting needs a `reason` (see [Loosening](#loosening-needs-a-reason)). |
+| `channel` | string | `"stable"` | `"stable"` runs the pinned release. `"beta"` runs, on every machine and in CI, the newest beta whose release is newer than the pin, installed or tagged at `source` (asked at most once an hour), and, when the newest beta cannot be installed, the newest installed beta newer than the pin, and the pin only when there is none. The pin itself stays a release. See [Beta channel](#beta-channel). |
 
 ```toml
 [governance]
@@ -753,6 +754,35 @@ one line saying why, and does not fail. Run `govern beta off` to clear the file.
 Run `govern beta off` before `bin/uninstall`. Uninstall does not know about `local.toml`, and
 the beta plugin keys would stay in `.claude/settings.local.json`.
 
+## Beta channel
+
+`[governance] channel = "beta"` makes the whole project follow the betas: every machine and CI run
+the newest beta whose release is newer than the pin (the pin itself stays a release), and Claude
+Code loads the matching plugin. The default, `"stable"`, runs the pinned release.
+
+Switch with the installer's `channel` command, from the project root, with the engine the project
+is pinned to:
+
+```sh
+PYTHONPATH=~/.local/share/context-gate/engines/<pinned version> python3 -P -m govern.installer channel --root . beta
+```
+
+It needs an installed project (`.context-gate/installed.toml`). It changes, in one go:
+
+- `.context-gate/config.toml`: adds `channel = "beta"` after `engine = ...`, leaving every other
+  byte as it was.
+- `.claude/settings.json`: `extraKnownMarketplaces["context-gate-beta"]` (the `beta` branch of the
+  public repository), `enabledPlugins["context-gate@context-gate-beta"] = true` and
+  `enabledPlugins["context-gate@context-gate"] = false`. The plugin keeps its name, so skills stay
+  `context-gate:*`. Commit the file so teammates get the same plugin.
+- `.context-gate/installed.toml`: each settings key's previous value, so the switch can be undone.
+
+Running it again says the project is already on the channel and changes nothing.
+
+To go back, run the same command with `stable`: the config key is removed and the three settings
+keys return to the values recorded (a key that was absent is removed again; edits you made to other
+keys stay). `uninstall` undoes the same keys.
+
 ## On a pull request
 
 `govern ci github` prints a GitHub Actions workflow that runs `check --base` and `diff` on every
@@ -1132,7 +1162,10 @@ tracks (`--untrack` stops that, leaving the files). A param that `local.toml` se
 `forbidden_trailers` is a list of regexes (default empty): `build verify` refuses a unit branch
 whose commit message has a line matching one, for example `["(?im)^co-authored-by:.*claude"]`.
 `fast_checks` is a list of commands, rendered for `developer` and `senior-developer` as the
-hand-back key `Fast checks` (not under `unit_gate = "full"`). `worktree_setup` is one command,
+hand-back key `Fast checks` (not under `unit_gate = "full"`). `unit_gate` is `"phase"` by
+default: a unit runs its own tests, and the coordinator runs the local suite once per phase,
+before review. `"scoped"` has each unit also run `build gate` and the coordinator run the suite
+after each merge; `"full"` has each unit run the suite. `worktree_setup` is one command,
 rendered as a line in `developer`, `senior-developer` and `technical-writer`.
 
 ## Agent gates
@@ -1270,8 +1303,8 @@ attempts = 0
 |---|---|
 | `build start <phase> [--plan FILE] [--from BRANCH] [--high-risk] [--visual]` | Writes the ledger; `--visual` marks the phase visual, so `build review` writes a third brief for `ux-reviewer`, and is refused unless `visual_paths` renders that role. Refuses on the default branch, a dirty tree, an existing ledger, or when git ignores the ledger (it prints the line to add to `.gitignore`) |
 | `build unit add <id> --title T [--role R] [--red]` | Adds a unit and writes its `brief.md` |
-| `build unit set <id> <status> [--role R] [--branch B] [--commit C] [--note N] [--agent ID] [--accept-red REASON]` | Updates a unit. `done` with `--branch` runs `build verify`; `--agent` stores the agent that built it (cleared on `failed`, `blocked` and relaunch). With `full_gate` set and `unit_gate = "scoped"`, `done` is refused on a red, missing or stale gate record; `--accept-red` lets it through and records a ruling |
-| `build gate [--cmd CMD]` | Runs `full_gate` and records `<phase folder>/gate/last.json` (`status`, `rc`, `head`, `dirty`, `seconds`, `at`, `cmd`) and `gate/last.log`. A HEAD that moves during the run leaves the record stale. `--cmd` runs another command and records nothing |
+| `build unit set <id> <status> [--role R] [--branch B] [--commit C] [--note N] [--agent ID] [--accept-red REASON]` | Updates a unit. `done` with `--branch` runs `build verify`; `--agent` stores the agent that built it (cleared on `failed`, `blocked` and relaunch). With `full_gate` set and `unit_gate = "scoped"` (not the default `"phase"`), `done` is refused on a red, missing or stale gate record; `--accept-red` lets it through and records a ruling. Under `scoped`, `done --branch` also copies the worktree's gate record to `gate/<id>.json` |
+| `build gate [--cmd CMD]` | Runs `full_gate` and records `<phase folder>/gate/last.json` (`status`, `rc`, `head`, `dirty`, `seconds`, `at`, `cmd`) and `gate/last.log`. A HEAD that moves during the run leaves the record stale. When the only changes since a green run are `docs_paths`, it runs only `govern check` (and the project's `docs_gate` command, if set) and records `scope: "docs"`. It also runs in a linked worktree on a branch no ledger names, using the one ledger there. `--cmd` runs another command and records nothing |
 | `build verify <id> --branch B` | Read-only hand-back check. Refuses: no commit past the unit's base, an empty diff, uncommitted files in the branch's worktree, a git-ignored ledger, a commit line matching `forbidden_trailers`. Warns: a report `Scope:` path the diff does not touch; ignored files in a folder the diff touches |
 | `build launch <unit, review, fix or close>` | Refuses an unfilled or uncommitted brief; prints the launch prompt |
 | `build collect <branch>` | Copies what the agent on that branch produced (reports, failing output) from its worktree into this checkout's build folder |
@@ -1304,7 +1337,7 @@ without such a line is recorded as `unfinished` and the next session carries on.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--cap N` | 90 | stop when the weekly (seven-day) usage reaches N percent |
+| `--cap N` | today's line | stop when the weekly (seven-day) usage reaches N percent; by default N is today's line, the weekly figure when today began plus today's allowance (the status row's `today` figure), recomputed before each session; an off day, or no reading or reset time, stops as "cap unknown" |
 | `--hours H` | none | stop after H hours (may be fractional); the running session is ended |
 | `--max-sessions N` | 50 | stop after N sessions |
 | `--compact-pct P` | 50 | auto-compact at P percent of the window, 20 to 90, or `auto` for the measured suggestion |

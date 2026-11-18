@@ -129,7 +129,7 @@ class HookCase(unittest.TestCase):
 
 
 TEXTS = {"Scope": "the files you changed. Each is a file the brief names.",
-         "Gate": "the full gate's result line.", "Not verified": "each claim that rests on reading."}
+         "Gate": "the local suite's result line.", "Not verified": "each claim that rests on reading."}
 
 
 def row(agent, type_="developer", tokens=None, **extra):

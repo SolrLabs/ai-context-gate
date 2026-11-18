@@ -33,6 +33,8 @@ from govern import cli, config, installer, layout, migrate, profile, registry  #
 from test_measure import (BODY, FM, example_workspace, commit, orbit, pair, put,  # noqa: E402
                           single_repo, snapshot)
 
+TIER = "e2e"
+
 
 def run(*args: str) -> tuple[int, str, str]:
     out, err = io.StringIO(), io.StringIO()

@@ -26,7 +26,7 @@ When your launch prompt has a `Worktree:` line, that folder is your own worktree
 - Say each thing once, in the document that owns it; elsewhere, point to it.
 - A decision that changed is rewritten in place with the date. One that was replaced becomes a one-line pointer. Nothing keeps text no longer true.
 - Dates are absolute. Claims carry what was checked and what was not.
-- Run the project's doc gate before you report{{full_gate}}, and regenerate any index it names.
+- Run `python3 .context-gate/bin/govern check` before you report, and regenerate any index it names.
 - Commit on your own branch when the gate is green. Never push and never merge into another branch.
 
 ## Closing a phase

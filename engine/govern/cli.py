@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 import govern.checks  # noqa: F401  (registers the built-in checks)
-from govern import __version__, blocks, config, layout, manifest, notice, ratchet, registry
+from govern import __version__, blocks, config, gitq, layout, manifest, notice, ratchet, registry
 from govern import versions
 from govern.context import Context
 from govern.decisions import heading_sep
@@ -1009,7 +1009,7 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     be.add_argument("--commit")
     be.add_argument("--note")
     be.add_argument("--accept-red", metavar="REASON", dest="accept_red",
-                    help="let `done` through on a red, missing or stale full gate, and record "
+                    help="let `done` through on a red, missing or stale local suite run, and record "
                          "a ruling with this reason")
     be.add_argument("--agent", help="the id of the agent that built the unit; a fix for it "
                                     "is then sent back to that agent")
@@ -1040,8 +1040,9 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
                                "session per build step, until done, a person is needed or "
                                "a limit is reached")
     bdr.add_argument("plan", help="the plan, as `/context-gate:build` takes it")
-    bdr.add_argument("--cap", type=float, default=90.0,
-                     help="stop when the weekly usage reaches this percent (default 90)")
+    bdr.add_argument("--cap", type=float, default=None,
+                     help="stop when the weekly usage reaches this percent (default: today's "
+                          "line, the weekly figure when today began plus today's allowance)")
     bdr.add_argument("--hours", type=float, help="stop after this many hours")
     bdr.add_argument("--max-sessions", type=int, default=50, dest="max_sessions",
                      help="stop after this many sessions (default 50)")
@@ -1055,9 +1056,9 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     bdp.add_argument("name", nargs="?", help="one project's folder name (default: all)")
     brv = badd("review", help="write the review package and the reviewers' briefs")
     brv.add_argument("--accept-red", metavar="REASON", dest="accept_red",
-                     help="review on a red, missing or stale full gate, and record a ruling "
+                     help="review on a red, missing or stale local suite run, and record a ruling "
                           "with this reason")
-    bgt = badd("gate", help="run the project's full gate and record its result for this phase")
+    bgt = badd("gate", help="run the project's local suite and record its result for this phase")
     bgt.add_argument("--cmd", metavar="CMD", dest="gate_cmd",
                      help="run this command instead of `full_gate`; nothing is recorded")
     bf = badd("fix", help="write the fix pass's brief, for the coordinator to fill; "
@@ -1084,6 +1085,11 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None, root: Path | None = None,
          prog: str | None = None) -> int:
+    with gitq.scope():     # a git lookup that cannot change during one command is asked once
+        return _main(argv, root, prog)
+
+
+def _main(argv: list[str] | None, root: Path | None, prog: str | None) -> int:
     if prog is None:
         prog = os.path.basename(sys.argv[0]) or "govern"
         if prog == "__main__.py":

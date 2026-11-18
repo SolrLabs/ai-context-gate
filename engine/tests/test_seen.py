@@ -23,6 +23,8 @@ from base_support import LOG, Tree, decision  # noqa: E402
 from changes_support import cut  # noqa: E402
 from team_support import TwoClones  # noqa: E402
 
+TIER = "e2e"
+
 HEAD = "since your last session: "
 
 

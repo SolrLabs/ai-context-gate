@@ -122,7 +122,7 @@ class Workspace:
         self.root = tmp / "ws"
         self.home = tmp / "home"
         self.home.mkdir()
-        self.write(CFG, CONFIG.format(version=__version__, handoff_key=handoff_key,
+        self.write(CFG, CONFIG.format(version=RELEASE, handoff_key=handoff_key,
                                                     extensions=extensions, extra=extra))
         self.write("projects.toml", REGISTRY.format(ws_range=ws_range, alpha_range=alpha_range,
                                                     alpha_extra=alpha_extra))
@@ -211,7 +211,7 @@ class Base(unittest.TestCase):
                  "except SystemExit: pass\n"
                  "print([p for p in sys.path if 'engines' in p][0])")
         res = subprocess.run([sys.executable, "-c", probe], env=env, capture_output=True,
-                             text=True)
+                             text=True, cwd=env["HOME"])
         return res.stdout.strip()
 
 
@@ -222,7 +222,10 @@ def datetime_timestamp(d: date) -> float:
 
 # Versions relative to this engine's, so a release bump never breaks the tests that need a newer
 # or an older engine beside it.
-_MAJOR, _MINOR = (int(x) for x in __version__.split(".")[:2])
+# A beta engine (X.Y.Z-beta.N) is of the release X.Y.Z: fixtures pin that, since a pin is never a
+# beta.
+RELEASE = __version__.split("-")[0]
+_MAJOR, _MINOR = (int(x) for x in RELEASE.split(".")[:2])
 SERIES = f"{_MAJOR}.{_MINOR}"
 PREV_SERIES = f"{_MAJOR}.{_MINOR - 1}" if _MINOR else f"{_MAJOR - 1}.99"
 NEXT_RELEASE = f"{_MAJOR}.{_MINOR + 1}.0"
@@ -313,6 +316,7 @@ __all__ = [
     "installer_check",
     "Base",
     "datetime_timestamp",
+    "RELEASE",
     "_MAJOR",
     "_MINOR",
     "SERIES",

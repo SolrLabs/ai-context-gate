@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
+from govern import gitq, phase
 from govern.context import GIT_TIMEOUT, git, git_env, glob_matches, repo_of
 from govern.decisions import Entry, mask_lines
 from govern.registry import Scope
@@ -181,7 +182,11 @@ def _no_head(repo: Path) -> str:
     """Why `HEAD` names no commit in `repo`."""
     if git(repo, "--version") is None:
         return "git is not available"
-    if git(repo, "rev-parse", "--git-dir") is None:
+    try:
+        readable = gitq.git_dir_ok(repo)
+    except phase.PhaseError:     # git could not run: fail closed, as `git()` does
+        readable = False
+    if not readable:
         return "git could not read the repository"
     return "the repository has no commit yet"
 

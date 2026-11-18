@@ -11,6 +11,7 @@
                                     # propose a config from measure; --apply installs it green
     python3 -m govern.installer enable-plugin --root DIR --id context-gate@context-gate
             [--marketplace OWNER/REPO]
+    python3 -m govern.installer channel --root DIR stable|beta    # the release channel
     python3 -m govern.installer uninstall --root DIR [--force]
     python3 .context-gate/bin/uninstall [--force]    # the same, from inside a project
 
@@ -140,10 +141,14 @@ def write_manifest(path: Path, data: dict) -> None:
     for item in data["plugin"]:
         lines += ["", "[[plugin]]", f"settings = {toml_str(item['settings'])}",
                   f"id = {toml_str(item['id'])}", f"previous = {toml_str(item['previous'])}"]
+        if item.get("channel"):
+            lines.append("channel = true")
     for item in data["marketplace"]:
         lines += ["", "[[marketplace]]", f"settings = {toml_str(item['settings'])}",
                   f"name = {toml_str(item['name'])}", f"repo = {toml_str(item['repo'])}",
                   f"previous = {toml_str(item['previous'])}"]
+        if item.get("channel"):
+            lines.append("channel = true")
     for item in data["settings"]:
         lines += ["", "[[settings]]", f"path = {toml_str(item['path'])}",
                   f"backup = {toml_str(item['backup'])}",
@@ -304,8 +309,14 @@ REPO_RE = re.compile(r"^(?!\.+/)[A-Za-z0-9_.-]+/(?!\.+$)[A-Za-z0-9_.-]+$")
 SAME = "same"   # a marketplace entry the project already held as written: left alone, both ways
 
 
-def marketplace_entry(repo: str) -> dict:
-    return {"source": {"source": "github", "repo": repo}}
+BETA_REF = "beta"   # the branch of the public repository that holds the beta marketplace
+
+
+def marketplace_entry(repo: str, ref: str | None = None) -> dict:
+    source = {"source": "github", "repo": repo}
+    if ref is not None:
+        source["ref"] = ref
+    return {"source": source}
 
 
 def marketplace_for(plugin_id: str, repo: str | None) -> tuple[str, str] | None:
@@ -317,7 +328,8 @@ def marketplace_for(plugin_id: str, repo: str | None) -> tuple[str, str] | None:
     if not name:
         raise ValueError(f"plugin id '{plugin_id}' is not name@marketplace")
     if repo is None:
-        return (name, layout.PUBLIC_REPO) if plugin_id == layout.PLUGIN_ID else None
+        return ((name, layout.PUBLIC_REPO)
+                if plugin_id in (layout.PLUGIN_ID, layout.BETA_CHANNEL_PLUGIN_ID) else None)
     if not REPO_RE.match(repo):
         raise ValueError(f"marketplace '{repo}' is not a GitHub owner/repo")
     if plugin_id == layout.SKILLS_DIR_PLUGIN_ID:
@@ -340,7 +352,7 @@ def _opt_in(root: Path, plugin_id: str | None, market: tuple[str, str] | None
         known = data.setdefault("extraKnownMarketplaces", {})
         if not isinstance(known, dict):
             raise ValueError("extraKnownMarketplaces is not a JSON object")
-        entry = marketplace_entry(repo)
+        entry = marketplace_entry(repo, BETA_REF if name == layout.BETA_MARKETPLACE else None)
         previous = ("absent" if name not in known
                     else SAME if known[name] == entry else json.dumps(known[name]))
         known[name] = entry
@@ -358,13 +370,13 @@ def _opt_in(root: Path, plugin_id: str | None, market: tuple[str, str] | None
 
 def _restore_plugin(root: Path, item: dict) -> None:
     data = _read_settings(root)
-    enabled = data.get("enabledPlugins", {})
     if item["previous"] == "absent":
+        enabled = data.get("enabledPlugins", {})
         enabled.pop(item["id"], None)
         if not enabled:
             data.pop("enabledPlugins", None)
     else:
-        enabled[item["id"]] = json.loads(item["previous"])
+        data.setdefault("enabledPlugins", {})[item["id"]] = json.loads(item["previous"])
     _write_settings(root, data)
 
 
@@ -385,13 +397,13 @@ def _restore_marketplace(root: Path, item: dict) -> None:
 def _restore_keys(root: Path, record: dict, say=lambda msg: None) -> None:
     """Undo each recorded key in place, keeping edits made since; then, if there was no file
     before and nothing is left in it, remove it (and `.claude/`, if the tool made it)."""
-    for item in record["plugin"]:
+    for item in reversed(record["plugin"]):             # last written, first undone
         try:
             _restore_plugin(root, item)
             say(f"  plugin       {item['id']} restored in {item['settings']}")
         except (OSError, ValueError):
             say(f"  plugin       {item['id']} left in {item['settings']} (unreadable)")
-    for item in record["marketplace"]:
+    for item in reversed(record["marketplace"]):
         try:
             _restore_marketplace(root, item)
             say(f"  marketplace  {item['name']} restored in {item['settings']}")
@@ -417,6 +429,168 @@ def _restore_settings(root: Path, record: dict, say=lambda msg: None) -> None:
         say(f"  restored     {rec['path']}")
         return
     _restore_keys(root, record, say)
+
+
+CHANNELS = ("stable", "beta")
+
+
+def _channel_text(text: str, channel: str) -> str:
+    """The config text with `[governance] channel` set: a line edit that leaves every other byte
+    alone. "stable" removes the key. ValueError when the key cannot be placed."""
+    lines = text.splitlines(keepends=True)
+    head = next((i for i, ln in enumerate(lines)
+                 if re.match(r"^\s*\[governance\]\s*(#.*)?$", ln)), None)
+    if head is None:
+        raise ValueError("no [governance] table")
+    end = next((i for i in range(head + 1, len(lines)) if lines[i].lstrip().startswith("[")),
+               len(lines))
+    key = next((i for i in range(head + 1, end) if re.match(r"^\s*channel\s*=", lines[i])), None)
+    eol = "\r\n" if "\r\n" in text else "\n"
+    if channel == "stable":
+        if key is not None:
+            del lines[key]
+        return "".join(lines)
+    new = f'channel = "{channel}"{eol}'
+    if key is not None:
+        lines[key] = new
+        return "".join(lines)
+    at = next((i for i in range(head + 1, end) if re.match(r"^\s*engine\s*=", lines[i])), None)
+    if at is None:
+        raise ValueError("no engine line in [governance]")
+    if not lines[at].endswith(("\n", "\r")):
+        lines[at] += eol
+    lines.insert(at + 1, new)
+    return "".join(lines)
+
+
+def _channel_keys(data: dict) -> tuple[list, list]:
+    """Set the beta channel's three settings keys in `data`; return their records."""
+    known = data.setdefault("extraKnownMarketplaces", {})
+    enabled = data.setdefault("enabledPlugins", {})
+    if not isinstance(known, dict) or not isinstance(enabled, dict):
+        raise ValueError("extraKnownMarketplaces or enabledPlugins is not a JSON object")
+    name, repo = layout.BETA_MARKETPLACE, layout.PUBLIC_REPO
+    entry = marketplace_entry(repo, BETA_REF)
+    previous = ("absent" if name not in known
+                else SAME if known[name] == entry else json.dumps(known[name]))
+    known[name] = entry
+    market = [{"settings": SETTINGS, "name": name, "repo": repo, "previous": previous,
+               "channel": True}]
+    plugins = []
+    for plugin_id, value in ((layout.BETA_CHANNEL_PLUGIN_ID, True), (layout.PLUGIN_ID, False)):
+        previous = "absent" if plugin_id not in enabled else json.dumps(enabled[plugin_id])
+        enabled[plugin_id] = value
+        plugins.append({"settings": SETTINGS, "id": plugin_id, "previous": previous,
+                        "channel": True})
+    return plugins, market
+
+
+def _settle_settings(root: Path, record: dict, rec: dict) -> None:
+    """With no plugin key left to undo, and the settings still exactly what the tool wrote, put
+    the original bytes back (or remove the file the tool made) and drop the settings record."""
+    if _settings_edited(root, rec) is not None:
+        return
+    try:
+        original = ({} if not rec["backup"] else
+                    json.loads((root / rec["backup"]).read_text(encoding="utf-8-sig")))
+        if _read_settings(root) != original:
+            return
+    except (OSError, ValueError):
+        return
+    _restore_settings_bytes(root, rec)
+    if rec["backup"]:
+        backup = root / rec["backup"]
+        backup.unlink(missing_ok=True)
+        for folder in (backup.parent, root / layout.BACKUP):
+            with contextlib.suppress(OSError):
+                folder.rmdir()
+    record["settings"].remove(rec)
+
+
+def channel(root: Path, which: str) -> int:
+    """`channel stable|beta`: switch the project's release channel, the config key and the plugin
+    settings together, each settings key's previous value recorded so `stable` and uninstall
+    can put it back."""
+    if which not in CHANNELS:
+        return fail(f"channel '{which}' is not one of {', '.join(CHANNELS)}; nothing was changed")
+    if not (root / layout.MANIFEST).is_file():
+        return fail(f"no {layout.MANIFEST} — install first")
+    record = read_manifest(root)
+    cfg_path = root / layout.CONFIG
+    try:
+        raw = cfg_path.read_bytes()
+        bom = raw.startswith(codecs.BOM_UTF8)
+        text = raw.decode("utf-8-sig")
+        current = tomllib.loads(text).get("governance", {}).get("channel", "stable")
+        new_text = _channel_text(text, which)
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError) as exc:
+        return fail(f"{layout.CONFIG} cannot be edited ({exc}); nothing was changed")
+    ours = [r for r in (*record["plugin"], *record["marketplace"]) if r.get("channel")]
+    if which == "beta" and current == "beta" and ours:
+        print("already on the beta channel; nothing changed")
+        return 0
+    if which == "stable" and current != "beta" and not ours:
+        print("already on the stable channel; nothing changed")
+        return 0
+    path = root / SETTINGS
+    original = path.read_bytes() if path.exists() else None
+    new_rec = which == "beta" and not record["settings"]
+    rec = (_settings_record(root) if new_rec
+           else record["settings"][0] if record["settings"] else None)
+    before = sha(path) if path.exists() else ""
+    try:
+        if which == "beta":
+            data = _read_settings(root)
+            plugins, market = _channel_keys(data)
+            _write_settings(root, data)
+            record["plugin"] += plugins
+            record["marketplace"] += market
+        elif ours:
+            _read_settings(root)
+            _restore_keys(root, {"plugin": [r for r in record["plugin"] if r.get("channel")],
+                                 "marketplace": [r for r in record["marketplace"]
+                                                 if r.get("channel")], "settings": []})
+            record["plugin"] = [r for r in record["plugin"] if not r.get("channel")]
+            record["marketplace"] = [r for r in record["marketplace"] if not r.get("channel")]
+    except (OSError, ValueError) as exc:
+        if new_rec and rec["backup"]:
+            (root / rec["backup"]).unlink(missing_ok=True)
+        return fail(f"{SETTINGS} could not be read ({exc}); nothing was changed")
+    if rec is not None and path.exists() and (new_rec or before == rec["sha256"]):
+        rec["sha256"] = sha(path)
+    if new_rec:
+        record["settings"].append(rec)
+    if which == "stable" and rec is not None and not record["plugin"] \
+            and not record["marketplace"]:
+        _settle_settings(root, record, rec)
+    manifest_path = root / layout.MANIFEST
+    manifest_before = manifest_path.read_bytes()
+    try:
+        write_manifest(manifest_path, record)
+        cfg_path.write_bytes((codecs.BOM_UTF8 if bom else b"") + new_text.encode("utf-8"))
+    except OSError as exc:
+        manifest_path.write_bytes(manifest_before)
+        if original is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_bytes(original)
+        if new_rec:
+            _remove_created_dir(root, rec)
+            if rec["backup"]:
+                backup = root / rec["backup"]
+                backup.unlink(missing_ok=True)
+                for folder in (backup.parent, root / layout.BACKUP):
+                    with contextlib.suppress(OSError):
+                        folder.rmdir()
+        return fail(f"{exc}; settings and manifest put back")
+    print(f"  channel      {which} ({layout.CONFIG} "
+          f"{'sets' if which == 'beta' else 'drops'} [governance] channel)")
+    if which == "beta":
+        print(f"  plugin       {layout.BETA_CHANNEL_PLUGIN_ID} enabled in {SETTINGS}, "
+              f"{layout.PLUGIN_ID} disabled (commit it so teammates get it too)")
+    else:
+        print(f"  plugin       {SETTINGS} keys put back to what they were")
+    return 0
 
 
 def enable_plugin(root: Path, plugin_id: str, repo: str | None = None) -> int:
@@ -1086,6 +1260,9 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--marketplace", default=None, metavar="OWNER/REPO",
                    help=f"the GitHub repo the plugin's marketplace is in (default for "
                         f"{layout.PLUGIN_ID}: {layout.PUBLIC_REPO})")
+    c = sub.add_parser("channel", help="switch an installed project between stable and beta")
+    c.add_argument("--root", required=True, type=Path)
+    c.add_argument("which", metavar="{stable,beta}", help="the channel to run")
     ms = sub.add_parser("measure", help="measure a project before adopting (read-only)")
     ms.add_argument("--root", required=True, type=Path)
     ms.add_argument("--json", action="store_true", help="print the measurement as JSON")
@@ -1117,6 +1294,8 @@ def main(argv: list[str] | None = None) -> int:
                        baseline=args.baseline.resolve() if args.baseline else None)
     if args.cmd == "enable-plugin":
         return enable_plugin(root, args.id, args.marketplace)
+    if args.cmd == "channel":
+        return channel(root, args.which)
     if args.cmd == "upgrade":
         return upgrade(root, not args.no_report)
     if args.cmd == "migrate":

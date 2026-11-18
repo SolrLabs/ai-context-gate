@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import dataclasses
 import io
 import os
 import re
@@ -386,8 +387,42 @@ class Case(unittest.TestCase):
                 self.tmp = outer
 
     def silent(self, w: Tree, *flags: str, env: dict | None = None) -> tuple[int, str, str]:
+        """The gate prints, and exits with, what it would if this check did not exist. The gate's
+        output is the sum of what each check returns, so the check adds nothing when it returns no
+        error and no warning and writes nothing itself: one run, with the check's `fn` wrapped to
+        show it. A run that never calls the check cannot have added anything."""
+        saw: list[tuple[object, str, str]] = []
+        real = manifest.CHECKS[CHECK]
+
+        def watched(*args, **kw):
+            out, err = io.StringIO(), io.StringIO()
+            try:
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    found = real.fn(*args, **kw)
+            except BaseException as exc:
+                # The gate turns this into an ERROR finding outside the wrapper: record it, and
+                # let it propagate.
+                saw.append((exc, out.getvalue(), err.getvalue()))
+                raise
+            saw.append((found, out.getvalue(), err.getvalue()))
+            return found
+
+        manifest.CHECKS[CHECK] = dataclasses.replace(real, fn=watched)
+        try:
+            result = w.run("check", *flags, env=env)
+        finally:
+            manifest.CHECKS[CHECK] = real
+        for found, out, err in saw:
+            if isinstance(found, BaseException):
+                self.fail(f"{CHECK} raised {found!r}")
+            self.assertEqual((found.errors, found.warnings, out, err), ([], [], "", ""),
+                             f"{CHECK} added to a gate run")
+        return result
+
+    def silent_full(self, w: Tree, *flags: str, env: dict | None = None) -> tuple[int, str, str]:
         """The gate exits with, and prints, exactly what it would if this check did not exist:
-        the same exit code, the same stdout and the same stderr, byte for byte."""
+        the same exit code, the same stdout and the same stderr, byte for byte — shown by running
+        the whole gate twice, with the check removed from the engine and with it."""
         with unregistered():
             without = w.run("check", *flags, env=env)
         with_it = w.run("check", *flags, env=env)

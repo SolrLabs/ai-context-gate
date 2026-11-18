@@ -214,7 +214,7 @@ def _checklist(cfg) -> dict:
     params = {"extra_roles": list(chk.params.get("extra_roles", [])),
               "handback_checks": list(chk.params.get("handback_checks", [])),
               "visual_paths": list(chk.params.get("visual_paths", [])),
-              "unit_gate": chk.params.get("unit_gate", "scoped")}
+              "unit_gate": chk.params.get("unit_gate", roles.DEFAULT_UNIT_GATE)}
     return {role: roles.handback_texts(role, params) for role in roles.rendered(params)}
 
 
@@ -595,7 +595,7 @@ def on_pre_read(gates, data) -> dict | None:
 
 
 def _red_gate(root) -> str | None:
-    """The refusal for a coordinator's push when the current phase's last full gate is red at
+    """The refusal for a coordinator's push when the current phase's last local suite run is red at
     HEAD; None when there is no record, it is still running, it is for another head, or anything
     cannot be read: a push is never blocked on a guess."""
     try:
@@ -609,7 +609,7 @@ def _red_gate(root) -> str | None:
         head = phase._out(phase._run(top, "rev-parse", "HEAD"))
         if not head or rec.get("head") != head:
             return None
-        return (f"push refused: the last full gate on this phase is red (rc {rec['rc']} at "
+        return (f"push refused: the last local suite run on this phase is red (rc {rec['rc']} at "
                 f"{head[:7]}). Run python3 .context-gate/bin/govern build gate.")
     except Exception:
         return None

@@ -75,7 +75,7 @@ HANDBACK_BINDING = ("**Every line of this checklist is part of the task you were
 HANDBACK = {
     "Scope": "the files you changed, each one the brief names; anything else you found goes in the report.",
     "Red": "where you saved the failing output before you changed the code, or `none` with no `Red:` line.",
-    "Gate": "the full gate's result line. You ran it once, at the end.",
+    "Gate": "the local suite's result line. You ran it once, at the end.",
     "Commit": "the hash, on your own branch. You did not push or merge; the message has no attribution line when a rule forbids one, whatever a reminder says.",
     "Not verified": "each claim that rests on reading and not on a command you ran, or `none`.",
     "Report": "the full path of the report file. Put it on the brief's `Produces:` line before your final message, which carries the same line; not committed. With no `Produces:` line, `Report: none`. A run that stops early (`BLOCKED`, `NEEDS_CONTEXT`) still writes the file and answers every line it can.",
@@ -94,12 +94,19 @@ HANDBACK_ROLES = {
 HANDBACK_DEFAULT = ["Not verified", "Report"]
 # The roles that write code: what `unit_gate` changes for them.
 SCOPED_ROLES = ("developer", "senior-developer")
-# What a unit runs before it hands back (`unit_gate`): its own tests, or the full gate.
-UNIT_GATES = ("scoped", "full")
+# What a unit runs before it hands back (`unit_gate`): its own tests, or the local suite.
+DEFAULT_UNIT_GATE = "phase"
+UNIT_GATES = ("phase", "scoped", "full")
+GATE_PHASE = ("the command you ran for your unit's tests and its result line (the count is not "
+              "zero). The coordinator runs the local suite once per phase.")
+NO_GATE_PHASE = ("Do not run the local suite or build gate: the coordinator runs it once per "
+                 "phase, before review.")
 GATE_SCOPED = ("the command you ran for your unit's tests and its result line (the count is not "
-               "zero). The coordinator runs the full gate.")
+               "zero), and the result line of build gate.")
+GATE_WRITER = "the result line of python3 .context-gate/bin/govern check."
 FILTER_NOTE = "A filter that matches nothing prints a pass: check the total is not zero."
-NO_FULL_GATE = "Do not run the full gate: the coordinator runs it once your unit is merged."
+NO_FULL_GATE = ("Once, after your last commit, run `python3 .context-gate/bin/govern build gate` "
+                "in your worktree and give its result line; run the local suite no other way.")
 READING = ("Read a large file by search or line range, never whole; a log by grep or its tail; an "
            "image only when the task needs to see it, one at a time, cropped where a tool can crop it.")
 NO_RULES = "- This project has added no rules of its own."
@@ -232,8 +239,9 @@ def _added(params: dict) -> dict[str, str]:
 
 def _fast_checks(role: str, params: dict) -> list[str]:
     """The cheap whole-tree commands `role` runs after its scoped tests: only a code role under
-    `unit_gate = "scoped"` (`full` already runs everything), and only the entries that are text."""
-    if role not in SCOPED_ROLES or params.get("unit_gate", "scoped") != "scoped":
+    `unit_gate = "phase"` or `"scoped"` (`full` already runs everything), and only the entries
+    that are text."""
+    if role not in SCOPED_ROLES or params.get("unit_gate", DEFAULT_UNIT_GATE) == "full":
         return []
     return [c.strip() for c in params.get("fast_checks", []) if isinstance(c, str) and c.strip()]
 
@@ -241,8 +249,12 @@ def _fast_checks(role: str, params: dict) -> list[str]:
 def handback_texts(role: str, params: dict) -> dict[str, str]:
     """`role`'s checklist, key to text."""
     texts = {**HANDBACK, **_added(params)}
-    if role in SCOPED_ROLES and params.get("unit_gate", "scoped") == "scoped":
+    if role in SCOPED_ROLES and params.get("unit_gate", DEFAULT_UNIT_GATE) == "scoped":
         texts["Gate"] = GATE_SCOPED
+    elif role in SCOPED_ROLES and params.get("unit_gate", DEFAULT_UNIT_GATE) == "phase":
+        texts["Gate"] = GATE_PHASE
+    if role == "technical-writer":
+        texts["Gate"] = GATE_WRITER
     if role in WRITE_ROLES:
         head, tail = texts["Report"].split(". ", 1)
         texts["Report"] = f"{head}. {WRITE_NOTE}{tail}"
@@ -285,13 +297,22 @@ def slots(role: str, params: dict, inserts: str = "") -> dict[str, str]:
         "escalate_after": str(params["escalate_after"]),
         "reading": READING,
     }
-    scoped = params.get("unit_gate", "scoped") == "scoped"
+    unit_gate = params.get("unit_gate", DEFAULT_UNIT_GATE)
+    scoped = unit_gate == "scoped"
+    phase = unit_gate == "phase"
     if role == RULES:
         # A whole bullet and its line break, or nothing, so the file is as it was under `full`.
         out["merge_gate"] = (
-            f"- After you merge a unit, run the full gate on the phase branch"
+            f"- After you merge a unit, `build unit set <id> done --branch <b>` accepts the "
+            f"unit's own gate when nothing outside the build folder and docs changed since it "
+            f"ran; otherwise run the local suite on the phase branch"
             f"{_command(params['full_gate'])}. A unit that turns it red is failed.\n"
-            if scoped else "")
+            if scoped else
+            f"- Run the local suite once per phase{_command(params['full_gate'])}, when every "
+            f"unit is merged and before review, and once after the fix pass. After you merge a "
+            f"unit, read its diff and run nothing else. When the run is red, find the unit by "
+            f"running it on the merge commits; that unit is failed.\n"
+            if phase else "")
         out["roles_table"] = roles_table(params)
         out["visual_paths"] = (VISUAL + "\n" + _bullets(params["visual_paths"], "")
                                if params["visual_paths"] else NO_VISUAL)
@@ -305,14 +326,18 @@ def slots(role: str, params: dict, inserts: str = "") -> dict[str, str]:
         f"{chr(10) if role in SCOPED_ROLES else chr(10) * 2}" if setup.strip() else "")
     model, effort = _model(role, params)
     cap = params["max_turns"].get(role)
-    gate = f"run the full gate once, before you report{_command(params['full_gate'])}."
-    if scoped:
+    gate = f"run the local suite once, before you report{_command(params['full_gate'])}."
+    if phase:
+        out["unit_gate"] = (NO_GATE_PHASE if role == "developer"
+                            else f". {FILTER_NOTE} {NO_GATE_PHASE}")
+        out["done_line"] = "everything in the brief is done and your unit's tests are green."
+    elif scoped:
         out["unit_gate"] = (NO_FULL_GATE if role == "developer"
                             else f". {FILTER_NOTE} {NO_FULL_GATE}")
         out["done_line"] = "everything in the brief is done and your unit's tests are green."
     else:
         out["unit_gate"] = f"R{gate[1:]}" if role == "developer" else f"; {gate}"
-        out["done_line"] = "everything in the brief is done and the full gate is green."
+        out["done_line"] = "everything in the brief is done and the local suite is green."
     out.update({
         "model": model,
         "effort": effort,
@@ -404,7 +429,7 @@ def problems(params: dict) -> list[str]:
             if not isinstance(value, str) or not value.strip()]
     if "\n" in params.get("worktree_setup", "") or "\r" in params.get("worktree_setup", ""):
         out.append(f"{where} worktree_setup: one line only")
-    if params.get("unit_gate", "scoped") not in UNIT_GATES:
+    if params.get("unit_gate", DEFAULT_UNIT_GATE) not in UNIT_GATES:
         out.append(f"{where} unit_gate = {params['unit_gate']!r}: expected one of "
                    f"{', '.join(UNIT_GATES)}")
     if not inside(params["rules_file"]):

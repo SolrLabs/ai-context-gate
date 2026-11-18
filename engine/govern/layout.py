@@ -15,6 +15,10 @@ DISPLAY_NAME = "context-gate"
 PLUGIN = "context-gate"
 MARKETPLACE = "context-gate"
 PLUGIN_ID = f"{PLUGIN}@{MARKETPLACE}"
+# The marketplace a project on `[governance] channel = "beta"` takes the plugin from, and the
+# plugin's id there.
+BETA_MARKETPLACE = "context-gate-beta"
+BETA_CHANNEL_PLUGIN_ID = f"{PLUGIN}@{BETA_MARKETPLACE}"
 # A beta's plugin has a name of its own: Claude Code never loads a plugin under ~/.claude/skills/
 # whose name an installed marketplace plugin already has.
 BETA_PLUGIN = f"{PLUGIN}-beta"

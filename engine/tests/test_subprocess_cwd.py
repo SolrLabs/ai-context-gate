@@ -31,6 +31,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import profile_guard  # noqa: E402,F401
 
+TIER = "e2e"
+
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 FOLDERS = (HERE, REPO / "tools" / "tests")

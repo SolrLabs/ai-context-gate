@@ -1,18 +1,18 @@
 {
-  "name": "context-gate",
+  "name": "context-gate-beta",
   "owner": {
     "name": "SolrLabs LLC"
   },
-  "description": "The context-gate plugin, as released from https://github.com/SolrLabs/ai-context-gate.",
+  "description": "The context-gate plugin, the beta channel of https://github.com/SolrLabs/ai-context-gate.",
   "plugins": [
     {
       "name": "context-gate",
-      "version": "0.9.5-beta.2",
+      "version": "0.9.5-beta.3",
       "description": "Centralized governance for Claude Code projects: one engine, per-project policy in .context-gate/config.toml, guided upgrades.",
       "source": {
         "source": "archive",
-        "url": "https://github.com/SolrLabs/ai-context-gate/releases/download/v0.9.5-beta.2/context-gate-0.9.5-beta.2.zip",
-        "sha256": "85e223c7ee4751392055f97d5a34ac7fb5c6e08b85711fc91b82f0e8e5090855"
+        "url": "https://github.com/SolrLabs/ai-context-gate/releases/download/v0.9.5-beta.3/context-gate-0.9.5-beta.3.zip",
+        "sha256": "1f9fbbdcfeeaa96ce5ca869c0a41e4ffc11e2d5a08f18e6aead4ed5215d2f129"
       }
     }
   ]

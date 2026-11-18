@@ -38,7 +38,7 @@ that has `govern build`.
    the owner to review it.
 4. Cut the phase branch from the up-to-date default branch: `git switch -c phase/<slug>`. Never
    build on the default branch.
-5. Run the project's full gate once on the fresh branch. If it is red before you start, stop and
+5. Run the project's local suite once on the fresh branch. If it is red before you start, stop and
    say so: you cannot tell your breakage from what was already there. A gate that looks slow is
    timed twice before anyone calls it slow.
 6. `python3 .context-gate/bin/govern build start <slug> --plan <file>` (add `--high-risk` when the
@@ -83,10 +83,11 @@ that has `govern build`.
      `HEAD~1`). The line shown when it finishes names its report file, written in its worktree.
      Check it did what the brief says and nothing else. Then run
      `python3 .context-gate/bin/govern build verify <id> --branch <b>`. Merge its branch with
-     the phase branch checked out (move any other branch with `git branch -f`). Then run
-     `python3 .context-gate/bin/govern build gate` on the phase branch (when the project's build
-     rules have no "After you merge a unit" line, the agent ran the full gate itself: read its
-     result and skip this run). A long gate runs with `run_in_background`; wait on a Monitor
+     the phase branch checked out (move any other branch with `git branch -f`). Then follow the
+     build rules' gate bullet. Per-merge bullet: run
+     `python3 .context-gate/bin/govern build unit set <id> done --branch <b>`; if it refuses as
+     stale, run `build gate`. Once-per-phase bullet: run nothing now (step 3.1). With no bullet,
+     the agent ran the suite: read its result. A long gate runs with `run_in_background`; wait on a Monitor
      until-loop on `gate/last.json`, never `| tail`. Green: record it with
      `python3 .context-gate/bin/govern build unit set <id> done --branch <b> --agent <agent id>`.
      That also copies the unit's report and failing output into this checkout's
@@ -117,8 +118,8 @@ that has `govern build`.
 
 When every unit is `done`:
 
-1. Run `python3 .context-gate/bin/govern build gate` on the phase branch. When CI covers what the
-   host gate cannot (another OS or CPU), dispatch it on the phase branch before the reviewers.
+1. Run `python3 .context-gate/bin/govern build gate` on the phase branch.
+   CI runs on the phase's pull request and before a release, not here.
 2. `python3 .context-gate/bin/govern build review`. It writes the review package and the
    reviewers' briefs and prints the launch lines. For a high-risk phase, fill the definition of
    done into the `qa-engineer` brief from the plan's "Done when" list. Commit the ledger and the
