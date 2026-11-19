@@ -37,18 +37,56 @@ def _read(path: Path):
     return doc if isinstance(doc, dict) else None
 
 
-def find_run(root: Path, home: Path):
-    runs = home / ".local" / "state" / "context-gate" / "drive" / "runs"
+def _runs_for(folder: Path, runs: Path):
     try:
-        folders = sorted((p for p in runs.glob(root.name + "-*") if p.is_dir()),
+        folders = sorted((p for p in runs.glob(folder.name + "-*") if p.is_dir()),
                          key=lambda p: p.name, reverse=True)
     except OSError:
         return None
-    for folder in folders:
-        doc = _read(folder / "status.json")
-        if doc is not None and _same(doc.get("cwd", ""), root):
+    for run in folders:
+        doc = _read(run / "status.json")
+        if doc is not None and _same(doc.get("cwd", ""), folder):
             return doc
     return None
+
+
+def find_run(root: Path, home: Path):
+    """The newest run whose cwd is `root` or, nearest first, the closest governed folder above it
+    (a workspace's driver runs from the workspace root)."""
+    runs = home / ".local" / "state" / "context-gate" / "drive" / "runs"
+    folders = [root] + [p for p in root.parents if (p / ".context-gate").is_dir()]
+    for folder in folders:
+        doc = _runs_for(folder, runs)
+        if doc is not None:
+            return doc
+    return None
+
+
+def _own_name() -> str:
+    doc = _read(Path(__file__).resolve().parent.parent / ".claude-plugin" / "plugin.json")
+    name = doc.get("name") if doc else None
+    return name if isinstance(name, str) else ""
+
+
+def _enabled_plugins(root: Path, home: Path) -> dict:
+    merged: dict = {}
+    given = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    user = (Path(given).expanduser() if given else home / ".claude") / "settings.json"
+    for path in (user, root / ".claude" / "settings.json",
+                 root / ".claude" / "settings.local.json"):
+        doc = _read(path)
+        plugins = doc.get("enabledPlugins") if doc else None
+        if isinstance(plugins, dict):
+            merged.update(plugins)
+    return merged
+
+
+def _other_copy_draws(skill, root: Path, home: Path) -> bool:
+    """True when the plugin the driver runs is another copy than this one and is enabled: it draws the band."""
+    if not isinstance(skill, str) or not skill or skill == _own_name():
+        return False
+    return any(isinstance(k, str) and k.startswith(skill + "@") and v is True
+               for k, v in _enabled_plugins(root, home).items())
 
 
 def alive(pid) -> bool:
@@ -112,6 +150,8 @@ def band(doc: dict, now: float) -> dict:
     running = is_alive and not stopped
     in_session = running and state == "in_session"
     started = _epoch(doc.get("session_started"))
+    doing = doc.get("doing")
+    since = _epoch(doc.get("doing_since"))
     out = {
         "running": running,
         "stopped": stopped,
@@ -119,7 +159,8 @@ def band(doc: dict, now: float) -> dict:
         "session": doc.get("session"),
         "elapsed_s": max(0, int(now - started)) if in_session and started is not None else None,
         "in_session": in_session,
-        "next": doc.get("next"),
+        "doing": doing if isinstance(doing, str) else None,
+        "doing_s": None if since is None else max(0, int(now - since)),
         "units": doc.get("units"),
         "seven_day": _round(doc.get("seven_day")),
         "cap": _round(doc.get("cap")),
@@ -140,8 +181,11 @@ def main(argv) -> dict:
     root = _project_root(Path(argv[1]) if len(argv) > 1 and argv[1] else Path.cwd())
     if root is None:
         return {}
-    doc = find_run(root, home_dir())
+    home = home_dir()
+    doc = find_run(root, home)
     if doc is None or not doc.get("project"):
+        return {}
+    if _other_copy_draws(doc.get("skill"), root, home):
         return {}
     return band(doc, time.time())
 

@@ -69,6 +69,9 @@ BRANCH_NOTE = "on a branch cut before the roles last changed, merge the default 
               "render and commit"
 
 NO_AUTHORITY = "the plan or spec it names"
+# Ordered, gitignore-style: a `!` pattern excludes, the last match decides. Every Markdown file is
+# docs except what agents or code read.
+DOCS_PATHS = ["**/*.md", "!.claude/**", "!**/skills/**", "!**/templates/**", "!**/agents/**"]
 HANDBACK_BINDING = ("**Every line of this checklist is part of the task you were given. Copy it into your report file and answer each line. A run that hands back with a line unanswered has not done what it was asked, and its unit is treated as failed, whatever else it did.** Answer a line as `Key: <your answer>`, on one line. When the brief has no `Produces:` line there is no report file: answer the checklist in your final message.")
 # The checklist an agent answers before it hands back: key to text. A later requirement is one
 # more entry here and a place in `HANDBACK_ROLES`.

@@ -14,6 +14,7 @@ import profile_guard  # noqa: E402,F401
 from build_support import *  # noqa: E402,F401,F403
 from unittest import mock  # noqa: E402
 from base_support import BLOCK, Tree, decision, fm  # noqa: E402
+from govern import roles  # noqa: E402
 from test_build_workspace import Workspace  # noqa: E402
 
 
@@ -199,7 +200,11 @@ class BuildGateDocs(Build):
         self.ok("unit", "set", "u1", "done")
 
     def test_a_nested_readme_makes_it_stale(self):
-        self.green_then("engine/x.md")
+        self.started(extra=gated("exit 0") + 'docs_paths = ["docs/**", "*.md"]\n')
+        self.unit("u1")
+        self.code()
+        self.ok("gate")
+        self.code("engine/x.md", fm() + "words\n")
         self.refused_done("the last local suite run is stale: 1 files changed since")
 
     def test_docs_only_gate_skips_the_suite(self):
@@ -235,6 +240,32 @@ class BuildGateDocs(Build):
             code, out, err = self.go("gate")
         self.assertEqual(code, 1, out)
         self.assertEqual(self.record()["scope"], "full")
+
+    def test_the_default_docs_paths_worked_examples(self):
+        for path, want in (("engine/govern/CHANGELOG.md", True), ("docs/plan.md", True),
+                           ("README.md", True), ("engine/README.md", True),
+                           ("plugin/skills/build/SKILL.md", False), ("skills/a.md", False),
+                           ("engine/govern/templates/build-rules.md", False),
+                           (".claude/agents/developer.md", False), ("docs/notes.txt", False),
+                           ("src/app.py", False)):
+            with self.subTest(path=path):
+                self.assertIs(build._is_docs(path, list(roles.DOCS_PATHS)), want)
+
+    def test_a_later_docs_pattern_decides_and_bang_excludes(self):
+        patterns = ["**/*.md", "!x/**", "x/keep.md"]
+        self.assertTrue(build._is_docs("x/keep.md", patterns))
+        self.assertFalse(build._is_docs("x/a.md", patterns))
+        self.assertTrue(build._is_docs("y/a.md", patterns))
+
+    def test_a_changelog_only_commit_runs_govern_check_only(self):
+        self.started_with("exit 0")
+        self.code()
+        self.ok("gate")
+        self.code("engine/govern/CHANGELOG.md", fm() + "words\n")
+        with mock.patch.object(build, "_full_gate", return_value="exit 7"):
+            code, out, err = self.go("gate")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.record()["scope"], "docs")
 
     def test_the_docs_paths_matcher(self):
         patterns = ["docs/**", "*.md"]

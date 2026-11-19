@@ -27,6 +27,10 @@ KILL_AFTER = 10.0
 PROBE_TIMEOUT = 120
 PCT_RANGE = (20, 90)
 DEFAULT_PCT = 50
+DOING_EVERY = 2.0                   # seconds between writes of what the session is doing
+STATUS_EVERY = 60                   # seconds between refreshes of the plan's progress
+DOING_CHARS = 120
+SKILLS = ("context-gate", "context-gate-beta")
 
 
 class _Interrupted(Exception):
@@ -91,13 +95,15 @@ def _argv(claude: str, *args: str) -> list[str]:
 def probe_reading(claude: str, cwd: Path | None = None) -> tuple[float | None, str | None]:
     """The weekly usage as one cheap throwaway session reports it: (reading, why). `why` says
     the probe did not run or failed; a probe that ran cleanly with no event gives (None, None)."""
-    reading, _reset, why = probe_full(claude, cwd)
+    reading, _reset, why, _commands = probe_full(claude, cwd)
     return reading, why
 
 
 def probe_full(claude: str, cwd: Path | None = None) -> tuple[float | None, float | None,
-                                                               str | None]:
-    """`probe_reading` and the seven-day reset the same event carries: (reading, reset, why)."""
+                                                               str | None, list[str] | None]:
+    """`probe_reading`, the seven-day reset the same event carries, and the commands the init
+    event lists (a leading `/` stripped; None when the stream has none): (reading, reset, why,
+    commands)."""
     argv = _argv(claude, "-p", "Reply with OK.", "--model", "haiku", "--max-turns", "1",
                  "--output-format", "stream-json", "--verbose")
     try:
@@ -105,16 +111,28 @@ def probe_full(claude: str, cwd: Path | None = None) -> tuple[float | None, floa
                              encoding="utf-8", errors="replace", timeout=PROBE_TIMEOUT,
                              cwd=str(cwd) if cwd else None)
     except subprocess.TimeoutExpired:
-        return None, None, f"timeout after {PROBE_TIMEOUT}s"
+        return None, None, f"timeout after {PROBE_TIMEOUT}s", None
     except (OSError, subprocess.SubprocessError) as exc:
-        return None, None, f"did not start ({exc})"
+        return None, None, f"did not start ({exc})", None
     lines = res.stdout.splitlines()
+    commands = _init_commands(lines)
     reading = stream_reading(lines)
     if reading is not None:
-        return reading, stream_reset(lines), None
+        return reading, stream_reset(lines), None, commands
     if res.returncode != 0:
-        return None, None, f"exit status {res.returncode}"
-    return None, None, None
+        return None, None, f"exit status {res.returncode}", commands
+    return None, None, None, commands
+
+
+def _init_commands(lines: list[str]) -> list[str] | None:
+    """The `slash_commands` of the first init event in the stream, or None."""
+    for event in _events(lines):
+        if event.get("type") == "system" and event.get("subtype") == "init":
+            found = event.get("slash_commands")
+            if isinstance(found, list):
+                return [c[1:] if c.startswith("/") else c for c in found if isinstance(c, str)]
+            return None
+    return None
 
 
 def over_cap(readings: list[float], cap: float) -> bool:
@@ -189,10 +207,19 @@ def _status(ctx, project: str | None) -> tuple[str, dict] | None:
     return res.stdout, data
 
 
-def skill_command(plan: str) -> str:
-    """The session's first argument: the build skill of the plugin this engine ships with."""
-    name = "context-gate-beta" if versions.is_beta(govern.__version__) else "context-gate"
-    return f"/{name}:build {plan}"
+def skill_command(plan: str, commands: list[str] | None) -> str | None:
+    """The session's first argument: the build skill the probe saw loaded, the engine's own
+    plugin first. With no list (the probe's stream had none), the engine's own plugin. None when
+    the list holds neither skill."""
+    mine = "context-gate-beta" if versions.is_beta(govern.__version__) else "context-gate"
+    if commands is None:
+        return f"/{mine}:build {plan}"
+    commands = [c.removeprefix("/") for c in commands]
+    other = SKILLS[0] if mine == SKILLS[1] else SKILLS[1]
+    for name in (mine, other):
+        if f"{name}:build" in commands:
+            return f"/{name}:build {plan}"
+    return None
 
 
 def _roles_stale(ctx) -> str | None:
@@ -247,8 +274,34 @@ def _stop_group(proc: subprocess.Popen) -> None:
         pass
 
 
-def _session(argv, env, cwd: Path, out: Path, err: Path, deadline: float | None):
-    """Run one session. Returns (stdout lines, killed)."""
+def _doing(line: str) -> str | None:
+    """What an assistant event's last tool call is doing, or None when the line holds none."""
+    if '"tool_use"' not in line:
+        return None
+    try:
+        event = json.loads(line)
+        blocks = event["message"]["content"]
+    except (ValueError, KeyError, TypeError):
+        return None
+    if event.get("type") != "assistant" or not isinstance(blocks, list):
+        return None
+    uses = [b for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use"]
+    if not uses:
+        return None
+    block = uses[-1]
+    given = block.get("input")
+    given = given if isinstance(given, dict) else {}
+    for text in (given.get("description"), given.get("skill"), block.get("name")):
+        if isinstance(text, str) and text:
+            return text[:DOING_CHARS]
+    return None
+
+
+def _session(argv, env, cwd: Path, out: Path, err: Path, deadline: float | None,
+             on_doing=None):
+    """Run one session. Returns (stdout lines, killed). `on_doing(text)` is called with what the
+    last tool call does and the time it was seen, at most once per DOING_EVERY seconds; a step
+    held back by that limit is written by a timer thread, never after this returns."""
     lines: list[str] = []
     flags = {}
     if os.name == "nt":
@@ -261,14 +314,54 @@ def _session(argv, env, cwd: Path, out: Path, err: Path, deadline: float | None)
                                 stdout=subprocess.PIPE, stderr=errsink, text=True,
                                 encoding="utf-8", errors="replace", **flags)
 
+        guard = threading.Lock()
+        wake = threading.Condition(guard)
+        closed = threading.Event()
+        held: dict = {"text": None, "seen": 0.0, "last": float("-inf")}
+
+        def emit(now: float) -> None:
+            # caller holds `guard`: write the held step, unless the session is already closed
+            if held["text"] is not None and not closed.is_set():
+                on_doing(held["text"], held["seen"])
+                held["text"], held["last"] = None, now
+
         def pump() -> None:
             for line in proc.stdout:
                 lines.append(line.rstrip("\r\n"))
                 sink.write(line if line.endswith("\n") else line + "\n")
                 sink.flush()
+                if on_doing is None:
+                    continue
+                text = _doing(line)
+                with guard:
+                    if text is not None:
+                        held["text"], held["seen"] = text, time.time()
+                    now = time.monotonic()
+                    if now - held["last"] >= DOING_EVERY:
+                        emit(now)
+                    if held["text"] is not None:
+                        wake.notify()
+
+        def flush() -> None:
+            # waits for the moment the throttle window closes, not on a clock of its own
+            with wake:
+                while not closed.is_set():
+                    if held["text"] is None:
+                        wake.wait()
+                        continue
+                    now = time.monotonic()
+                    left = held["last"] + DOING_EVERY - now
+                    if left <= 0:
+                        emit(now)
+                    else:
+                        wake.wait(left)
 
         reader = threading.Thread(target=pump, daemon=True)
         reader.start()
+        flusher = None
+        if on_doing is not None:
+            flusher = threading.Thread(target=flush, name="drive-doing", daemon=True)
+            flusher.start()
         killed = False
         try:
             proc.wait(timeout=None if deadline is None else max(0.0, deadline - time.time()))
@@ -279,6 +372,11 @@ def _session(argv, env, cwd: Path, out: Path, err: Path, deadline: float | None)
             _stop_group(proc)
             raise
         reader.join(timeout=5)
+        with wake:
+            closed.set()
+            wake.notify_all()
+        if flusher is not None:
+            flusher.join()
         if not reader.is_alive():
             proc.stdout.close()
     return lines, killed
@@ -310,7 +408,9 @@ class _Status:
             "pid": os.getpid(), "project": ctx.root.name, "cwd": str(ctx.root), "plan": plan,
             "cap": cap, "cap_source": "today" if cap is None else "--cap", "hours": hours, "started": _utc(time.time()), "state": "starting",
             "session": 0, "session_started": None, "seven_day": None, "last": None,
-            "next": None, "units": None, "stop_reason": None, "updated": None}
+            "next": None, "units": None, "stop_reason": None, "updated": None,
+            "skill": None, "doing": None, "doing_since": None}
+        self.lock = threading.Lock()
 
     def begin(self, folder: Path, data: dict) -> None:
         self.folder = folder
@@ -319,22 +419,30 @@ class _Status:
     @staticmethod
     def progress(data: dict) -> dict:
         nxt, done, total = data.get("next"), data.get("done"), data.get("total")
-        ok = all(isinstance(v, int) and not isinstance(v, bool) for v in (done, total))
+        phase = data.get("phase")
+        ok = isinstance(phase, str) and all(
+            isinstance(v, int) and not isinstance(v, bool) for v in (done, total))
         return {"next": nxt if isinstance(nxt, str) else None,
-                "units": f"{done}/{total} units done" if ok else None}
+                "units": f"{phase} \u00b7 {done}/{total} units" if ok else None}
 
     def write(self, **fields) -> None:
         if self.folder is None:
             return
-        self.doc.update(fields)
-        self.doc["updated"] = _utc(time.time())
-        path = self.folder / "status.json"
-        tmp = path.with_name("status.json.tmp")
-        try:
-            tmp.write_text(json.dumps(self.doc, indent=2) + "\n", encoding="utf-8", newline="\n")
-            os.replace(tmp, path)
-        except OSError:
-            pass            # the file is a view of the run; losing a write must not stop it
+        with self.lock:
+            self.doc.update(fields)
+            self.doc["updated"] = _utc(time.time())
+            path = self.folder / "status.json"
+            tmp = path.with_name("status.json.tmp")
+            try:
+                tmp.write_text(json.dumps(self.doc, indent=2) + "\n", encoding="utf-8",
+                               newline="\n")
+                os.replace(tmp, path)
+            except OSError:
+                pass        # the file is a view of the run; losing a write must not stop it
+
+    def doing(self, text: str | None, since: float | None = None) -> None:
+        when = time.time() if since is None else since
+        self.write(doing=text, doing_since=None if text is None else _utc(when))
 
     def stop(self, reason: str) -> None:
         self.write(state="stopped", stop_reason=reason)
@@ -410,9 +518,12 @@ def _run(ctx, plan, cap, hours, max_sessions, compact_pct, permission_mode, clau
     deadline = None if hours is None else time.time() + float(hours) * 3600
     readings: list[float] = []
     reset: list[float | None] = [None]
+    probed: list[list[str] | None] = []         # the commands of the first probe only
 
     def probe() -> str | None:
-        value, found, why = probe_full(claude, ctx.root)
+        value, found, why, commands = probe_full(claude, ctx.root)
+        if not probed:
+            probed.append(commands)
         if value is not None:
             readings.append(value)
             reset[0] = found if found is not None else reset[0]
@@ -422,6 +533,11 @@ def _run(ctx, plan, cap, hours, max_sessions, compact_pct, permission_mode, clau
     if why:
         print(f"error: usage probe failed: {why}", file=sys.stderr)
         return 1
+    chosen = skill_command(plan, probed[0])
+    if chosen is None:
+        print("error: no context-gate build skill is loaded in this project (looked for "
+              "context-gate:build, context-gate-beta:build)", file=sys.stderr)
+        return 1
     text, data = first
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     folder = drive_log.log_path(home).parent / "runs" / f"{name}-{stamp}"
@@ -429,6 +545,7 @@ def _run(ctx, plan, cap, hours, max_sessions, compact_pct, permission_mode, clau
     print(f"run folder: {folder}")
     sys.stdout.flush()
     status.begin(folder, data)
+    status.write(skill=chosen.split(":", 1)[0][1:])
     last_next = str(data.get("next", ""))
     idle = 0
     n = 0
@@ -467,11 +584,26 @@ def _run(ctx, plan, cap, hours, max_sessions, compact_pct, permission_mode, clau
         before_next = str(data.get("next", ""))
         started = time.time()
         status.write(state="in_session", session=n, session_started=_utc(started))
-        argv = _argv(claude, "-p", skill_command(plan), "--output-format",
+        argv = _argv(claude, "-p", chosen, "--name", f"drive-{name}-s{n}", "--output-format",
                      "stream-json", "--verbose", "--permission-mode", permission_mode,
                      "--append-system-prompt", prompt)
-        lines, killed = _session(argv, env, ctx.root, folder / f"{n}.jsonl",
-                                 folder / f"{n}.err", deadline)
+        stop_timer = threading.Event()
+
+        def refresh() -> None:
+            while not stop_timer.wait(STATUS_EVERY):
+                got = _status(ctx, project)
+                if got is not None:
+                    status.write(**status.progress(got[1]))
+
+        timer = threading.Thread(target=refresh, name="drive-status", daemon=True)
+        timer.start()
+        try:
+            lines, killed = _session(argv, env, ctx.root, folder / f"{n}.jsonl",
+                                     folder / f"{n}.err", deadline, status.doing)
+        finally:
+            stop_timer.set()
+            timer.join()
+            status.doing(None)
         ended = time.time()
         events = _events(lines)
         results = [e for e in events if e.get("type") == "result"]

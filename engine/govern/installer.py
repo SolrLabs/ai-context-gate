@@ -526,12 +526,9 @@ def channel(root: Path, which: str) -> int:
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError) as exc:
         return fail(f"{layout.CONFIG} cannot be edited ({exc}); nothing was changed")
     ours = [r for r in (*record["plugin"], *record["marketplace"]) if r.get("channel")]
-    if which == "beta" and current == "beta" and ours:
-        print("already on the beta channel; nothing changed")
-        return 0
-    if which == "stable" and current != "beta" and not ours:
-        print("already on the stable channel; nothing changed")
-        return 0
+    if (which == "beta" and current == "beta" and ours) \
+            or (which == "stable" and current != "beta" and not ours):
+        return _already_on(root, which)
     path = root / SETTINGS
     original = path.read_bytes() if path.exists() else None
     new_rec = which == "beta" and not record["settings"]
@@ -565,11 +562,25 @@ def channel(root: Path, which: str) -> int:
         _settle_settings(root, record, rec)
     manifest_path = root / layout.MANIFEST
     manifest_before = manifest_path.read_bytes()
+    stuck: tuple[OSError, list[str]] | None = None
+    config_written = False
     try:
         write_manifest(manifest_path, record)
         cfg_path.write_bytes((codecs.BOM_UTF8 if bom else b"") + new_text.encode("utf-8"))
+        config_written = True
+        # The launchers last: an old one rejects `[governance] channel`, and a failed config
+        # write above has not touched them.
+        stuck = _refresh_tool_files(root / layout.GOV_DIR)
     except OSError as exc:
+        stuck = (exc, [])
+    if stuck is not None:
+        exc, unrestored = stuck
         manifest_path.write_bytes(manifest_before)
+        if config_written:
+            try:
+                cfg_path.write_bytes(raw)
+            except OSError:
+                unrestored.append(layout.CONFIG)
         if original is None:
             path.unlink(missing_ok=True)
         else:
@@ -582,7 +593,9 @@ def channel(root: Path, which: str) -> int:
                 for folder in (backup.parent, root / layout.BACKUP):
                     with contextlib.suppress(OSError):
                         folder.rmdir()
-        return fail(f"{exc}; settings and manifest put back")
+        return fail(f"{exc}; settings and manifest put back" if not unrestored else
+                    f"{exc}; settings and manifest put back, but "
+                    f"{', '.join(unrestored)} could not be put back")
     print(f"  channel      {which} ({layout.CONFIG} "
           f"{'sets' if which == 'beta' else 'drops'} [governance] channel)")
     if which == "beta":
@@ -987,6 +1000,30 @@ def upgrade(root: Path, with_report: bool = True) -> int:
     return 0
 
 
+def _already_on(root: Path, which: str) -> int:
+    """The no-op `channel` run: the launchers are still brought up to date when any differs from
+    the template, since an old one rejects `[governance] channel` on every command."""
+    gov = root / layout.GOV_DIR
+    want = (Path(__file__).resolve().parent / "templates" / "entrypoint.py").read_bytes()
+    stale = []
+    for rel in TOOL_FILES:
+        try:
+            if (gov / rel).read_bytes() != want:
+                stale.append(rel)
+        except OSError:
+            stale.append(rel)
+    if not stale:
+        print(f"already on the {which} channel; nothing changed")
+        return 0
+    stuck = _refresh_tool_files(gov)
+    if stuck is not None:
+        exc, unrestored = stuck
+        return fail(f"the launchers could not be refreshed ({exc})"
+                    + (f"; not put back: {', '.join(unrestored)}" if unrestored else ""))
+    print(f"already on the {which} channel; launchers refreshed")
+    return 0
+
+
 def _refresh_tool_files(gov: Path) -> tuple[OSError, list[str]] | None:
     """`_write_tool_files`, all or none: on an `OSError` (a file held open, no permission), every
     tool file is put back as it was. Returns None when written, else the error and the tool
@@ -1006,8 +1043,8 @@ def _refresh_tool_files(gov: Path) -> tuple[OSError, list[str]] | None:
                     if dest.exists():
                         dest.chmod(0o755)
                     dest.write_bytes(saved[rel])
-                elif dest.exists():
-                    dest.unlink()
+                elif dest.is_file() or dest.is_symlink():
+                    dest.unlink()                 # a directory there was never touched
             except OSError:
                 unrestored.append(f"{layout.GOV_DIR}/{rel}")
         return exc, unrestored

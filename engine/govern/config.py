@@ -67,7 +67,7 @@ FACT_LISTS = {("registry", "required_keys")}
 LAYOUT = {
     "governance": {"engine": "str", "source": "str", "profile": "str", "schema": "int",
                    "extensions": "list",
-                   "require_reasons": "bool", "channel": "str"},
+                   "require_reasons": "bool", "channel": "str", "engine_dir": "str"},
     "dialect": {**{k: "str" for k in DIALECT_DEFAULTS}, "reasons": "table"},
     # `skip`: registry entries, by name, this governance root leaves out entirely (each name is
     # checked against the registry file when `registry.load` reads it).
@@ -168,11 +168,13 @@ def series(version: str) -> tuple[int, int]:
     return int(parts[0]), int(parts[1])
 
 
-def check_pin(pin, local: bool = False, channel: str | None = None) -> str | None:
+def check_pin(pin, local: bool = False, channel: str | None = None,
+              in_tree: bool = False) -> str | None:
     """A project runs exactly the engine it pins: the same commit gets the same engine on every
     machine and in CI, and upgrading is a deliberate step. A series pin ("0.4") runs within its
     series, with a note, until the project upgrades. Returns that note, or None. `local`: the beta
-    that local.toml names runs whatever release is pinned, so only the version match is skipped.
+    that local.toml names runs whatever release is pinned, so only the version match is skipped;
+    `in_tree` (an `engine_dir`, for the engine's own repository) skips it the same way.
     `channel`: on "beta", the launcher runs a beta newer than the pinned release, so a beta
     engine whose release is newer than an exact pin, or whose series is newer than a series
     pin, is accepted; the pin itself is still never a beta."""
@@ -186,7 +188,7 @@ def check_pin(pin, local: bool = False, channel: str | None = None) -> str | Non
     if versions.is_beta(pin):
         raise ConfigError(f"{CONFIG_NAME} pins beta {pin}; a beta runs only from {layout.LOCAL} "
                           f"on one machine (govern beta on {pin}) — pin a release")
-    if local:
+    if local or in_tree:
         return None
     parts = pin.split(".")
     if channel == "beta" and versions.is_beta(__version__):
@@ -804,7 +806,8 @@ def load(root: Path, home: Path, *, pin_check: bool = True) -> Config:
     # The beta local.toml names runs whatever the committed pin is; that pin is for every
     # other machine and CI.
     local = _local_layer(root)
-    pin_note = check_pin(gov.get("engine"), local=bool(local), channel=gov.get("channel")) \
+    pin_note = check_pin(gov.get("engine"), local=bool(local), channel=gov.get("channel"),
+                         in_tree=bool(gov.get("engine_dir"))) \
         if pin_check else None
     if gov.get("schema", SCHEMA) != SCHEMA:
         raise ConfigError(f"{CONFIG_NAME}: schema {gov.get('schema')} is not supported "

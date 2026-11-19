@@ -21,7 +21,8 @@ const READING = {
   session: 3,
   elapsed_s: 65,
   in_session: true,
-  next: null,
+  doing: null,
+  doing_s: null,
   units: null,
   seven_day: null,
   cap: null,
@@ -67,6 +68,16 @@ test('a running reading inside a session shows the project', async ($, on) => {
 
 test('a running reading inside a session shows the clock', async ($, on) => {
   expect(await band($, on, ok(READING))).toContain('session 3 · 1m05s')
+})
+
+test('a reading in a session shows what it is doing and for how long', async ($, on) => {
+  const text = await band($, on, ok({ ...READING, doing: 'Run the gate', doing_s: 125 }))
+  expect(text).toContain('Run the gate · 2m')
+})
+
+test('a reading with a next step shows no next', async ($, on) => {
+  const text = await band($, on, ok({ ...READING, next: 'x' }))
+  expect(text).not.toContain('next:')
 })
 
 test('a running reading between sessions says so', async ($, on) => {

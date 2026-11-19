@@ -428,6 +428,35 @@ class LocalPlugin(unittest.TestCase):
     def beta_out(self) -> Path:
         return self.skills / f"{layout.PLUGIN}-beta"
 
+    def test_a_beta_copy_owns_its_band_state(self):
+        tree = release_tree(self.tmp / "tree", BETA)
+        res = self.module(tree)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        old, new = f"plugin: '{layout.PLUGIN}'", f"plugin: '{layout.PLUGIN}-beta'"
+        old_key, new_key = f"'{layout.PLUGIN}': {{", f"'{layout.PLUGIN}-beta': {{"
+        files = [("hooks", "drive_band.tsx"), ("hooks", "drive_band.test.tsx"),
+                 ("types", "index.d.ts")]
+        for folder, fname in files:
+            src = (tree / "plugin" / folder / fname).read_text(encoding="utf-8")
+            got = (self.beta_out() / folder / fname).read_text(encoding="utf-8")
+            self.assertNotIn(old, got)
+            self.assertNotIn(old_key, got)
+            self.assertEqual(got, src.replace(old, new).replace(old_key, new_key))
+        band = (tree / "plugin" / "hooks" / "drive_band.tsx").read_text(encoding="utf-8")
+        self.assertGreater(band.count(old), 0)
+        self.assertEqual((self.beta_out() / "hooks" / "drive_band.tsx")
+                         .read_text(encoding="utf-8").count(new), band.count(old))
+        self.assertIn(new_key, (self.beta_out() / "types" / "index.d.ts")
+                      .read_text(encoding="utf-8"))
+
+    def test_a_stable_install_leaves_the_band_state_alone(self):
+        tree = release_tree(self.tmp / "tree")
+        res = self.module(tree)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        for folder, fname in [("hooks", "drive_band.tsx"), ("types", "index.d.ts")]:
+            self.assertEqual((self.out / folder / fname).read_bytes(),
+                             (tree / "plugin" / folder / fname).read_bytes())
+
     def test_a_beta_installs_under_its_own_name_and_leaves_a_marker(self):
         tree = release_tree(self.tmp / "tree", BETA)
         before = listing(tree)

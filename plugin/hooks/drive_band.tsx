@@ -100,6 +100,10 @@ export const register: Register = on => {
       d.seven_day === null ? '' : ` · 7d ${d.seven_day}%${d.cap !== null ? ` / cap ${d.cap}` : ''}`
     const last = d.last ? ` · last ${d.last}` : ''
     const units = d.units ? ` · ${d.units}` : ''
+    const doing =
+      d.in_session && d.doing
+        ? ` · ${short(d.doing, 60)} · ${Math.floor(((d.doing_s ?? 0) + since) / 60)}m`
+        : ''
     return (
       <Box flexDirection="column">
         {line}
@@ -108,10 +112,10 @@ export const register: Register = on => {
           <Text dimColor>
             {' '}
             {state}
+            {doing}
             {units}
             {usage}
             {last}
-            {d.next ? ` · next: ${short(d.next, 60)}` : ''}
           </Text>
         </Text>
       </Box>

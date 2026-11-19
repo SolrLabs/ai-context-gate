@@ -59,6 +59,7 @@ The tables:
 | `extensions` | list of strings | `[]` | Directories, relative to the governance root, whose `*.py` files register extension checks. Each directory must exist. See [Extensions](#extensions). |
 | `require_reasons` | boolean | `true` | Whether a loosened setting needs a `reason` (see [Loosening](#loosening-needs-a-reason)). |
 | `channel` | string | `"stable"` | `"stable"` runs the pinned release. `"beta"` runs, on every machine and in CI, the newest beta whose release is newer than the pin, installed or tagged at `source` (asked at most once an hour), and, when the newest beta cannot be installed, the newest installed beta newer than the pin, and the pin only when there is none. The pin itself stays a release. See [Beta channel](#beta-channel). |
+| `engine_dir` | string | `""` | A folder of this repository whose engine the launcher runs instead of the pinned release, skipping the pin's version match; for the engine's own repository only, never an adopter. |
 
 ```toml
 [governance]
@@ -760,11 +761,12 @@ the beta plugin keys would stay in `.claude/settings.local.json`.
 the newest beta whose release is newer than the pin (the pin itself stays a release), and Claude
 Code loads the matching plugin. The default, `"stable"`, runs the pinned release.
 
-Switch with the installer's `channel` command, from the project root, with the engine the project
-is pinned to:
+Switch with the installer's `channel` command, from the project root. Run it with the beta's own
+engine, not the pinned one (the pinned launcher refuses a beta target); `govern beta on <beta>`
+installs that engine first:
 
 ```sh
-PYTHONPATH=~/.local/share/context-gate/engines/<pinned version> python3 -P -m govern.installer channel --root . beta
+PYTHONPATH=~/.local/share/context-gate/engines/<beta version> python3 -P -m govern.installer channel --root . beta
 ```
 
 It needs an installed project (`.context-gate/installed.toml`). It changes, in one go:
@@ -776,6 +778,7 @@ It needs an installed project (`.context-gate/installed.toml`). It changes, in o
   `enabledPlugins["context-gate@context-gate"] = false`. The plugin keeps its name, so skills stay
   `context-gate:*`. Commit the file so teammates get the same plugin.
 - `.context-gate/installed.toml`: each settings key's previous value, so the switch can be undone.
+- `.context-gate/bin/`: the beta's launcher replaces the project's, written with the config and settings, all or none. On a project already on the beta channel, `channel beta` still refreshes `bin/`.
 
 Running it again says the project is already on the channel and changes nothing.
 
@@ -1167,6 +1170,12 @@ default: a unit runs its own tests, and the coordinator runs the local suite onc
 before review. `"scoped"` has each unit also run `build gate` and the coordinator run the suite
 after each merge; `"full"` has each unit run the suite. `worktree_setup` is one command,
 rendered as a line in `developer`, `senior-developer` and `technical-writer`.
+
+`docs_paths` is a list of globs, default `["**/*.md", "!.claude/**", "!**/skills/**",
+"!**/templates/**", "!**/agents/**"]`: every Markdown file is docs except rendered or shipped
+text. Patterns are read in order; a `!` pattern excludes and the last match decides. A change only
+to docs runs `govern check` (and `docs_gate`) instead of the suite. A project whose code reads
+Markdown (templates, skills, fixtures) adds `!` patterns after the first one.
 
 ## Agent gates
 

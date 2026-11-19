@@ -875,7 +875,11 @@ class PublicBetaTagsAtTheSource(Base):
         self.assertNotIn("Traceback", res.stderr)
         self.assertEqual(res.stderr.strip().splitlines(),
                          [f"error: an upgrade takes a release, and {self.AHEAD} is a beta; "
-                          f"run a beta with govern beta on {self.AHEAD}"])
+                          f"run a beta on this machine with govern beta on {self.AHEAD}; "
+                          f"to move the whole project to betas: "
+                          f"PYTHONPATH={layout.engines_dir(w.home) / self.AHEAD} "
+                          f"python3 -P -m govern.installer channel --root . beta "
+                          f"(govern beta on {self.AHEAD} installs that engine first)"])
         self.assertEqual((w.root / CFG).read_bytes(), before)
         self.assertEqual(self._engines_installed(w), [])      # nothing was downloaded
 

@@ -32,11 +32,12 @@ from govern.text import read
                               f"\"{roles.NO_AUTHORITY}\""),
            "scoped_test": Param("str", "", "The command that runs only the tests a unit touches"),
            "full_gate": Param("str", "", "The command that runs the project's local suite"),
-           "docs_paths": Param("list", ["docs/**", "*.md"],
+           "docs_paths": Param("list", roles.DOCS_PATHS,
                                "Paths whose changes alone never make the last local suite run "
                                "stale; `build gate` runs only `govern check` for them (and "
-                               "`docs_gate`); a project whose suite reads its docs sets "
-                               "`docs_gate` or narrows `docs_paths`"),
+                               "`docs_gate`). Patterns are read in order, a `!` pattern "
+                               "excludes, the last match decides; a project whose code or tests "
+                               "read other Markdown adds `!` patterns or sets `docs_gate`"),
            "docs_gate": Param("str", "", "A command run beside govern check when only docs_paths "
                               "changed since a green run; a project whose tests read its docs "
                               "names them here"),

@@ -209,6 +209,65 @@ class Channel(Base):
         self.assertEqual(len(record["plugin"]), 2)
         self.assertEqual(len(record["marketplace"]), 1)
 
+    def _old_launchers(self, root):
+        for rel in layout.TOOL_FILES:
+            (root / layout.GOV_DIR / rel).write_bytes(b"old launcher\n")
+
+    def _assert_launchers_current(self, root):
+        want = (Path(installer.__file__).resolve().parent / "templates" / "entrypoint.py"
+                ).read_bytes()
+        for rel in layout.TOOL_FILES:
+            dest = root / layout.GOV_DIR / rel
+            self.assertEqual(dest.read_bytes(), want, rel)
+            if sys.platform != "win32":
+                self.assertTrue(dest.stat().st_mode & 0o100, rel)
+
+    def test_beta_refreshes_an_old_launcher(self):
+        root = self.project()
+        self._old_launchers(root)
+        code, _, err = self.run_cmd(root, "beta")
+        self.assertEqual(code, 0, err)
+        self._assert_launchers_current(root)
+
+    def test_stable_refreshes_an_old_launcher(self):
+        root = self.project()
+        self.assertEqual(self.run_cmd(root, "beta")[0], 0)
+        self._old_launchers(root)
+        code, _, err = self.run_cmd(root, "stable")
+        self.assertEqual(code, 0, err)
+        self._assert_launchers_current(root)
+
+    def _nothing_changed_refreshes(self, which, first=None):
+        root = self.project()
+        if first:
+            self.assertEqual(self.run_cmd(root, first)[0], 0)
+        self.assertEqual(self.run_cmd(root, which)[0], 0)
+        self._old_launchers(root)
+        code, out, err = self.run_cmd(root, which)
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"already on the {which} channel; launchers refreshed", out)
+        self._assert_launchers_current(root)
+
+    def test_a_nothing_changed_run_refreshes_old_launchers(self):
+        self._nothing_changed_refreshes("beta")
+
+    def test_a_nothing_changed_stable_run_refreshes_old_launchers(self):
+        self._nothing_changed_refreshes("stable", "beta")
+
+    def test_a_failed_launcher_write_puts_everything_back(self):
+        root = self.project()
+        self._old_launchers(root)
+        blocked = root / layout.GOV_DIR / "bin" / "govern"
+        blocked.unlink()
+        blocked.mkdir()                                 # a directory where the launcher goes
+        before = self.tree(root)
+        code, _, err = self.run_cmd(root, "beta")
+        self.assertEqual(code, 2, err)
+        self.assertIn("settings and manifest put back", err)
+        self.assertNotIn("could not be put back", err)
+        self.assertEqual(self.tree(root), before)
+        self.assertFalse((root / installer.SETTINGS).exists())
+
     def test_a_failed_config_write_keeps_a_settings_file_the_project_had(self):
         root = self.project()
         path = root / installer.SETTINGS

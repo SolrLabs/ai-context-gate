@@ -88,5 +88,24 @@ class ChannelPin(unittest.TestCase):
             config._validate_layout({"governance": {"channel": value}}, "config.toml")
 
 
+class InTreePin(unittest.TestCase):
+    """`[governance] engine_dir`: the engine's own repository runs its tree, whatever it pins."""
+
+    def pin(self, pin, **kw):
+        with mock.patch.object(config, "__version__", "0.9.4"):
+            return config.check_pin(pin, **kw)
+
+    def test_a_different_release_pin_is_accepted_in_tree(self):
+        self.assertIsNone(self.pin("0.9.3", in_tree=True))
+
+    def test_the_same_pin_is_refused_without_it(self):
+        with self.assertRaisesRegex(config.ConfigError, "but this is engine"):
+            self.pin("0.9.3")
+
+    def test_a_beta_pin_is_refused_in_tree(self):
+        with self.assertRaises(config.ConfigError):
+            self.pin("0.9.4-beta.1", in_tree=True)
+
+
 if __name__ == "__main__":
     unittest.main()
