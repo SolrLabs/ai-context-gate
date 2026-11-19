@@ -48,6 +48,7 @@ class DriveStatus(unittest.TestCase):
 
     def run_script(self, *args: str) -> dict:
         env = {**os.environ, "HOME": str(self.home), "USERPROFILE": str(self.home)}
+        env.pop("CLAUDE_CONFIG_DIR", None)
         res = subprocess.run([sys.executable, str(SCRIPT), *args], env=env, cwd=self.tmp,
                              capture_output=True, text=True)
         self.assertEqual((res.returncode, res.stderr), (0, ""))
@@ -76,7 +77,7 @@ class DriveStatus(unittest.TestCase):
         self.assertTrue(got["running"])
         self.assertFalse(got["in_session"])
         self.assertIsNone(got["elapsed_s"])
-        self.assertEqual(got["next"], "u3")
+        self.assertNotIn("next", got)
 
     def test_walks_up_from_a_subfolder(self):
         self.status()
@@ -169,6 +170,116 @@ class DriveStatus(unittest.TestCase):
         res = subprocess.run([sys.executable, str(SCRIPT), str(self.root)], env=env2, cwd=self.tmp,
                              capture_output=True, text=True)
         self.assertEqual(json.loads(res.stdout)["project"], "demo")
+
+    # -- the band shows once, the step and the units, and a nested project finds its run --
+
+    def plugin(self, name: str) -> Path:
+        """A copy of the script under its own plugin root, named `name` in plugin.json."""
+        base = self.tmp / ("plugin-" + name)
+        (base / "hooks").mkdir(parents=True, exist_ok=True)
+        (base / ".claude-plugin").mkdir(exist_ok=True)
+        (base / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": name}), encoding="utf-8")
+        script = base / "hooks" / "drive_status.py"
+        script.write_text(SCRIPT.read_text(encoding="utf-8"), encoding="utf-8")
+        return script
+
+    def run_as(self, name: str, folder=None, env=None) -> dict:
+        script = self.plugin(name)
+        base = {**os.environ, "HOME": str(self.home), "USERPROFILE": str(self.home)}
+        base.pop("CLAUDE_CONFIG_DIR", None)
+        env = {**base, **(env or {})}
+        res = subprocess.run([sys.executable, "-B", str(script), str(folder or self.root)], env=env,
+                             cwd=self.tmp, capture_output=True, text=True)
+        self.assertEqual((res.returncode, res.stderr), (0, ""))
+        return json.loads(res.stdout)
+
+    def settings(self, name: str, doc: dict, base=None) -> None:
+        folder = (base or self.root) / ".claude"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / name).write_text(json.dumps(doc), encoding="utf-8")
+
+    def test_two_copies_enabled_draw_one_band(self):
+        self.status(skill="context-gate-beta")
+        self.settings("settings.json", {"enabledPlugins": {"context-gate@m": True, "context-gate-beta@skills-dir": True}})
+        self.assertEqual(self.run_as("context-gate"), {})
+        self.assertEqual(self.run_as("context-gate-beta")["project"], "demo")
+
+    def test_only_one_copy_enabled_draws(self):
+        self.status(skill="context-gate-beta")
+        self.settings("settings.json", {"enabledPlugins": {"context-gate@m": True}})
+        self.assertEqual(self.run_as("context-gate")["project"], "demo")
+
+    def test_disabled_other_copy_draws(self):
+        self.status(skill="context-gate-beta")
+        self.settings("settings.json", {"enabledPlugins": {"context-gate-beta@skills-dir": False}})
+        self.assertEqual(self.run_as("context-gate")["project"], "demo")
+
+    def test_local_settings_override_project_settings(self):
+        self.status(skill="context-gate-beta")
+        self.settings("settings.json", {"enabledPlugins": {"context-gate-beta@skills-dir": True}})
+        self.settings("settings.local.json", {"enabledPlugins": {"context-gate-beta@skills-dir": False}})
+        self.assertEqual(self.run_as("context-gate")["project"], "demo")
+
+    def test_user_settings_count_and_unreadable_files_are_empty(self):
+        self.status(skill="context-gate-beta")
+        self.settings("settings.json", {"enabledPlugins": {"context-gate-beta@skills-dir": True}}, base=self.home)
+        self.assertEqual(self.run_as("context-gate"), {})
+        (self.root / ".claude").mkdir()
+        (self.root / ".claude" / "settings.json").write_bytes(b"\xff\xfe not json")
+        self.assertEqual(self.run_as("context-gate"), {})
+
+    def test_user_settings_follow_claude_config_dir(self):
+        self.status(skill="context-gate-beta")
+        elsewhere = self.tmp / "config-dir"
+        elsewhere.mkdir()
+        (elsewhere / "settings.json").write_text(json.dumps(
+            {"enabledPlugins": {"context-gate-beta@skills-dir": True}}), encoding="utf-8")
+        self.settings("settings.json", {"enabledPlugins": {"context-gate@m": True}})
+        self.assertEqual(self.run_as("context-gate", env={"CLAUDE_CONFIG_DIR": str(elsewhere)}), {})
+
+    def test_same_skill_or_no_skill_draws(self):
+        self.settings("settings.json", {"enabledPlugins": {"context-gate-beta@skills-dir": True}})
+        self.status(skill="context-gate-beta")
+        self.assertEqual(self.run_as("context-gate-beta")["project"], "demo")
+        self.status(skill=None)
+        self.assertEqual(self.run_as("context-gate")["project"], "demo")
+
+    def test_doing_and_units_pass_through_and_next_is_gone(self):
+        self.status(state="in_session", session_started=utc(30), doing="Run the gate", doing_since=utc(90),
+                    units="p1 \u00b7 2/5 units")
+        got = self.read()
+        self.assertEqual(got["doing"], "Run the gate")
+        self.assertAlmostEqual(got["doing_s"], 90, delta=2)
+        self.assertEqual(got["units"], "p1 \u00b7 2/5 units")
+        self.assertEqual(set(got), {"running", "stopped", "project", "session", "elapsed_s", "in_session",
+                                    "doing", "doing_s", "units", "seven_day", "cap", "last", "age_s"})
+
+    def test_doing_s_is_null_without_a_usable_since(self):
+        self.status(doing="x")
+        got = self.read()
+        self.assertEqual((got["doing"], got["doing_s"]), ("x", None))
+        self.status(doing="x", doing_since="garbage")
+        self.assertIsNone(self.read()["doing_s"])
+        self.status(doing="x", doing_since=utc(-500))
+        self.assertEqual(self.read()["doing_s"], 0)
+
+    def nested(self):
+        self.ws = self.tmp / "w"
+        (self.ws / ".context-gate").mkdir(parents=True)
+        self.app = self.ws / "app"
+        (self.app / ".context-gate").mkdir(parents=True)
+        (self.app / "src").mkdir()
+
+    def test_member_session_finds_the_workspace_run(self):
+        self.nested()
+        self.status(name="w", cwd=self.ws, session=4)
+        self.assertEqual(self.run_script(str(self.app / "src"))["session"], 4)
+
+    def test_member_run_wins_over_the_workspace_run(self):
+        self.nested()
+        self.status(name="w", cwd=self.ws, session=4)
+        self.status(name="app", cwd=self.app, session=8)
+        self.assertEqual(self.run_script(str(self.app / "src"))["session"], 8)
 
 
 if __name__ == "__main__":

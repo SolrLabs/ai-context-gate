@@ -4,6 +4,20 @@ Newest first. Each release says what changed and, under **Upgrading**, anything 
 do or decide. The upgrade report quotes every entry between the engine a project ran and the one
 it upgraded to.
 
+## 0.9.5-beta.4 — 2026-11-19
+
+The beta channel refreshes the launcher, and the drive band shows the step and the units.
+
+- **Changed:** `govern channel beta` refreshes `.context-gate/bin/` with the beta's launcher, all or none with the config and settings writes, and runs with the beta's engine. A beta-target refusal names the whole-project route (`channel --root . beta`). The upgrade skill says a whole project moves with `channel beta`, one machine with `beta on`.
+- **Changed:** the driver reads which build skill is loaded (`context-gate-beta:build` or `context-gate:build`) from the probe and stops before session 1 when neither is. A probe with no `slash_commands` keeps the version rule. Driver sessions are named `drive-<project>-s<n>`.
+- **Added:** `status.json` gains `skill`, `doing`, `doing_since` and `units`. A held-back `doing` step is written when its 2 s window closes. `drive_status.py` honors `CLAUDE_CONFIG_DIR`.
+- **Changed:** with two plugin copies enabled, only the copy matching `status.json`'s `skill` draws the band. It shows the live step with its minutes and the units, and drops `next`. A nested project finds its workspace's run.
+- **Fixed:** a `-beta` plugin copy rewrites its band's state owner to its own name, so the beta copy draws its band (beta 3's never did).
+- **Added:** `[governance] engine_dir` runs an engine folder of the repository instead of the pinned release; for the engine's own repository only.
+- **Changed:** `docs_paths` defaults to every Markdown file (`**/*.md`), less `.claude`, skills, templates and agents. A change only to docs, a changelog included, runs `govern check` alone (`scope: "docs"`).
+
+**Upgrading:** a project whose code reads Markdown outside those folders adds `!` patterns to `docs_paths`, so a change there still runs the suite. A project that set `docs_paths` keeps its own.
+
 ## 0.9.5-beta.3 — 2026-11-18
 
 Fewer suite runs per build, a beta channel, and the drive band in the plugin. The local test suite is also faster, and the slowest tests are a separate tier.

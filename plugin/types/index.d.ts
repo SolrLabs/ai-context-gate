@@ -5,7 +5,8 @@ export type Drive = {
   session: number
   elapsed_s: number | null
   in_session: boolean
-  next: string | null
+  doing: string | null
+  doing_s: number | null
   units: string | null
   seven_day: number | null
   cap: number | null

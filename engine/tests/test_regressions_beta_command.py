@@ -845,6 +845,16 @@ class BetaCommand(Base):
         self.assertEqual(self.state(), before)
         self.assertEqual(list(elsewhere.iterdir()), [])
 
+    def test_upgrade_towards_a_beta_names_the_whole_project_route(self):
+        upgrade = self.root / layout.GOV_DIR / "bin" / "upgrade"
+        res = subprocess.run([sys.executable, str(upgrade), "--to", BETA], env=self.env,
+                             capture_output=True, text=True, cwd=self.root)
+        self.assertEqual(res.returncode, 2, res.stdout + res.stderr)
+        engines = layout.engines_dir(self.home)
+        self.assertIn(f"govern beta on {BETA}; to move the whole project to betas: "
+                      f"PYTHONPATH={engines / BETA} python3 -P -m govern.installer "
+                      f"channel --root . beta", res.stderr)
+
     def test_uninstall_does_not_take_beta(self):
         # Only the gate dispatches `beta`: bin/uninstall hands its argv to the installer.
         uninstall = self.root / layout.GOV_DIR / "bin" / "uninstall"

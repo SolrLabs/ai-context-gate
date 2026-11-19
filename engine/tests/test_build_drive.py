@@ -11,6 +11,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import unittest
 from datetime import datetime, timedelta
@@ -49,6 +50,10 @@ if entry.get("snapshot"):
     shutil.copy(found[0], entry["snapshot"])
 for line in entry.get("lines", []):
     print(json.dumps(line), flush=True)
+if entry.get("snapshot_after"):
+    time.sleep(entry["snapshot_after"])
+    found = glob.glob(os.path.join(os.environ["FAKE_RUNS"], "*", "status.json"))
+    shutil.copy(found[0], entry["snapshot_after_to"])
 time.sleep(entry.get("sleep", 0))
 '''
 
@@ -122,10 +127,20 @@ class Drive(Build):
         self.assertEqual({c["ceiling"] for c in sessions}, {"0"})
 
     def test_skill_name_follows_the_engine(self):
-        with mock.patch("govern.__version__", "0.9.5"):
-            self.assertEqual(drive.skill_command("p.md"), "/context-gate:build p.md")
-        with mock.patch("govern.__version__", "0.9.5-beta.2"):
-            self.assertEqual(drive.skill_command("p.md"), "/context-gate-beta:build p.md")
+        both = ["context-gate-beta:build", "context-gate:build"]
+        cases = [
+            ("0.9.5-beta.2", ["context-gate:build"], "/context-gate:build p.md"),
+            ("0.9.5-beta.2", both, "/context-gate-beta:build p.md"),
+            ("0.9.5", ["context-gate-beta:build"], "/context-gate-beta:build p.md"),
+            ("0.9.5", both, "/context-gate:build p.md"),
+            ("0.9.5-beta.2", None, "/context-gate-beta:build p.md"),
+            ("0.9.5", None, "/context-gate:build p.md"),
+            ("0.9.5-beta.2", ["/context-gate:build"], "/context-gate:build p.md"),
+        ]
+        for version, commands, want in cases:
+            with self.subTest(version=version, commands=commands):
+                with mock.patch("govern.__version__", version):
+                    self.assertEqual(drive.skill_command("p.md", commands), want)
         code, out, calls = self.drive([entry(pct=40), entry("x\nLOOP: plan-done", end=True)])
         argv = calls[1]["argv"]
         self.assertEqual(argv[argv.index("-p") + 1], "/context-gate:build plan.md")
@@ -377,7 +392,8 @@ class Drive(Build):
         return json.loads(found[0].read_text(encoding="utf-8"))
 
     KEYS = {"pid", "project", "cwd", "plan", "cap", "cap_source", "hours", "started", "state", "session",
-            "session_started", "seven_day", "last", "next", "units", "stop_reason", "updated"}
+            "session_started", "seven_day", "last", "next", "units", "stop_reason", "updated",
+            "skill", "doing", "doing_since"}
 
     def test_status_file_after_plan_done(self):
         code, out, calls = self.drive([
@@ -583,6 +599,136 @@ class Drive(Build):
         self.assertEqual(drive.stream_reset([event(resetsAt=1800000000000)]), 1800000000.0)
         self.assertIsNone(drive.stream_reset([event()]))
         self.assertIsNone(drive.stream_reset(["not json"]))
+
+    def init(self, commands) -> dict:
+        return {"type": "system", "subtype": "init", "slash_commands": commands}
+
+    def test_adopter_beta_engine_with_only_the_stable_plugin_loaded(self):
+        """The probe's init lists only context-gate:build: the session asks for that one."""
+        with mock.patch("govern.__version__", "0.9.5-beta.2"):
+            code, out, calls = self.drive([
+                {"lines": [self.init(["compact", "context-gate:build"]), rl(40)]},
+                entry("x\nLOOP: plan-done", end=True)])
+        self.assertEqual(code, 0, out)
+        argv = calls[1]["argv"]
+        self.assertEqual(argv[argv.index("-p") + 1], "/context-gate:build plan.md")
+        self.assertEqual(self.status()["skill"], "context-gate")
+
+    def test_no_build_skill_loaded_exits_1_before_a_session(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code, out, calls = self.drive([{"lines": [self.init(["compact"]), rl(40)]}])
+        self.assertEqual(code, 1)
+        self.assertEqual(err.getvalue(),
+                         "error: no context-gate build skill is loaded in this project (looked "
+                         "for context-gate:build, context-gate-beta:build)\n")
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(drive_log.rows(self.w.home))
+
+    def test_session_is_named_for_the_project(self):
+        code, out, calls = self.drive([entry(pct=40), entry("x\nLOOP: plan-done", end=True)])
+        argv = calls[1]["argv"]
+        self.assertEqual(argv[argv.index("--name") + 1], f"drive-{self.w.root.name}-s1")
+
+    def tools(self, *descriptions) -> list[dict]:
+        def block(name, **inp):
+            return {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "hi"}, {"type": "tool_use", "name": name, "input": inp}]}}
+        return [block("Bash", description=descriptions[0]),
+                block("Agent", description=descriptions[1]), block("Skill", skill=descriptions[2])]
+
+    def test_status_shows_what_the_session_is_doing(self):
+        seen = self.tmp / "seen.json"
+        lines = self.tools("run tests", "x" * 200, "context-gate:build")
+        with mock.patch.object(drive, "DOING_EVERY", 0):
+            code, out, calls = self.drive([entry(pct=40), {
+                "lines": lines, "snapshot_after": 0.3, "snapshot_after_to": str(seen)},
+                entry("x\nLOOP: stop r", ruling="r")])
+        doc = json.loads(seen.read_text(encoding="utf-8"))
+        self.assertEqual(doc["doing"], "context-gate:build")
+        self.assertTrue(doc["doing_since"])
+        self.assertEqual(self.status()["doing"], None)
+        self.assertEqual(self.status()["doing_since"], None)
+        with mock.patch.object(drive, "DOING_EVERY", 0):
+            self.log.unlink()
+            shutil.rmtree(drive_log.log_path(self.w.home).parent / "runs")
+            code, out, calls = self.drive([entry(pct=40), {
+                "lines": lines[1:2], "snapshot_after": 0.3, "snapshot_after_to": str(seen)},
+                entry("x\nLOOP: stop r", ruling="r")])
+        self.assertEqual(json.loads(seen.read_text(encoding="utf-8"))["doing"], "x" * 120)
+
+    def test_doing_is_throttled(self):
+        seen = self.tmp / "seen.json"
+        with mock.patch.object(drive, "DOING_EVERY", 3600):
+            code, out, calls = self.drive([entry(pct=40), {
+                "lines": self.tools("first", "second", "third"), "snapshot_after": 0.3,
+                "snapshot_after_to": str(seen)}, entry("x\nLOOP: stop r", ruling="r")])
+        self.assertEqual(json.loads(seen.read_text(encoding="utf-8"))["doing"], "first")
+
+    def test_a_held_back_step_is_written_by_time(self):
+        seen = self.tmp / "seen.json"
+        with mock.patch.object(drive, "DOING_EVERY", 1.0):
+            code, out, calls = self.drive([entry(pct=40), {
+                "lines": self.tools("first", "second", "third"), "snapshot_after": 1.5,
+                "snapshot_after_to": str(seen)}, entry("x\nLOOP: stop r", ruling="r")])
+        self.assertEqual(json.loads(seen.read_text(encoding="utf-8"))["doing"], "third")
+
+    def test_doing_since_is_the_time_the_step_was_seen(self):
+        status = drive._Status(mock.Mock(root=self.tmp), "plan.md", None, None)
+        status.begin(self.tmp, {})
+        status.doing("x", since=1_700_000_000)
+        doc = json.loads((self.tmp / "status.json").read_text(encoding="utf-8"))
+        self.assertEqual(doc["doing_since"], "2023-11-14T22:13:20Z")
+        status.doing(None)
+        doc = json.loads((self.tmp / "status.json").read_text(encoding="utf-8"))
+        self.assertIsNone(doc["doing_since"])
+
+    def test_a_late_step_never_follows_the_return_of_the_session(self):
+        script = ("import json,sys,time\n"
+                  "print(json.dumps({'type':'assistant','message':{'content':["
+                  "{'type':'tool_use','name':'Bash','input':{'description':'one'}}]}}),flush=True)\n"
+                  "print(json.dumps({'type':'assistant','message':{'content':["
+                  "{'type':'tool_use','name':'Bash','input':{'description':'two'}}]}}),flush=True)\n")
+        got = []
+        with mock.patch.object(drive, "DOING_EVERY", 0.1):
+            drive._session([sys.executable, "-c", script], dict(os.environ), self.tmp,
+                           self.tmp / "o.jsonl", self.tmp / "o.err", None,
+                           lambda text, since: got.append((text, time.monotonic())))
+            returned = time.monotonic()
+            time.sleep(0.4)
+        self.assertTrue(got)
+        self.assertEqual([t for t, when in got if when > returned], [])
+        self.assertEqual([t.name for t in threading.enumerate() if t.name == "drive-doing"], [])
+
+    def test_progress_names_the_phase(self):
+        self.assertEqual(drive._Status.progress(
+            {"phase": "p1", "done": 2, "total": 5, "next": "x"}),
+            {"next": "x", "units": "p1 \u00b7 2/5 units"})
+        self.assertIsNone(drive._Status.progress(
+            {"phase": None, "done": 2, "total": 5, "next": "x"})["units"])
+
+    def test_timer_keeps_units_live_and_stops_with_the_session(self):
+        seen = self.tmp / "seen.json"
+        real = drive._status
+        calls_made = []
+
+        def fake_status(ctx, project):
+            if not calls_made:
+                calls_made.append(real(ctx, project))
+                return calls_made[0]
+            got = calls_made[0]
+            if got is None:
+                return got
+            return got[0], {**got[1], "phase": "ph", "done": 7, "total": 9}
+
+        with mock.patch.object(drive, "STATUS_EVERY", 0.1), \
+                mock.patch.object(drive, "_status", fake_status):
+            code, out, calls = self.drive([entry(pct=40), {
+                "lines": [], "snapshot_after": 1.5, "snapshot_after_to": str(seen),
+                "sleep": 0.2}, entry("x\nLOOP: stop r", ruling="r")])
+        self.assertEqual(json.loads(seen.read_text(encoding="utf-8"))["units"],
+                         "ph \u00b7 7/9 units")
+        self.assertEqual([t.name for t in threading.enumerate() if t.name == "drive-status"], [])
 
     def test_cli_drive_report(self):
         code, out, err = self.w.run("build", "drive-report")

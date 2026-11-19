@@ -121,6 +121,23 @@ def _swap(stage: Path, out: Path, aside: Path, name: str, version: str) -> None:
         raise
 
 
+def _own_state(stage: Path, old: str, new: str) -> None:
+    """Name the staged copy, `new`, as the owner of the state its band declares: Claude Code lets
+    only a value's owning plugin write it. Only the exact tokens change; a file with none is not
+    rewritten, and a tree without the files is left as it is."""
+    targets = [(p, f"plugin: '{old}'", f"plugin: '{new}'")
+               for p in sorted((stage / "hooks").glob("*.tsx"))]
+    targets.append((stage / "types" / "index.d.ts", f"'{old}': {{", f"'{new}': {{"))
+    for path, was, now in targets:
+        if not path.is_file():
+            continue
+        with open(path, encoding="utf-8", newline="") as fh:
+            text = fh.read()
+        if was in text:
+            with open(path, "w", encoding="utf-8", newline="") as fh:
+                fh.write(text.replace(was, now))
+
+
 def install(tree: Path, home: Path, expected: str | None = None) -> tuple[str, str, Path]:
     """Install the tree's plugin as the local plugin under `home`, replacing an earlier local
     install of it. Returns the plugin's name, its version and where it is. A beta's plugin is
@@ -167,6 +184,7 @@ def install(tree: Path, home: Path, expected: str | None = None) -> tuple[str, s
             data = json.loads(manifest.read_text(encoding="utf-8"))
             manifest.write_text(json.dumps({**data, "name": out.name}, indent=2) + "\n",
                                 encoding="utf-8")
+            _own_state(stages[out], name, out.name)
             _marker(stages[marker], version, out.name)
         try:
             for place in places:

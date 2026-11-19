@@ -37,6 +37,8 @@ this machine only (`govern beta`); it is never committed.
 config.toml's [governance] channel = "beta", when local.toml names none, runs the newest beta
 newer than the pinned release, installed or tagged at the source (asked at most once an hour),
 on every machine and in CI; the pin when there is none, or when it cannot be installed.
+[governance] engine_dir, a path from the project root, runs the engine in that directory (for
+the engine's own repository), ahead of all of the above except $GOVERN_ENGINE.
 $GOVERN_ENGINE overrides all of this with an explicit engine directory, for engine development.
 
     python3 .context-gate/bin/govern beta [on [X.Y.Z-beta.N] | off]
@@ -419,6 +421,17 @@ def engine_path() -> Path:
         die(f"{GOV_DIR.name}/config.toml has no [governance] engine pin")
     if not version_key(pin):
         die(f"{GOV_DIR.name}/config.toml engine pin {pin} is not a release")
+    engine_dir = gov.get("engine_dir")
+    if engine_dir is not None and not isinstance(engine_dir, str):
+        die(f"{GOV_DIR.name}/config.toml [governance] engine_dir must be a path string")
+    if engine_dir:                          # an empty string is unset, as `config` reads it
+        path = ROOT / engine_dir
+        if Path(engine_dir).is_absolute() or not path.resolve().is_relative_to(ROOT.resolve()):
+            die(f"[governance] engine_dir must be a folder inside the project, not {engine_dir}")
+        if not (path / "govern" / "cli.py").is_file():
+            die(f"[governance] engine_dir names {engine_dir}, but "
+                f"{path / 'govern' / 'cli.py'} does not exist")
+        return path
     beta = local_beta(pin)
     if beta:
         return beta
@@ -467,7 +480,10 @@ def upgrade(argv: list[str]) -> int:
         target = max(candidates, key=version_key)
     if BETA_RE.fullmatch(target):
         die(f"an upgrade takes a release, and {target} is a beta; "
-            f"run a beta with govern beta on {target}")
+            f"run a beta on this machine with govern beta on {target}; "
+            f"to move the whole project to betas: PYTHONPATH={ENGINES / target} "
+            f"python3 -P -m govern.installer channel --root . beta "
+            f"(govern beta on {target} installs that engine first)")
     if target == gov.get("engine"):
         print(f"already on context-gate {target}")
         return 0

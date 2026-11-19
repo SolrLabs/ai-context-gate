@@ -796,7 +796,7 @@ The engine's agent roles and the coordinator's build rules are rendered into the
 | `authority` | str | `""` | — | What a brief answers to (a plan, a spec); empty renders "the plan or spec it names" |
 | `scoped_test` | str | `""` | — | The command that runs only the tests a unit touches |
 | `full_gate` | str | `""` | — | The command that runs the project's local suite |
-| `docs_paths` | list | `["docs/**", "*.md"]` | — | Paths whose changes alone never make the last local suite run stale; `build gate` runs only `govern check` for them (and `docs_gate`); a project whose suite reads its docs sets `docs_gate` or narrows `docs_paths` |
+| `docs_paths` | list | `["**/*.md", "!.claude/**", "!**/skills/**", "!**/templates/**", "!**/agents/**"]` | — | Paths whose changes alone never make the last local suite run stale; `build gate` runs only `govern check` for them (and `docs_gate`). Patterns are read in order, a `!` pattern excludes, the last match decides; a project whose code or tests read other Markdown adds `!` patterns or sets `docs_gate` |
 | `docs_gate` | str | `""` | — | A command run beside govern check when only docs_paths changed since a green run; a project whose tests read its docs names them here |
 | `senior_triggers` | list | `["security: credentials, keys, tokens, signing, sign-in and sessions, the code that decides who may read or change protected data, or input from outside the project (a download, an archive, pasted text). A product rule about who may do what is not security."]` | — | What sends a unit to senior-developer instead of developer |
 | `operator_rules` | list | `[]` | — | Rules the operator gives every role, rendered above the project's own |

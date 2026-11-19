@@ -790,6 +790,87 @@ class EnginePin(Base):
             code, out, err = w.run("check")
         self.assertEqual(code, 0, err + out)
 
+    # [governance] engine_dir: the engine's own repository runs the engine in its tree.
+    def _in_tree(self, w, engine_dir="eng", copy=True):
+        cfg = w.root / layout.GOV_DIR / "config.toml"
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(
+            "[governance]\n", f'[governance]\nengine_dir = "{engine_dir}"\n', 1))
+        if copy:
+            shutil.copytree(ENGINE / "govern", w.root / "eng" / "govern",
+                            ignore=shutil.ignore_patterns("__pycache__"))
+
+    def _runs(self, entry, env, marker: str) -> str:
+        """The sys.path entry the launcher added that ends in `marker`."""
+        probe = ("import sys, runpy\n"
+                 "try:\n"
+                 f"    runpy.run_path({str(entry)!r}, run_name='__main__')\n"
+                 "except SystemExit: pass\n"
+                 f"print([p for p in sys.path if p.endswith({marker!r})][0])")
+        res = subprocess.run([sys.executable, "-c", probe], env=env, capture_output=True,
+                             text=True, cwd=env["HOME"])
+        return res.stdout.strip().splitlines()[-1]
+
+    def test_engine_dir_runs_the_tree_ahead_of_a_local_beta_and_the_pin(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        self._engines(w, (__version__, BETA))
+        self._local(w, f'[governance]\nengine = "{BETA}"\n')
+        self._in_tree(w)
+        self.assertEqual(Path(self._runs(entry, env, "eng")).resolve(),
+                         (w.root / "eng").resolve())
+
+    def test_engine_dir_does_not_need_the_pinned_engine(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        cfg = w.root / CFG
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(
+            f'engine = "{__version__}"', f'engine = "{SERIES}.999"'))
+        self._in_tree(w)
+        res = self._check(entry, env)
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+
+    def test_engine_dir_naming_no_engine_is_refused(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        self._in_tree(w, "missing", copy=False)
+        res = self._check(entry, env)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn(str(Path("missing") / "govern" / "cli.py"), res.stderr)
+        self.assertNotIn("Traceback", res.stderr)
+
+    def test_an_empty_engine_dir_is_unset(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        self._engines(w, (__version__,))
+        self._in_tree(w, "", copy=False)
+        res = self._check(entry, env)
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertNotIn("engine_dir", res.stderr)
+
+    def _refused(self, absolute):
+        w = self.ws()
+        entry, env = self._installed(w)
+        value = (w.root.parent / "x").as_posix() if absolute else "../x"
+        self._in_tree(w, value, copy=False)
+        res = self._check(entry, env)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("engine_dir must be a folder inside the project", res.stderr)
+        self.assertNotIn("Traceback", res.stderr)
+
+    def test_engine_dir_outside_the_project_is_refused(self):
+        self._refused(absolute=False)
+
+    def test_an_absolute_engine_dir_is_refused(self):
+        self._refused(absolute=True)
+
+    def test_govern_engine_wins_over_engine_dir(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        self._engines(w, (__version__,))
+        self._in_tree(w)
+        env = {**env, "GOVERN_ENGINE": str(layout.engines_dir(w.home) / __version__)}
+        self.assertTrue(self._which(entry, env).endswith(__version__))
+
 
 class OldLauncherSwitchCorrected(Base):
     """A beta engine run in a project whose settings.local.json an old launcher switched

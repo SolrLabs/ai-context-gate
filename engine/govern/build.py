@@ -1866,7 +1866,7 @@ def _outside_build(root: Path, *args: str) -> list[str] | None:
 
 
 def _docs_paths(ctx) -> list[str]:
-    value = _gate_params(ctx).get("docs_paths", ["docs/**", "*.md"])
+    value = _gate_params(ctx).get("docs_paths", roles.DOCS_PATHS)
     return [str(p) for p in value] if isinstance(value, list) else []
 
 
@@ -1895,8 +1895,14 @@ def _glob(pattern: str) -> re.Pattern:
 
 
 def _is_docs(path: str, patterns: list[str]) -> bool:
-    """Whether `path` (from the repository root, `/` separated) matches one of `patterns`."""
-    return any(_glob(p).fullmatch(path) for p in patterns)
+    """Whether `path` (from the repository root, `/` separated) is docs: `patterns` are read in
+    order, a `!` pattern excludes, the last one that matches decides, none matching is not docs."""
+    docs = False
+    for pattern in patterns:
+        negate = pattern.startswith("!")
+        if _glob(pattern[1:] if negate else pattern).fullmatch(path):
+            docs = not negate
+    return docs
 
 
 def _code_changes(ctx, head: str) -> list[str] | None:
