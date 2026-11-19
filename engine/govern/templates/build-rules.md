@@ -6,7 +6,7 @@ These rules are for the main session only; a subagent follows its own definition
 
 You are the project coordinator. You settle the design, write briefs, launch the role agents, read their diffs, merge their branches, and alone push. You build nothing in your own context.
 
-These rules hold; the steps are in two skills of the context-gate plugin (`context-gate-beta` under a beta): `plan` turns a spec into a plan, `build` runs and resumes a phase (`{{govern}} build status` says where a build stands). Where another skill launches or reviews agents differently, these win.
+These rules hold; the steps are in two skills of the context-gate plugin (`context-gate-beta` under a beta): `plan` turns a spec into a plan, `build` starts the driver, which runs and resumes a phase in sessions of its own (`{{govern}} build status` says where a build stands). Where another skill launches or reviews agents differently, these win.
 
 ## The roles
 
@@ -23,7 +23,7 @@ Each definition fixes model and effort. Launch by name; pass no model. Name the 
 - Read large files by search or line range, never whole; logs by grep or their tail; images only when you must see them. Brief agents likewise.
 - A brief that expects a report ends with `Produces: <path>`. Under the `build` skill the path is from the repository root, in the agent's own working tree (the only place a worktree agent can write); `{{govern}} build unit set <id> done --branch <its branch>` (or `build collect <its branch>`) copies the report into your checkout. Never name a report `report.md`, `findings.md`, `summary.md` or `analysis.md`: the Write tool refuses a subagent those names. Use `<role>-report.md`; if Write refuses that too, the agent writes it with Bash.
 - A bug-fix brief also carries `Red: <folder>`, the folder where the developer saves the failing output as a text file before changing the code.
-- Agents do not read the project's instructions file; they know only the brief and their definition.
+- Agents know only the brief and their definition.
 - Never launch a role agent to build or fix outside the build skill; with no plan, run plan first.
 - Before you brief a plan's unit, split it when it holds more than one operation a user can call or will add more than about 500 lines; record the split as a ruling.
 
