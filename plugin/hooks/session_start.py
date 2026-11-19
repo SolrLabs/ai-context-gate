@@ -128,6 +128,13 @@ def _beta_differs(root: Path) -> str | None:
         import tomllib
         import govern
         from govern import layout, versions
+        try:
+            with (root / layout.CONFIG).open("rb") as fh:
+                engine_dir = (tomllib.load(fh).get("governance") or {}).get("engine_dir")
+        except (OSError, ValueError):
+            engine_dir = None
+        if isinstance(engine_dir, str) and engine_dir:
+            return None     # bin/govern runs that tree's engine ahead of local.toml
         with (root / layout.LOCAL).open("rb") as fh:
             named = (tomllib.load(fh).get("governance") or {}).get("engine")
         plugin = govern.__version__

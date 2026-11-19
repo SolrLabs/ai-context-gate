@@ -49,9 +49,17 @@ def installed_betas(home: Path) -> list[str]:
 def local_beta(root: Path, home: Path) -> str | None:
     """The beta this project runs on this machine: the one its local.toml names, when that
     engine is installed (bin/govern runs the committed pin otherwise). None for a project with
-    no local.toml, which is every stable project."""
+    no local.toml, which is every stable project. None too when `[governance] engine_dir` is
+    set: bin/govern runs that tree's engine ahead of local.toml."""
     import tomllib
     try:
+        try:
+            with (root / layout.CONFIG).open("rb") as fh:
+                engine_dir = tomllib.load(fh).get("governance", {}).get("engine_dir")
+        except (OSError, ValueError, AttributeError):
+            engine_dir = None
+        if isinstance(engine_dir, str) and engine_dir:
+            return None
         with (root / layout.LOCAL).open("rb") as fh:
             beta = tomllib.load(fh)["governance"]["engine"]
     except (OSError, ValueError, KeyError, TypeError):
@@ -314,13 +322,18 @@ def plugin_behind(root: Path, home: Path) -> str | None:
     import tomllib
     try:
         with (root / layout.CONFIG).open("rb") as fh:
-            pin = tomllib.load(fh).get("governance", {}).get("engine")
+            governance = tomllib.load(fh).get("governance", {})
+        pin = governance.get("engine")
         if not isinstance(pin, str) or versions.is_beta(pin):
             return None
+        # On the beta channel the project loads the beta marketplace's plugin.
+        beta = governance.get("channel") == "beta"
+        plugin_id = layout.BETA_CHANNEL_PLUGIN_ID if beta else layout.PLUGIN_ID
+        marketplace = layout.BETA_MARKETPLACE if beta else layout.MARKETPLACE
         pin_key = versions.key(pin)
         record = json.loads((layout.claude_dir(home) / "plugins" / "installed_plugins.json")
                             .read_text(encoding="utf-8-sig"))
-        entries = record["plugins"][layout.PLUGIN_ID]
+        entries = record["plugins"][plugin_id]
         here = root.resolve()
         lines = []
         for entry in entries:
@@ -341,8 +354,8 @@ def plugin_behind(root: Path, home: Path) -> str | None:
                 continue
             lines.append(
                 f"{layout.DISPLAY_NAME}'s plugin ({scope}) is {version}; this project runs {pin}. "
-                f"Run claude plugin marketplace update {layout.MARKETPLACE}, then claude plugin "
-                f"update {layout.PLUGIN_ID} --scope {scope}, then /exit and start claude again "
+                f"Run claude plugin marketplace update {marketplace}, then claude plugin "
+                f"update {plugin_id} --scope {scope}, then /exit and start claude again "
                 f"(claude -c keeps the old plugin).")
         return "\n".join(lines) or None
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
