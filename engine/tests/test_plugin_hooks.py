@@ -174,6 +174,48 @@ class Plugin(unittest.TestCase):
         self.assertIn("only on the owner's word", text)
         self.assertIn("`python3 .context-gate/bin/govern check` before the plan is committed", text)
 
+    def who_builds(self) -> str:
+        text = self.build_text()
+        start = text.index("## Who builds")
+        return text[start:text.index("## 0. Is a build already in flight?")]
+
+    def test_build_skill_who_builds_comes_before_step_zero(self):
+        text = self.build_text()
+        self.assertIn("## Who builds", text)
+        self.assertLess(text.index("## Who builds"),
+                        text.index("## 0. Is a build already in flight?"))
+        section = self.who_builds()
+        for word in ("govern build drive", "run_in_background", "--here"):
+            self.assertIn(word, section)
+
+    def test_build_skill_review_launch_tells_reviewers_nothing_of_expectations(self):
+        text = self.build_text()
+        step = text[text.index("## 3. Review, once"):text.index("## 4. One fix pass")]
+        self.assertIn("Tell them nothing about what you expect them to find.", step)
+
+    def test_build_skill_who_builds_detects_the_appended_paragraph(self):
+        section = self.who_builds()
+        self.assertNotIn("open with", section)
+        for word in ("contain", "--one", "build status"):
+            self.assertIn(word, section)
+
+    def test_build_skill_marker_is_the_drive_prompts_opening(self):
+        prompt = (ENGINE / "govern/templates/drive-prompt.md").read_text(encoding="utf-8")
+        marker = prompt.split(":", 1)[0]
+        self.assertEqual(marker, "Unattended run")
+        self.assertIn("`%s`" % marker, self.who_builds())
+
+    def test_build_skill_argument_hint_names_here(self):
+        text = (PLUGIN / "skills/build/SKILL.md").read_text(encoding="utf-8")
+        hint = re.search(r"^argument-hint:\s*(.*)$", text, re.M).group(1)
+        self.assertIn("--here", hint)
+
+    def test_build_rules_say_build_starts_the_driver(self):
+        for path in (ENGINE / "govern/templates/build-rules.md",
+                     REPO / ".claude/rules/context-gate-build.md"):
+            text = " ".join(path.read_text(encoding="utf-8").split())
+            self.assertIn("`build` starts the driver", text, path)
+
     def test_build_skill_stops_on_an_unreviewed_agents_table(self):
         text = self.build_text()
         self.assertIn("`Reviewed:` line is not filled in, stop and ask the owner", text)

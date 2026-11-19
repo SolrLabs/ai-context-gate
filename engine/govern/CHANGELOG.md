@@ -4,6 +4,13 @@ Newest first. Each release says what changed and, under **Upgrading**, anything 
 do or decide. The upgrade report quotes every entry between the engine a project ran and the one
 it upgraded to.
 
+## 0.9.5-beta.6 — 2026-11-19
+
+The build skill hands a person's build to the driver.
+
+- **Changed:** typed by a person, `/context-gate:build <plan>` now starts `govern build drive` in the background instead of coordinating in that session; the driver's own sessions (their instructions contain the words `Unattended run`) run the steps. `--here` builds in the person's session as before.
+- **Upgrading:** a person's `/context-gate:build` now needs the `claude` CLI on PATH, and its background sessions spend the person's usage. `--here` keeps the old behavior; a phase name or `--one` also builds in the session, because the driver takes only the plan.
+
 ## 0.9.5-beta.5 — 2026-11-19
 
 The start notices name the engine and the plugin the project actually runs.

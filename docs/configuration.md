@@ -1284,7 +1284,10 @@ successful close also marks planning in it and prints `run log: planning from he
 
 ## The build loop
 
-`/context-gate:plan` and `/context-gate:build` run a phase with the rendered roles. Their state is
+`/context-gate:plan` and `/context-gate:build` run a phase with the rendered roles. Typed by a
+person, `/context-gate:build` starts `govern build drive` in the background and the driver's own
+sessions run the steps; `--here`, a phase name or `--one` builds in the person's session as before.
+Their state is
 `govern build`'s ledger, `.context-gate/build/<phase>/ledger.toml`, written only by the commands
 and committed on the phase branch with the briefs. Reports, diffs and failing-test output under
 `.context-gate/build/` are ignored by git. One phase is in flight per branch.
@@ -1337,6 +1340,11 @@ write is a warning. With `agent-gates` on, a coordinator `git push` is denied wh
 gate is red at HEAD. SessionStart tells the coordinator when a build is in flight.
 
 ## Overnight driver
+
+The build skill starts it: typed by a person, `/context-gate:build <plan>` runs `govern build drive`
+in the background, and the driver's own sessions run the steps. Add `--here`, a phase name or `--one`
+to build in your own session instead; with no plan named, it takes the plan `govern build status`
+names.
 
 `govern build drive <plan>` runs a plan unattended. It starts one fresh headless `claude -p`
 coordinator session per build step (`/context-gate:build <plan>`), each resuming from
