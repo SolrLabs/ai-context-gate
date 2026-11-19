@@ -4,6 +4,13 @@ Newest first. Each release says what changed and, under **Upgrading**, anything 
 do or decide. The upgrade report quotes every entry between the engine a project ran and the one
 it upgraded to.
 
+## 0.9.5-beta.5 — 2026-11-19
+
+The start notices name the engine and the plugin the project actually runs.
+
+- **Fixed:** with `[governance] engine_dir` set, the SessionStart notice no longer says the project runs the beta in `local.toml`; the launcher runs the tree's engine ahead of it, and the notice now follows that order.
+- **Fixed:** on `[governance] channel = "beta"` the plugin-behind notice reads and names `context-gate@context-gate-beta` and its marketplace, not the stable plugin.
+
 ## 0.9.5-beta.4 — 2026-11-19
 
 The beta channel refreshes the launcher, and the drive band shows the step and the units.

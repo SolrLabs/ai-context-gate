@@ -782,6 +782,26 @@ class AgentHooks(Plugin):
         self.local(f'[governance]\nengine = "{self.NINE}"\n')
         self.assertNotIn("this machine's plugin is beta", self.start())
 
+    def test_session_start_is_silent_on_a_local_beta_when_engine_dir_runs_the_tree(self):
+        """bin/govern runs engine_dir ahead of local.toml, so the project does not run the beta."""
+        import importlib.util
+        import govern
+        self.beta_plugin(self.NINE)
+        spec = importlib.util.spec_from_file_location(
+            "session_start_engine_dir", PLUGIN / "hooks" / "session_start.py")
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        self.local('[governance]\nengine = "9.9.0-beta.8"\n')
+        for engine_dir, said in (('"engine"', False), ('""', True)):
+            self.pin(self.NINE)
+            cfg = self.project / layout.CONFIG
+            cfg.write_text(cfg.read_text(encoding="utf-8").replace(
+                "schema = 1", f"schema = 1\nengine_dir = {engine_dir}"), encoding="utf-8")
+            with mock.patch.object(govern, "__version__", self.NINE):
+                self.assertEqual(hook._beta_differs(self.project) is not None, said)
+            lines = json.loads(self.start() or '{"systemMessage": ""}')["systemMessage"].splitlines()
+            self.assertEqual(any("this project runs beta" in line for line in lines), said)
+
     def test_session_start_says_when_the_settings_could_not_be_read(self):
         said = ("context-gate: this project's settings could not be read by the plugin; usage "
                 "alerts, agent gates and run measurement are OFF for this session. Run python3 "
