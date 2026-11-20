@@ -46,10 +46,10 @@ class DriveStatus(unittest.TestCase):
         (folder / "status.json").write_text(json.dumps(doc), encoding="utf-8")
         return folder
 
-    def run_script(self, *args: str) -> dict:
+    def run_script(self, *args: str, cwd=None) -> dict:
         env = {**os.environ, "HOME": str(self.home), "USERPROFILE": str(self.home)}
         env.pop("CLAUDE_CONFIG_DIR", None)
-        res = subprocess.run([sys.executable, str(SCRIPT), *args], env=env, cwd=self.tmp,
+        res = subprocess.run([sys.executable, str(SCRIPT), *args], env=env, cwd=cwd or self.tmp,
                              capture_output=True, text=True)
         self.assertEqual((res.returncode, res.stderr), (0, ""))
         return json.loads(res.stdout)
@@ -131,6 +131,38 @@ class DriveStatus(unittest.TestCase):
         self.status(stamp="20261118T100000Z", session=1)
         self.status(stamp="20261118T200000Z", session=9)
         self.assertEqual(self.read()["session"], 9)
+
+    def view(self, viewer=None) -> dict:
+        return self.run_script(str(self.root), viewer) if viewer else self.run_script(str(self.root))
+
+    def test_owned_runs_show_only_to_their_session(self):
+        self.status(stamp="20261118T100000Z", session=1, owner_session="A")
+        self.status(stamp="20261118T200000Z", session=9, owner_session="B")
+        self.assertEqual(self.view("A")["session"], 1)
+        self.assertEqual(self.view("B")["session"], 9)
+        self.assertEqual(self.view("C"), {})
+
+    def test_empty_folder_argument_uses_the_working_directory_and_the_id(self):
+        self.status(session=4, owner_session="A")
+        self.assertEqual(self.run_script("", "A", cwd=self.root)["session"], 4)
+        self.assertEqual(self.run_script("", "C", cwd=self.root), {})
+
+    def test_unowned_runs_show_to_everyone(self):
+        self.status(stamp="20261118T100000Z", session=1, owner_session=None)
+        self.assertEqual(self.view("A")["session"], 1)
+        self.assertEqual(self.view()["session"], 1)
+        self.status(stamp="20261118T200000Z", session=2)  # no owner_session key
+        self.assertEqual(self.view("A")["session"], 2)
+        self.assertEqual(self.view()["session"], 2)
+
+    def test_owned_newer_run_falls_back_to_unowned_older_one(self):
+        self.status(stamp="20261118T100000Z", session=1, owner_session=None)
+        self.status(stamp="20261118T200000Z", session=9, owner_session="B")
+        self.assertEqual(self.view("A")["session"], 1)
+
+    def test_owned_run_shows_when_no_viewer_id_given(self):
+        self.status(session=4, owner_session="B")
+        self.assertEqual(self.view()["session"], 4)
 
     def test_last_formatting(self):
         self.status(last={"kind": "continue", "seconds": 30, "peak_pct": 1})

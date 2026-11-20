@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Print one JSON object for the plugin's drive band: the newest `govern build drive` run of the
-project holding the given folder (default: the working directory), or {} when there is none to
-show. Reads the run's status.json; scrapes no process. Never raises, always exit 0.
+"""Print one JSON object for the plugin's drive band: the newest `govern build drive` run of
+the project holding the given folder (default: the working directory) that the given session
+id may see, or {} when there is none to show. Reads the run's status.json; scrapes no process.
+Never raises, always exit 0.
 """
 import json
 import os
@@ -37,7 +38,7 @@ def _read(path: Path):
     return doc if isinstance(doc, dict) else None
 
 
-def _runs_for(folder: Path, runs: Path):
+def _runs_for(folder: Path, runs: Path, viewer: str = ""):
     try:
         folders = sorted((p for p in runs.glob(folder.name + "-*") if p.is_dir()),
                          key=lambda p: p.name, reverse=True)
@@ -45,18 +46,23 @@ def _runs_for(folder: Path, runs: Path):
         return None
     for run in folders:
         doc = _read(run / "status.json")
-        if doc is not None and _same(doc.get("cwd", ""), folder):
-            return doc
+        if doc is None or not _same(doc.get("cwd", ""), folder):
+            continue
+        owner = doc.get("owner_session")
+        if viewer and isinstance(owner, str) and owner and owner != viewer:
+            continue  # another session's driver
+        return doc
     return None
 
 
-def find_run(root: Path, home: Path):
+def find_run(root: Path, home: Path, viewer: str = ""):
     """The newest run whose cwd is `root` or, nearest first, the closest governed folder above it
-    (a workspace's driver runs from the workspace root)."""
+    (a workspace's driver runs from the workspace root). A run owned by another session than
+    `viewer` is skipped; with no viewer id nothing is skipped."""
     runs = home / ".local" / "state" / "context-gate" / "drive" / "runs"
     folders = [root] + [p for p in root.parents if (p / ".context-gate").is_dir()]
     for folder in folders:
-        doc = _runs_for(folder, runs)
+        doc = _runs_for(folder, runs, viewer)
         if doc is not None:
             return doc
     return None
@@ -182,7 +188,7 @@ def main(argv) -> dict:
     if root is None:
         return {}
     home = home_dir()
-    doc = find_run(root, home)
+    doc = find_run(root, home, argv[2] if len(argv) > 2 else "")
     if doc is None or not doc.get("project"):
         return {}
     if _other_copy_draws(doc.get("skill"), root, home):

@@ -4,6 +4,12 @@ Newest first. Each release says what changed and, under **Upgrading**, anything 
 do or decide. The upgrade report quotes every entry between the engine a project ran and the one
 it upgraded to.
 
+## 0.9.5-beta.7 — 2026-11-20
+
+The driver band draws in the session that started the driver.
+
+- **Changed:** the driver band draws only in the Claude Code session that started the driver (`status.json` records it as `owner_session`). A driver started from a terminal draws in every session of the project, as before. After `/clear` or a resume the starting session's id changes, so its band goes too.
+
 ## 0.9.5-beta.6 — 2026-11-19
 
 The build skill hands a person's build to the driver.

@@ -3,11 +3,12 @@ import type { Register } from 'claude-code'
 
 import type { Drive } from '../types'
 
-const drive = atom({ plugin: 'context-gate', key: 'drive' } as const, null)
+// the reading, its time and its stale mark are kept per session id ('' when there is none)
+const drive = atom({ plugin: 'context-gate', key: 'drive' } as const, {} as Record<string, Drive | null>)
 const isHidden = atom({ plugin: 'context-gate', key: 'isHidden' } as const, false)
-const readAt = atom({ plugin: 'context-gate', key: 'readAt' } as const, 0)
+const readAt = atom({ plugin: 'context-gate', key: 'readAt' } as const, {} as Record<string, number>)
 const now = atom({ plugin: 'context-gate', key: 'now' } as const, 0)
-const stale = atom({ plugin: 'context-gate', key: 'stale' } as const, false)
+const stale = atom({ plugin: 'context-gate', key: 'stale' } as const, {} as Record<string, boolean>)
 
 const POLL_MS = 15_000
 
@@ -22,16 +23,26 @@ function short(text: string | null, max: number): string {
   return one.length > max ? `${one.slice(0, max - 1)}…` : one
 }
 
+// the session's id; undefined, or a fault, means no id: the band then draws as for a terminal run
+async function sessionId($: any): Promise<string> {
+  try {
+    return (await $.session.id()) ?? ''
+  } catch {
+    return ''
+  }
+}
+
 export const register: Register = on => {
-  let polling = false // one poll at a time, across sessions
+  const polling = new Set<string>() // session ids with a poll in flight: one poll at a time each
   on('session.start', async ($, e, next) => {
     const poll = async () => {
-      if (polling) return // a slow poll is still running: skip this one
-      polling = true
+      const id = await sessionId($)
+      if (polling.has(id)) return // this session's slow poll is still running: skip this one
+      polling.add(id)
       try {
-        // The project root is the session's folder; drive_status.py takes it as its one argument.
-        const argv = ['python3', `${$.plugin.root}/hooks/drive_status.py`]
-        if (e.cwd) argv.push(e.cwd)
+        // drive_status.py takes the session's folder and the session id: only the session that
+        // started the driver draws its band.
+        const argv = ['python3', `${$.plugin.root}/hooks/drive_status.py`, e.cwd ?? '', id]
         const { exitCode, stdout } = await $.process.run(argv, { timeoutMs: 10_000 })
         const text = stdout.trim()
         if (exitCode !== 0) throw new Error(`drive_status.py exited ${exitCode}`)
@@ -40,26 +51,26 @@ export const register: Register = on => {
         const value = parsed as Partial<Drive>
         const at = await $.clock.now()
         // `{}` (no run, or one stopped long ago) hides the band
-        await update($, drive, () => ('project' in value ? (value as Drive) : null))
-        await update($, readAt, () => at)
+        await update($, drive, r => ({ ...r, [id]: 'project' in value ? (value as Drive) : null }))
+        await update($, readAt, r => ({ ...r, [id]: at }))
         await update($, now, () => at)
-        if (await read($, stale)) await update($, stale, () => false)
+        if ((await read($, stale))[id]) await update($, stale, r => ({ ...r, [id]: false }))
       } catch {
         // a failed poll keeps the last reading and marks it stale; the next good poll clears it
         try {
-          await update($, stale, () => true)
+          await update($, stale, r => ({ ...r, [id]: true }))
         } catch {
           // nothing more to do
         }
       } finally {
-        polling = false
+        polling.delete(id)
       }
     }
     await poll()
     $.clock.every(POLL_MS, poll)
     // tick once a second while a session runs, so the counter moves between polls
     $.clock.every(1000, async () => {
-      const d = await read($, drive)
+      const d = (await read($, drive))[await sessionId($)]
       if (d?.running && d.in_session && d.elapsed_s !== null) {
         const t = await $.clock.now()
         await update($, now, () => t)
@@ -76,17 +87,18 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
-    const d = await read($, drive)
+    const id = await sessionId($)
+    const d = (await read($, drive))[id] ?? null
     if (d === null || (await read($, isHidden))) {
       return next(e)
     }
     const line = await next(e)
     const { Box, Text } = $.ui.resolve(e)
-    const since = Math.max(0, Math.floor(((await read($, now)) - (await read($, readAt))) / 1000))
+    const since = Math.max(0, Math.floor(((await read($, now)) - ((await read($, readAt))[id] ?? 0)) / 1000))
     // green: running and fresh; orange: stale, or ended without a stop; blue: stopped
     const color = d.stopped
       ? 'blue'
-      : (await read($, stale)) || !d.running
+      : (await read($, stale))[id] || !d.running
         ? '#FFA500'
         : 'green'
     const state = d.running

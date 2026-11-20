@@ -393,7 +393,7 @@ class Drive(Build):
 
     KEYS = {"pid", "project", "cwd", "plan", "cap", "cap_source", "hours", "started", "state", "session",
             "session_started", "seven_day", "last", "next", "units", "stop_reason", "updated",
-            "skill", "doing", "doing_since"}
+            "skill", "doing", "doing_since", "owner_session"}
 
     def test_status_file_after_plan_done(self):
         code, out, calls = self.drive([
@@ -682,6 +682,14 @@ class Drive(Build):
         status.doing(None)
         doc = json.loads((self.tmp / "status.json").read_text(encoding="utf-8"))
         self.assertIsNone(doc["doing_since"])
+
+    def test_status_records_the_owner_session(self):
+        for given, want in (("abc", "abc"), ("", None)):
+            with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": given}):
+                self.assertEqual(drive._Status(mock.Mock(root=self.tmp), "p", None, None).doc["owner_session"], want)
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_SESSION_ID"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertIsNone(drive._Status(mock.Mock(root=self.tmp), "p", None, None).doc["owner_session"])
 
     def test_a_late_step_never_follows_the_return_of_the_session(self):
         script = ("import json,sys,time\n"
