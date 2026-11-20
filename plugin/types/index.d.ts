@@ -16,6 +16,12 @@ export type Drive = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'context-gate': { drive: Drive | null; isHidden: boolean; readAt: number; now: number; stale: boolean }
+    'context-gate': {
+      drive: Record<string, Drive | null>
+      isHidden: boolean
+      readAt: Record<string, number>
+      now: number
+      stale: Record<string, boolean>
+    }
   }
 }

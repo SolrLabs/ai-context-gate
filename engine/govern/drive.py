@@ -409,7 +409,8 @@ class _Status:
             "cap": cap, "cap_source": "today" if cap is None else "--cap", "hours": hours, "started": _utc(time.time()), "state": "starting",
             "session": 0, "session_started": None, "seven_day": None, "last": None,
             "next": None, "units": None, "stop_reason": None, "updated": None,
-            "skill": None, "doing": None, "doing_since": None}
+            "skill": None, "doing": None, "doing_since": None,
+            "owner_session": os.environ.get("CLAUDE_CODE_SESSION_ID") or None}
         self.lock = threading.Lock()
 
     def begin(self, folder: Path, data: dict) -> None:

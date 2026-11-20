@@ -188,3 +188,77 @@ test('the drive-band command hides and shows the band', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /drive/ })).toBeDefined()
   await ui.unmount()
 })
+
+// Models the session id the host answers: `ids.current` is read on each `session.id` call.
+function stubs(on: any, ids: { current: unknown }, answer: (argv: string[]) => Poll | Promise<Poll>, argvs: string[][] = []) {
+  on('session.id', (): any => {
+    if (ids.current === 'throw') throw new Error('no id')
+    return { value: ids.current }
+  })
+  on('process.run', (_: any, e: any): any => {
+    const list = e.argv as string[]
+    argvs.push(list)
+    return Promise.resolve(answer(list)).then(value => ({ value }))
+  })
+  on('clock.now', () => ({ value: 1000 }))
+  on('clock.every', () => ({ value: undefined }))
+  on('command.register', () => ({ value: { command: 'drive-band' } }))
+  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+}
+
+async function shown($: any): Promise<string | undefined> {
+  const ui = await $.ui.mount(HINT)
+  const found = await ui.find({ type: 'Text', text: /drive/ })
+  await ui.unmount()
+  return found?.text
+}
+
+const START = { cwd: '/work/demo', surface: 'terminal', isInteractive: true } as const
+
+test('two sessions in one process keep their own readings', async ($, on) => {
+  const ids: { current: unknown } = { current: 'A' }
+  stubs(on, ids, argv => (argv[3] === 'A' ? ok(READING) : ok({})))
+  await $.session.start(START)
+  ids.current = 'B'
+  await $.session.start(START)
+  expect(await shown($)).toBeUndefined() // B's band: nothing
+  ids.current = 'A'
+  expect(await shown($)).toContain('● drive demo') // A's band: the run
+})
+
+test("a pending poll of one session does not stop another session's poll", async ($, on) => {
+  const ids: { current: unknown } = { current: 'A' }
+  const argvs: string[][] = []
+  let release: (poll: Poll) => void = () => {}
+  stubs(on, ids, argv =>
+    argv[3] === 'A' ? new Promise<Poll>(resolve => { release = resolve }) : ok({}), argvs)
+  const first = $.session.start(START)
+  for (let turn = 0; turn < 50 && argvs.length < 1; turn++) await shown($) // A's poll is in flight
+  ids.current = 'B'
+  await $.session.start(START)
+  const ran = argvs.map(a => a[3])
+  expect(ran.filter(id => id === 'A').length).toBe(1) // A's own pending poll is not repeated
+  expect(ran).toContain('B') // B is not held up by A's
+  release(ok(READING))
+  await first
+})
+
+test('the session id reaches the script as the last argument', async ($, on) => {
+  const argvs: string[][] = []
+  stubs(on, { current: 'A' }, () => ok(READING), argvs)
+  await $.session.start(START)
+  expect(argvs.length).toBeGreaterThan(0)
+  expect(argvs[0]!.slice(-2)).toEqual(['/work/demo', 'A'])
+  expect(argvs[0]![1]).toMatch(/hooks[\\/]drive_status\.py$/)
+})
+
+for (const [name, id] of [['throws', 'throw'], ['is undefined', undefined]] as const) {
+  test(`a session id that ${name} sends an empty id and the band still draws`, async ($, on) => {
+    const argvs: string[][] = []
+    stubs(on, { current: id }, () => ok(READING), argvs)
+    await $.session.start(START)
+    expect(argvs.length).toBeGreaterThan(0)
+    expect(argvs[0]!.slice(-2)).toEqual(['/work/demo', ''])
+    expect(await shown($)).toContain('● drive demo')
+  })
+}
