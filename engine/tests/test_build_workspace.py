@@ -5,6 +5,7 @@ which is its own git repository in a folder the root's `.gitignore` lists.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import unittest
@@ -73,6 +74,12 @@ class Space(Tree):
 
 
 class Workspace(Case):
+    def setUp(self) -> None:
+        super().setUp()
+        env = mock.patch.dict(os.environ, {"GOVERN_DRIVE": "1"})    # a driver session
+        env.start()
+        self.addCleanup(env.stop)
+
     def space(self, **kw) -> Space:
         self.w = Space(self.tmp, **kw)
         return self.w

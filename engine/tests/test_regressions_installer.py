@@ -274,7 +274,7 @@ class Installer(Base):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(self.install(root, cfg), 0)
             self.assertEqual(cli.main(["agents", "render"], root=root), 0)
-        self.assertEqual(len(installer.read_manifest(root)["rendered"]), 6)
+        self.assertEqual(len(installer.read_manifest(root)["rendered"]), 7)
         return root, before
 
     def uninstall(self, root, *extra):

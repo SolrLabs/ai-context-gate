@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -20,6 +21,9 @@ class TwoClones(Case):
 
     def setUp(self) -> None:
         super().setUp()
+        env = mock.patch.dict(os.environ, {"GOVERN_DRIVE": "1"})    # a driver session
+        env.start()
+        self.addCleanup(env.stop)
         self.seed = w = self.solo()
         self.remote = self.tmp / "remote.git"
         self.remote.mkdir()

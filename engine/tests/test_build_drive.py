@@ -32,7 +32,8 @@ log = os.environ["FAKE_LOG"]
 with open(log, "a", encoding="utf-8") as fh:
     fh.write(json.dumps({"argv": sys.argv[1:], "pid": os.getpid(),
                          "pct": os.environ.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"),
-                         "ceiling": os.environ.get("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS")}) + "\\n")
+                         "ceiling": os.environ.get("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"),
+                         "drive": os.environ.get("GOVERN_DRIVE")}) + "\\n")
 n = sum(1 for _ in open(log, encoding="utf-8")) - 1
 entry = script[min(n, len(script) - 1)]
 if entry.get("ruling"):
@@ -126,6 +127,13 @@ class Drive(Build):
         self.assertTrue(sessions)
         self.assertEqual({c["ceiling"] for c in sessions}, {"0"})
 
+    def test_session_env_marks_a_driver_session_whatever_the_caller_had(self):
+        os.environ.pop("GOVERN_DRIVE", None)        # the person's own shell: not a driver
+        code, out, calls = self.drive([entry(pct=40), entry("x\nLOOP: plan-done", end=True)])
+        self.assertEqual(code, 0, out)
+        self.assertTrue(calls[1:])
+        self.assertEqual({c["drive"] for c in calls[1:]}, {"1"})
+
     def test_skill_name_follows_the_engine(self):
         both = ["context-gate-beta:build", "context-gate:build"]
         cases = [
@@ -161,6 +169,26 @@ class Drive(Build):
         self.assertEqual(code, 1)
         self.assertIn("error: agent roles are stale", err.getvalue())
         self.assertIn("roles differ", err.getvalue())
+        self.assertEqual(calls, [])
+
+    def test_a_channel_mismatch_shows_its_line_not_stale_roles(self):
+        err = io.StringIO()
+        real = subprocess.run
+        line = "channel     context-gate: this project is on the beta channel"
+
+        def fail_check(argv, *a, **kw):
+            if "render" in argv:
+                return subprocess.CompletedProcess(
+                    argv, 1, f"  {line}\n[FAIL] agents render --check  (0 file(s) would change, "
+                    "plugin on the wrong channel)\n", "")
+            return real(argv, *a, **kw)
+
+        with mock.patch.object(drive.subprocess, "run", fail_check), \
+                contextlib.redirect_stderr(err):
+            code, out, calls = self.drive([entry(pct=40)])
+        self.assertEqual(code, 1)
+        self.assertEqual(err.getvalue().strip(), line)
+        self.assertNotIn("stale", err.getvalue())
         self.assertEqual(calls, [])
 
     def test_prompt_says_the_driver_owns_the_build(self):

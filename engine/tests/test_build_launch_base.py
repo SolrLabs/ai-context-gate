@@ -1,11 +1,12 @@
 """`build launch`: the commit an agent's worktree must start from. A launch refuses when the
 default branch has commits the phase branch lacks (agent worktrees are cut from it), and a unit
-retried after a failed attempt starts from its own branch with the phase merged in.
+retried after a failed attempt starts on HEAD like any other, and its earlier branch is only named.
 
     python3 -m unittest discover -s engine/tests -k test_build_launch_base
 """
 from __future__ import annotations
 
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -23,6 +24,37 @@ class Launching(Build):
     def ready(self, uid: str = "u1") -> None:
         wt.fill(self.unit(uid))
         self.w.commit("briefs", at=self.w.top, index=False)
+
+
+class OutsideTheDriver(Launching):
+    """A session the driver did not start is sent to the driver, unless it asks with `--here`."""
+
+    def test_launch_is_refused_and_nothing_changes(self):
+        self.started()
+        self.ready()
+        os.environ.pop("GOVERN_DRIVE", None)
+        before = self.files()
+        for what in ("u1", "review", "fix", "close"):
+            err = self.refused("Builds run under the driver", "launch", what)
+            self.assertIn("build drive", err)
+            self.assertIn(f"launch {what} --here", err)
+        self.assertEqual(self.files(), before)
+        unit = self.ledger()["unit"][0]
+        self.assertEqual((unit["status"], unit["attempts"]), ("pending", 0))
+
+    def test_here_or_a_driver_session_launches(self):
+        self.started()
+        self.ready()
+        os.environ.pop("GOVERN_DRIVE", None)
+        out = self.ok("launch", "u1", "--here")
+        self.assertIn("Brief:", out)
+        self.assertIn("Base:", out)
+        self.assertEqual(self.ledger()["unit"][0]["status"], "running")
+        self.ok("unit", "set", "u1", "pending")
+        os.environ["GOVERN_DRIVE"] = "1"
+        out = self.ok("launch", "u1")
+        self.assertIn("Brief:", out)
+        self.assertIn("Base:", out)
 
 
 class DefaultBranch(Launching):
@@ -85,62 +117,47 @@ class Retried(Launching):
         self.code("src/later.py", "phase moved on\n")
         return tip, self.head()
 
-    def merged(self, tip: str, head: str) -> str:
-        out = self.ok("launch", "u1")
-        new = self.head("u1-try")
-        self.assertEqual(out.splitlines()[-2], f"Base: {new}")
-        self.assertNotEqual(new, tip)
-        self.assertEqual(self.w.git("rev-parse", f"{new}^1", f"{new}^2").split(), [tip, head])
-        for old in (tip, head):
-            self.w.git("merge-base", "--is-ancestor", old, new)
-        self.assertEqual(self.ledger()["unit"][0]["attempts"], 2)
-        return new
-
-    def test_a_branch_with_no_worktree_gets_the_phase_merged_in_by_the_engine(self):
+    def test_a_relaunch_behind_head_starts_on_head_and_names_the_earlier_attempt(self):
         tip, head = self.attempt(worktree=False)
-        self.merged(tip, head)
-        self.assertIn("for attempt 2", self.w.git("log", "-1", "--format=%s", "u1-try"))
-
-    def test_a_branch_in_a_clean_worktree_is_merged_there(self):
-        tip, head = self.attempt(worktree=True)
-        new = self.merged(tip, head)
-        tree = self.tmp / "attempt"
-        self.assertEqual(self.w.git("rev-parse", "HEAD", at=tree).strip(), new)
-        self.assertTrue((tree / "src" / "later.py").is_file())
-
-    def test_a_dirty_worktree_is_refused_and_the_branch_stays(self):
-        tip, head = self.attempt(worktree=True)
-        (self.tmp / "attempt" / "attempt.txt").write_text("edited\n", encoding="utf-8")
-        before = self.files()
-        self.refused("u1-try does not merge cleanly with HEAD", "launch", "u1")
+        lines = self.ok("launch", "u1").splitlines()
+        i = lines.index(f"Base: {head}")
+        self.assertEqual(lines[i + 1], "Earlier attempt: u1-try")
+        self.assertEqual(lines[i + 2], "Phase branch: phase/p1")
         self.assertEqual(self.head("u1-try"), tip)
-        self.assertEqual(self.files(), before)
-        self.assertEqual(self.ledger()["unit"][0]["attempts"], 1)
+        unit = self.ledger()["unit"][0]
+        self.assertEqual((unit["attempts"], unit["base"]), (2, head))
 
-    def test_a_branch_that_conflicts_is_refused_and_the_ref_is_unmoved(self):
+    def test_a_relaunch_ahead_of_head_starts_on_head(self):
         self.started()
         self.ready()
         self.ok("launch", "u1")
         self.w.git("branch", "u1-try")
         self.w.switch("u1-try")
-        self.w.write("src/clash.py", "theirs\n")
+        self.w.write("src/more.py", "attempt\n")
         self.w.commit("attempt", at=self.w.top, index=False)
         tip = self.head()
         self.w.switch("phase/p1")
         self.ok("unit", "set", "u1", "failed", "--branch", "u1-try")
-        self.code("src/clash.py", "ours\n")
-        self.refused("u1-try does not merge cleanly with HEAD", "launch", "u1")
+        lines = self.ok("launch", "u1").splitlines()
+        self.assertIn(f"Base: {self.head()}", lines)
+        self.assertNotIn(f"Base: {tip}", lines)
+        self.assertIn("Earlier attempt: u1-try", lines)
         self.assertEqual(self.head("u1-try"), tip)
 
-    def test_a_branch_that_has_head_is_left_alone(self):
+    def test_a_first_launch_has_no_earlier_attempt_line(self):
         self.started()
         self.ready()
-        self.ok("launch", "u1")
-        self.w.git("branch", "u1-try")
-        self.ok("unit", "set", "u1", "failed", "--branch", "u1-try")
+        self.assertNotIn("Earlier attempt", self.ok("launch", "u1"))
+
+    def test_a_conflicting_or_dirty_earlier_attempt_does_not_stop_a_launch(self):
+        tip, head = self.attempt(worktree=True)
+        (self.tmp / "attempt" / "attempt.txt").write_text("edited\n", encoding="utf-8")
+        before = (self.tmp / "attempt" / "attempt.txt").read_text(encoding="utf-8")
         out = self.ok("launch", "u1")
-        self.assertEqual(out.splitlines()[-2], f"Base: {self.head()}")
-        self.assertEqual(self.head("u1-try"), self.head())
+        self.assertIn(f"Base: {head}", out)
+        self.assertEqual(self.head("u1-try"), tip)
+        self.assertEqual((self.tmp / "attempt" / "attempt.txt").read_text(encoding="utf-8"), before)
+        self.assertEqual(self.ledger()["unit"][0]["attempts"], 2)
 
 
 class Workspace(ws.Workspace):

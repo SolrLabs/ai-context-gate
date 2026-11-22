@@ -11,7 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import profile_guard  # noqa: E402,F401
 
-from govern import __version__, releases  # noqa: E402
+from govern import releases  # noqa: E402
+from source_version import SOURCE_VERSION  # noqa: E402
 
 SAMPLE = """# Notes
 
@@ -43,7 +44,7 @@ BETAS = """# Notes
 class Releases(unittest.TestCase):
     def test_this_version_has_release_notes(self):
         """A release without notes cannot ship: the upgrade report quotes them."""
-        self.assertIn(__version__, [v for v, _ in releases.entries()])
+        self.assertIn(SOURCE_VERSION, [v for v, _ in releases.entries()])
 
     def test_between_is_after_old_through_new(self):
         got = [v for v, _ in releases.between("0.1.8", "0.1.9", SAMPLE)]

@@ -7,12 +7,12 @@
   "plugins": [
     {
       "name": "context-gate",
-      "version": "0.9.5-beta.7",
+      "version": "0.9.5-beta.8",
       "description": "Centralized governance for Claude Code projects: one engine, per-project policy in .context-gate/config.toml, guided upgrades.",
       "source": {
         "source": "archive",
-        "url": "https://github.com/SolrLabs/ai-context-gate/releases/download/v0.9.5-beta.7/context-gate-0.9.5-beta.7.zip",
-        "sha256": "39d59d7879c7528298c01ee63dbc7fceb1cb3a2987ed47b9acac719e3bb0933a"
+        "url": "https://github.com/SolrLabs/ai-context-gate/releases/download/v0.9.5-beta.8/context-gate-0.9.5-beta.8.zip",
+        "sha256": "ee10808eeec933bbebe1f065f6d0686cd5c7ebfe9571ac1f4e601efacbe58a5a"
       }
     }
   ]

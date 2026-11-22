@@ -26,7 +26,8 @@ ON = '\n[checks.agent-roles]\nlevel = "error"\n'
 AGENTS = ".claude/agents"
 RULES = ".claude/rules/context-gate-build.md"
 RENDER = "python3 .context-gate/bin/govern agents render"
-CORE = ["developer", "senior-developer", "code-reviewer", "qa-engineer", "technical-writer"]
+CORE = ["developer", "senior-developer", "code-reviewer", "qa-engineer", "technical-writer",
+        "architect"]
 # A definition somebody wrote by hand: it carries no rendered note.
 BY_HAND = ("---\nname: developer\ndescription: ours\nmodel: opus\neffort: low\n"
            "omitClaudeMd: true\n---\nOur own developer.\n")
@@ -135,10 +136,12 @@ class Render(unittest.TestCase):
                 if role in ("code-reviewer", "qa-engineer", "architect", "ux-reviewer"):
                     self.assertIn("`Findings: critical=0 important=0 minor=0`", tail)
 
-    def test_the_architect_ties_a_small_phase_to_a_migration_or_security(self):
-        self.assertIn("a phase is everything up to the next owner checkpoint, reviewed once; "
-                      "only a migration, or security work that later units build on, is a "
-                      "small phase reviewed early.", rendered("architect", extra_roles=["architect"]))
+    def test_the_architect_settles_designs_and_leaves_triggered_units_to_senior_developer(self):
+        text = rendered("architect")
+        for want in ("You change nothing", "so developer can build it"):
+            self.assertIn(want, text)
+        self.assertIn("- " + roles.SENIOR_TRIGGERS[0], text)
+        self.assertIn("A unit one of these routes stays with senior-developer.", text)
 
     def test_the_rules_tie_a_small_phase_to_a_migration_or_security(self):
         text = rendered(roles.RULES)
@@ -282,15 +285,39 @@ class Render(unittest.TestCase):
 
     def test_govern_is_the_projects_entry_point(self):
         self.assertEqual(roles.GOVERN, f"python3 {layout.ENTRYPOINT}")
-        rules = rendered(roles.RULES)
+        rules = rendered(roles.RULES, measure=True)
         self.assertIn(f"`{roles.GOVERN} phase close`", rules)
-        self.assertIn(f"`{roles.GOVERN} runs mark <label>`", rules)
+        self.assertNotIn("runs mark", rules)
         self.assertIn(f"`{roles.GOVERN} runs report`", rules)
 
     def test_rules_run_the_report_before_phase_close(self):
-        rules = rendered(roles.RULES)
-        self.assertIn("Before you close it with `phase close`, run", rules)
+        rules = rendered(roles.RULES, measure=True)
+        self.assertIn("Before you close a phase with `phase close`, run", rules)
         self.assertNotIn("After closing it, run", rules)
+
+    def test_rules_order_how_work_is_built(self):
+        rules = rendered(roles.RULES)
+        at = [rules.index(s) for s in ("You build nothing in your own context.",
+                                       "Build every phase of a plan with the driver",
+                                       "Work no plan phase fits",
+                                       "Do work yourself only when it is your job",
+                                       "its prompt opens `Unattended run`",
+                                       "These rules hold;")]
+        self.assertEqual(at, sorted(at))
+        self.assertIn("`python3 .context-gate/bin/govern build drive <plan>`", rules)
+        self.assertIn("unless given `--here`", rules)
+
+    def test_measure_renders_the_report_bullet_or_nothing(self):
+        bullets = roles.HOUSEKEEPING
+        report = ("- Before you close a phase with `phase close`, run `" + roles.GOVERN +
+                  " runs report` and give the owner its suggestions; apply none yourself.\n")
+        on = rendered(roles.RULES, measure=True)
+        self.assertIn("things a command can show.\n" + bullets + report +
+                      "- When the phase closes,", on)
+        for off in (rendered(roles.RULES), rendered(roles.RULES, measure=False)):
+            self.assertIn("things a command can show.\n" + bullets +
+                          "- When the phase closes,", off)
+            self.assertNotIn("runs report", off)
 
     def test_rules_stop_for_the_owner_only_at_checkpoints(self):
         rules = rendered(roles.RULES)
@@ -437,11 +464,10 @@ class Render(unittest.TestCase):
                       "its remote, confirms the remote holds it, and only then removes branches "
                       "and worktrees already merged into it. It opens no pull request and merges "
                       "nothing upward. Run it only when no agent is still working.\n"
-                      "- When the project has `agent-measure` on", on)
+                      "- When the phase closes,", on)
         off = rendered(roles.RULES, housekeeping=False)
         self.assertNotIn("govern phase close", off)
-        self.assertIn("things a command can show.\n- When the project has `agent-measure` on",
-                      off)
+        self.assertIn("things a command can show.\n- When the phase closes,", off)
 
     def test_the_roles_table_lists_the_rendered_roles_with_their_model_and_use(self):
         rules = rendered(roles.RULES)
@@ -449,11 +475,10 @@ class Render(unittest.TestCase):
                       "brief file, test first, looping until the tests are green. |\n", rules)
         for role in CORE:
             self.assertIn(f"\n| `{role}` | ", rules)
-        self.assertNotIn("| `architect` |", rules)
-        more = rendered(roles.RULES, extra_roles=["architect"], models={"architect": "sonnet"},
+        self.assertIn("\n| `architect` | opus | high | ", rules)
+        more = rendered(roles.RULES, models={"architect": "sonnet"},
                         efforts={"architect": "low"})
-        self.assertIn("\n| `architect` | sonnet | low | Reviews a large plan before code is "
-                      "written", more)
+        self.assertIn("\n| `architect` | sonnet | low | Settles the design", more)
         self.assertNotIn("| `ux-reviewer` |", more)
 
     def test_only_roles_with_the_write_tool_are_told_to_write_the_report_with_it(self):
@@ -476,8 +501,7 @@ class Render(unittest.TestCase):
 
     def test_the_rules_never_launch_outside_the_build_skill_and_split_a_big_unit(self):
         rules = " ".join(rendered(roles.RULES).split())
-        self.assertIn("Never launch a role agent to build or fix outside the build skill; with no "
-                      "plan, run plan first.", rules)
+        self.assertNotIn("Never launch a role agent to build or fix outside the build skill", rules)
         self.assertIn("Before you brief a plan's unit, split it when it holds more than one "
                       "operation a user can call or will add more than about 500 lines; record "
                       "the split as a ruling.", rules)
@@ -493,20 +517,52 @@ class Command(Base):
     def on(self, more: str = "", **kw) -> SingleRepo:
         return self.repo(extra=ON + more, **kw)
 
-    def test_render_writes_the_five_core_roles_and_the_rules_and_the_gate_is_green(self):
+    def test_render_writes_the_six_core_roles_and_the_rules_and_the_gate_is_green(self):
         r = self.on()
         code, out, err = r.run("agents", "render")
         self.assertEqual(code, 0, out + err)
-        self.assertIn("[OK] agents render  (6 written, 0 removed)", out)
+        self.assertIn("[OK] agents render  (7 written, 0 removed)", out)
         for role in CORE:
             self.assertIn(f"  rendered    {AGENTS}/{role}.md\n", out)
             self.assertEqual(raw(r.root / AGENTS / f"{role}.md"), rendered(role))
         self.assertEqual(raw(r.root / RULES), rendered(roles.RULES))
-        self.assertFalse((r.root / AGENTS / "architect.md").exists())
         self.assertFalse((r.root / AGENTS / "ux-reviewer.md").exists())
         code, out, _ = r.run("check")
         self.assertEqual(code, 0, out)
         self.assertNotIn(".claude/", out)
+
+    def test_the_report_bullet_follows_the_agent_measure_option(self):
+        r = self.on('\n[checks.agent-measure]\nlevel = "error"\n')
+        code, out, err = r.run("agents", "render")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("runs report", raw(r.root / RULES))
+
+    def test_the_report_bullet_is_absent_with_agent_measure_off_or_unset(self):
+        r = self.on('\n[checks.agent-measure]\nlevel = "off"\n')
+        code, out, err = r.run("agents", "render")
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn("runs report", raw(r.root / RULES))
+
+    def test_the_report_bullet_is_absent_without_the_agent_measure_option(self):
+        r = self.on()
+        code, out, err = r.run("agents", "render")
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn("runs report", raw(r.root / RULES))
+
+    def test_a_default_render_writes_the_architect(self):
+        r = self.on()
+        code, out, err = r.run("agents", "render")
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(raw(r.root / AGENTS / "architect.md"), rendered("architect"))
+        self.assertIn("| `architect` | opus | high |", raw(r.root / RULES))
+
+    def test_extra_roles_naming_the_architect_gives_no_finding(self):
+        r = self.on('extra_roles = ["architect"]\n')
+        self.assertEqual(r.run("agents", "render")[0], 0)
+        self.assertNotIn("extra_roles", r.run("check")[1])
+        self.assertEqual(roles.problems(defaults(extra_roles=["architect"])), [])
+        self.assertIn("the roles it can add are ux-reviewer",
+                      "\n".join(roles.problems(defaults(extra_roles=["nobody"]))))
 
     def test_extra_roles_adds_the_two_optional_roles(self):
         r = self.on('extra_roles = ["ux-reviewer", "architect"]\n')
@@ -560,13 +616,36 @@ class Command(Base):
         self.assertEqual(code, 0, out)
         self.assertEqual(raw(path), "\ufeff" + rendered("developer"))
 
+    def test_check_flag_fails_when_a_beta_channel_session_loads_the_stable_plugin(self):
+        r = self.on()
+        r.run("agents", "render")
+        cfg = r.root / CFG
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace("schema = 1\n",
+                                                           'schema = 1\nchannel = "beta"\n', 1))
+        settings = layout.claude_dir(r.home) / "settings.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        env = {"HOME": str(r.home), "CLAUDE_CONFIG_DIR": ""}
+        with mock.patch.dict("os.environ", env):
+            wtext(settings, '{"enabledPlugins": {"%s": true}}' % layout.PLUGIN_ID)
+            code, out, _ = r.run("agents", "render", "--check")
+            self.assertEqual(code, 1, out)
+            self.assertIn(f"  channel     {layout.DISPLAY_NAME}: this project is on the beta "
+                          f"channel but {layout.BETA_CHANNEL_PLUGIN_ID} is not enabled", out)
+            self.assertIn("[FAIL] agents render --check  (0 file(s) would change, plugin on "
+                          "the wrong channel)", out)
+            self.assertNotIn("  note        run ", out)
+            wtext(settings, '{"enabledPlugins": {"%s": true}}' % layout.BETA_CHANNEL_PLUGIN_ID)
+            code, out, _ = r.run("agents", "render", "--check")
+            self.assertEqual(code, 0, out)
+            self.assertNotIn("  channel ", out)
+
     def test_check_flag_writes_nothing_and_exits_1_when_anything_would_change(self):
         r = self.on()
         before = snapshot(r.root)
         code, out, _ = r.run("agents", "render", "--check")
         self.assertEqual(code, 1, out)
         self.assertIn(f"  missing     {AGENTS}/developer.md\n", out)
-        self.assertIn("[FAIL] agents render --check  (6 file(s) would change)", out)
+        self.assertIn("[FAIL] agents render --check  (7 file(s) would change)", out)
         self.assertEqual(snapshot(r.root), before)
         r.run("agents", "render")
         code, out, _ = r.run("agents", "render", "--check")
@@ -589,7 +668,7 @@ class Command(Base):
                 f"— move the file and run `{RENDER}`, or turn agent-roles off ('developer' is "
                 f"always rendered)")
         self.assertIn(f"  conflict    {want}\n", out)
-        self.assertIn("[FAIL] agents render  (5 written, 0 removed, 1 conflict(s))", out)
+        self.assertIn("[FAIL] agents render  (6 written, 0 removed, 1 conflict(s))", out)
         self.assertEqual(raw(r.root / AGENTS / "qa-engineer.md"), rendered("qa-engineer"))
         code, out, _ = r.run("check")
         self.assertEqual(code, 1, out)
@@ -599,12 +678,12 @@ class Command(Base):
         self.assertIn("(0 file(s) would change, 1 conflict(s))", out)
 
     def test_a_conflict_on_an_extra_role_or_the_rules_names_its_own_way_out(self):
-        r = self.on('extra_roles = ["architect"]\n')
-        r.write(f"{AGENTS}/architect.md", BY_HAND.replace("developer", "architect"))
+        r = self.on('extra_roles = ["ux-reviewer"]\n')
+        r.write(f"{AGENTS}/ux-reviewer.md", BY_HAND.replace("developer", "ux-reviewer"))
         r.write(RULES, "# Our own rules\n")
         code, out, _ = r.run("agents", "render")
         self.assertEqual(code, 1, out)
-        self.assertIn("or drop 'architect' from [checks.agent-roles] extra_roles", out)
+        self.assertIn("or drop 'ux-reviewer' from [checks.agent-roles] extra_roles", out)
         self.assertIn("or point [checks.agent-roles] rules_file at another path", out)
         self.assertEqual(raw(r.root / RULES), "# Our own rules\n")
 
@@ -634,22 +713,22 @@ class Command(Base):
         self.assertEqual(path.read_bytes(), b"\xff\xfe not text\n")
 
     def test_a_role_no_longer_configured_is_removed_and_warned_about_until_then(self):
-        r = self.on('extra_roles = ["architect"]\n')
+        r = self.on('extra_roles = ["ux-reviewer"]\n')
         r.run("agents", "render")
         cfg = r.root / CFG
-        wtext(cfg, raw(cfg).replace('extra_roles = ["architect"]\n', ""))
+        wtext(cfg, raw(cfg).replace('extra_roles = ["ux-reviewer"]\n', ""))
         code, out, _ = r.run("check")
-        self.assertEqual(code, 1, out)        # the rules still list the architect: stale
-        self.assertIn(f"  warn   {AGENTS}/architect.md: rendered for `architect`, which is no "
+        self.assertEqual(code, 1, out)        # the rules still list the ux-reviewer: stale
+        self.assertIn(f"  warn   {AGENTS}/ux-reviewer.md: rendered for `ux-reviewer`, which is no "
                       f"longer rendered — run `{RENDER}` to remove it\n", out)
         code, out, _ = r.run("agents", "render", "--check")
-        self.assertIn(f"  orphaned    {AGENTS}/architect.md", out)
-        self.assertTrue((r.root / AGENTS / "architect.md").exists())
+        self.assertIn(f"  orphaned    {AGENTS}/ux-reviewer.md", out)
+        self.assertTrue((r.root / AGENTS / "ux-reviewer.md").exists())
         code, out, _ = r.run("agents", "render")
         self.assertEqual(code, 0, out)
-        self.assertIn(f"  removed     {AGENTS}/architect.md\n", out)
+        self.assertIn(f"  removed     {AGENTS}/ux-reviewer.md\n", out)
         self.assertIn("(1 written, 1 removed)", out)
-        self.assertFalse((r.root / AGENTS / "architect.md").exists())
+        self.assertFalse((r.root / AGENTS / "ux-reviewer.md").exists())
         self.assertTrue((r.root / AGENTS / "reviewer.md").exists())     # never ours
         code, out, _ = r.run("check")
         self.assertEqual(code, 0, out)
@@ -728,7 +807,7 @@ class Command(Base):
         code, out, err = r.run("agents", "render")
         self.assertEqual(code, 1, out + err)
         want = ("[checks.agent-roles] extra_roles names 'dba': the roles it can add are "
-                "ux-reviewer, architect")
+                "ux-reviewer")
         self.assertIn(f"  refused     {want}\n", out)
         self.assertIn("[FAIL] agents render  (nothing written", out)
         self.assertEqual(snapshot(r.root), before)
@@ -770,15 +849,15 @@ class Command(Base):
 
     def test_a_setting_for_a_role_that_is_not_rendered_is_a_finding_and_render_refuses(self):
         cases = {
-            'models = { architect = "opus" }\n':
-                "models names 'architect', which is not rendered (add it to extra_roles)",
+            'models = { ux-reviewer = "opus" }\n':
+                "models names 'ux-reviewer', which is not rendered (add it to extra_roles)",
             'efforts = { ghost = "low" }\n':
                 "efforts names 'ghost', which is not rendered (rendered: developer, "
-                "senior-developer, code-reviewer, qa-engineer, technical-writer)",
+                "senior-developer, code-reviewer, qa-engineer, technical-writer, architect)",
             'max_turns = { ux-reviewer = 40 }\n':
                 "max_turns names 'ux-reviewer', which is not rendered (add it to extra_roles)",
-            'load_claude_md = ["architect"]\n':
-                "load_claude_md names 'architect', which is not rendered (add it to "
+            'load_claude_md = ["ux-reviewer"]\n':
+                "load_claude_md names 'ux-reviewer', which is not rendered (add it to "
                 "extra_roles)",
             'max_turns = { developer = "many" }\n':
                 "max_turns.developer = 'many': a cap is a whole number above 0",
@@ -856,7 +935,7 @@ class Command(Base):
         path = record_install(r.root)
         code, out, _ = r.run("agents", "render")
         self.assertEqual(code, 0, out)
-        self.assertIn(f"  recorded    6 file(s) in {layout.MANIFEST}\n", out)
+        self.assertIn(f"  recorded    7 file(s) in {layout.MANIFEST}\n", out)
         with path.open("rb") as fh:
             rows = tomllib.load(fh)["rendered"]
         self.assertEqual([row["path"] for row in rows],
@@ -1097,13 +1176,6 @@ class References(Base):
         r = self.repo(extra=ON + 'extra_roles = ["ux-reviewer", "architect"]\n')
         r.run("agents", "render")
         self.assertEqual(self.found(r), [])
-
-
-class QaEngineerGivenNoDiff(unittest.TestCase):
-    def test_the_rendered_qa_engineer_says_it_is_given_no_diff(self):
-        text = rendered("qa-engineer")
-        self.assertIn("You are given no diff: open the files you probe.", text)
-        self.assertNotIn("full diff", text)
 
 
 class ClosingRecords(unittest.TestCase):

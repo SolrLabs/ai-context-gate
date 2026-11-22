@@ -212,5 +212,75 @@ class LocalBetaWithEngineDir(unittest.TestCase):
         self.assertIsNone(notice.local_beta(self.project, self.home))
 
 
+class ChannelPlugin(unittest.TestCase):
+    """notice.channel_plugin: a beta-channel project whose session loads the wrong plugin."""
+    BETA = layout.BETA_CHANNEL_PLUGIN_ID
+    STABLE = layout.PLUGIN_ID
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.home = self.tmp / "home"
+        self.project = self.tmp / "project"
+        self.home.mkdir()
+        (self.project / layout.GOV_DIR).mkdir(parents=True)
+        self.config('channel = "beta"\n')
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def config(self, extra: str) -> None:
+        (self.project / layout.CONFIG).write_text(
+            f'[governance]\nengine = "0.9.4"\nschema = 1\n{extra}', encoding="utf-8")
+
+    def settings(self, *ids: str) -> None:
+        path = layout.claude_dir(self.home) / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"enabledPlugins": {i: True for i in ids}}), encoding="utf-8")
+
+    def say(self):
+        return notice.channel_plugin(self.project, self.home)
+
+    def test_only_the_stable_plugin_enabled_names_the_beta_and_the_commands(self):
+        self.settings(self.STABLE)
+        out = self.say()
+        self.assertEqual(len(out.splitlines()), 1)
+        self.assertIn(self.BETA, out)
+        self.assertIn("claude plugin marketplace update context-gate-beta", out)
+        self.assertIn(f"claude plugin install {self.BETA} --scope local", out)
+        self.assertIn(f"claude plugin disable {self.STABLE} --scope local", out)
+        self.assertIn("/exit and start claude again", out)
+
+    def test_no_plugin_enabled_has_no_disable_command(self):
+        self.settings()
+        out = self.say()
+        self.assertIn(f"claude plugin install {self.BETA} --scope local", out)
+        self.assertNotIn("disable", out)
+
+    def test_both_enabled_says_every_hook_runs_twice(self):
+        self.settings(self.STABLE, self.BETA)
+        out = self.say()
+        self.assertIn("every hook runs twice", out)
+        self.assertIn(f"claude plugin disable {self.STABLE} --scope local", out)
+        self.assertNotIn("install", out)
+
+    def test_only_the_beta_plugin_enabled_is_silent(self):
+        self.settings(self.BETA)
+        self.assertIsNone(self.say())
+
+    def test_no_user_settings_file_is_silent(self):
+        self.assertIsNone(self.say())
+
+    def test_the_stable_channel_is_silent(self):
+        self.config("")
+        self.settings(self.STABLE)
+        self.assertIsNone(self.say())
+
+    def test_an_unreadable_config_is_silent(self):
+        self.settings(self.STABLE)
+        (self.project / layout.CONFIG).write_bytes(b"\xff\xfe[governance")
+        self.assertIsNone(self.say())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -243,7 +243,7 @@ class UpgradeRendersRoles(Base):
         with open(dev, encoding="utf-8", newline="") as fh:
             self.assertEqual(fh.read(), self.fresh(w, "developer"))
         rows = {r["path"]: r["sha256"] for r in installer.read_manifest(w.root)["rendered"]}
-        self.assertEqual(len(rows), 6)
+        self.assertEqual(len(rows), 7)
         self.assertEqual(rows[".claude/agents/developer.md"],
                          roles.digest(self.fresh(w, "developer")))
         self.assertEqual(installer_check(w.root)[0], 0)
@@ -273,7 +273,7 @@ class UpgradeRendersRoles(Base):
         said = (".claude/agents/developer.md: was not rendered by context-gate, so it is left "
                 "alone")
         self.assertIn(f"  roles        left alone: {said}", out)
-        self.assertIn("  roles        5 file(s) rendered, 0 removed\n", out)
+        self.assertIn("  roles        6 file(s) rendered, 0 removed\n", out)
         self.assertTrue((w.root / ".claude/agents/qa-engineer.md").is_file())
         rep = (w.root / layout.GOV_DIR / "upgrade-report.md").read_text(encoding="utf-8")
         self.assertIn("## Agent roles left for a person\n", rep)
@@ -848,11 +848,11 @@ class LocalOnlyRoles(Base):
         w = self.project()
         code, out, err = self.upgrade(w)
         self.assertEqual(code, 0, out + err)
-        self.assertIn("  roles        6 file(s) rendered, 0 removed\n", out)
+        self.assertIn("  roles        7 file(s) rendered, 0 removed\n", out)
         self.assertEqual(installer.read_manifest(w.root)["rendered"], [])
-        self.assertEqual(len(roles._rows(w.root / roles.LOCAL_RECORD)), 6)
+        self.assertEqual(len(roles._rows(w.root / roles.LOCAL_RECORD)), 7)
         block = (w.root / ".git/info/exclude").read_text(encoding="utf-8")
-        self.assertIn(f"{self.START}\n/.claude/agents/code-reviewer.md\n", block)
+        self.assertIn(f"{self.START}\n/.claude/agents/architect.md\n", block)
         self.assertIn(f"/{roles.LOCAL_RECORD}\n# context-gate: end\n", block)
         self.assertEqual(self.git(w.root, "status", "--short"), "")
 
@@ -870,7 +870,7 @@ class LocalOnlyRoles(Base):
         w = self.project(local=False)
         code, out, err = self.upgrade(w)
         self.assertEqual(code, 0, out + err)
-        self.assertEqual(len(installer.read_manifest(w.root)["rendered"]), 6)
+        self.assertEqual(len(installer.read_manifest(w.root)["rendered"]), 7)
         self.assertFalse((w.root / roles.LOCAL_RECORD).exists())
         self.assertNotIn(self.START, (w.root / ".git/info/exclude").read_text(encoding="utf-8"))
 

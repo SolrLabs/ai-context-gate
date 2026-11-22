@@ -63,6 +63,20 @@ class PlannedUnits(Build):
         self.assertIsNone(build.planned_units(self.w.root, build.Ledger(
             path=led.path, phase="p9", branch="b", base="0", plan="docs/plan.md")))
 
+    def test_outside_the_driver_next_says_to_start_it_and_keeps_the_step(self):
+        self.with_plan()
+        self.unit("u2")
+        os.environ.pop("GOVERN_DRIVE", None)
+        step = f"Fill in the brief of unit u2, commit it, then run `{GOVERN} build launch u2`"
+        self.assertEqual(
+            self.next_line(),
+            f"Next: Start the driver: `{GOVERN} build drive docs/plan.md`, in the background. "
+            f"(In a driver session, or with `--here`, the step is: {step}.)")
+        self.assertEqual(self.ok("status", "--here").splitlines()[-1], f"Next: {step}.")
+        self.assertEqual(json.loads(self.ok("status", "--json", "--here"))["next"], f"{step}.")
+        os.environ["GOVERN_DRIVE"] = "1"
+        self.assertEqual(self.next_line(), f"Next: {step}.")
+
     def test_units_not_added_are_named(self):
         self.with_plan()
         self.unit("u1", "done")

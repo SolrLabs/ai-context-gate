@@ -4,27 +4,41 @@ Newest first. Each release says what changed and, under **Upgrading**, anything 
 do or decide. The upgrade report quotes every entry between the engine a project ran and the one
 it upgraded to.
 
+## 0.9.5-beta.8 — 2026-11-22
+
+The driver is the plain way to build a phase, and a retry starts fresh.
+
+- **Changed:** `agents render --check` and the SessionStart hook name a session whose enabled plugin is on the other channel than the project's `[governance] channel`, with the install commands. The mismatch is reported apart from file changes.
+- **Changed:** `govern build drive` sets `GOVERN_DRIVE=1` on its sessions. Outside one, `build launch` refuses and names `build drive`; `--here` overrides it. `build status` and `build start` end with a `Next:` line that points at the driver.
+- **Changed:** the rendered build rules open with "How work is built", three orders: the driver builds plan phases, role agents work from brief files for work no phase fits, and the session only plans, merges, pushes and tidies. The run-report order appears only when `agent-measure` is on.
+- **Changed:** every attempt of a unit starts on the current Base. The merge of Base into the earlier attempt's branch is gone; a retry prints `Earlier attempt: <branch>`. In a workspace, attempt N gets its own worktree and branch with an `-a<N>` suffix. Unit ids ending `-a<digits>` are refused.
+- **Changed:** `architect` is a core rendered role. The plan skill launches it only for a unit that would go to `senior-developer` for its difficulty, not a trigger, when settling its design could let `developer` build it. A hand-made `.claude/agents/architect.md` that context-gate did not render is skipped with a note, not a conflict.
+- **Changed:** any table of units shown to the user has an Agent column, written `role (model)`.
+- **Changed:** `govern runs report` groups contract refusals by what was missing (report, red output) and gives the Produces advice only for a brief that had no `Produces:` line.
+- **Fixed:** the workspace close writer's brief is copied into its own worktree and excluded from git there, so the printed cleanup works.
+- **Upgrading:** run `govern agents render`; it adds the `architect` role file. A project with its own `.claude/agents/architect.md` keeps it.
+
 ## 0.9.5-beta.7 — 2026-11-20
 
 The driver band draws in the session that started the driver.
 
 - **Changed:** the driver band draws only in the Claude Code session that started the driver (`status.json` records it as `owner_session`). A driver started from a terminal draws in every session of the project, as before. After `/clear` or a resume the starting session's id changes, so its band goes too.
 
-## 0.9.5-beta.6 — 2026-11-19
+## 0.9.5-beta.6 — unreleased
 
 The build skill hands a person's build to the driver.
 
-- **Changed:** typed by a person, `/context-gate:build <plan>` now starts `govern build drive` in the background instead of coordinating in that session; the driver's own sessions (their instructions contain the words `Unattended run`) run the steps. `--here` builds in the person's session as before.
+- **Changed:** typed by a person, `/context-gate:build <plan>` now starts `govern build drive` in the background instead of coordinating in that session; the driver's own sessions (their instructions open with `Unattended run`) run the steps. `--here` builds in the person's session as before.
 - **Upgrading:** a person's `/context-gate:build` now needs the `claude` CLI on PATH, and its background sessions spend the person's usage. `--here` keeps the old behavior; a phase name or `--one` also builds in the session, because the driver takes only the plan.
 
-## 0.9.5-beta.5 — 2026-11-19
+## 0.9.5-beta.5 — unreleased
 
 The start notices name the engine and the plugin the project actually runs.
 
 - **Fixed:** with `[governance] engine_dir` set, the SessionStart notice no longer says the project runs the beta in `local.toml`; the launcher runs the tree's engine ahead of it, and the notice now follows that order.
 - **Fixed:** on `[governance] channel = "beta"` the plugin-behind notice reads and names `context-gate@context-gate-beta` and its marketplace, not the stable plugin.
 
-## 0.9.5-beta.4 — 2026-11-19
+## 0.9.5-beta.4 — unreleased
 
 The beta channel refreshes the launcher, and the drive band shows the step and the units.
 

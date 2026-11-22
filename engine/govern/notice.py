@@ -360,3 +360,34 @@ def plugin_behind(root: Path, home: Path) -> str | None:
         return "\n".join(lines) or None
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
+
+
+def channel_plugin(root: Path, home: Path) -> str | None:
+    """One line when the project is on the beta channel and this session's settings do not enable
+    the beta marketplace's plugin (it loads the stable one, or none), or enable both (every hook
+    runs twice). None for a project not on the beta channel, with no user settings file (a CI
+    runner), and when the right plugin alone is enabled: it never raises."""
+    import tomllib
+    try:
+        with (root / layout.CONFIG).open("rb") as fh:
+            if (tomllib.load(fh).get("governance") or {}).get("channel") != "beta":
+                return None
+        if not (layout.claude_dir(home) / "settings.json").is_file():
+            return None
+        enabled = enabled_plugins(root, home)
+        beta, stable = layout.BETA_CHANNEL_PLUGIN_ID, layout.PLUGIN_ID
+        has_beta, has_stable = enabled.get(beta) is True, enabled.get(stable) is True
+        disable = f"claude plugin disable {stable} --scope local"
+        restart = "/exit and start claude again"
+        if has_beta and not has_stable:
+            return None
+        if has_beta:
+            return (f"{layout.DISPLAY_NAME}: both {beta} and {stable} are enabled here, so every "
+                    f"hook runs twice and the stable skills still load. Run {disable}, then "
+                    f"{restart}.")
+        return (f"{layout.DISPLAY_NAME}: this project is on the beta channel but {beta} is not "
+                f"enabled in this session's settings. Run claude plugin marketplace update "
+                f"{layout.BETA_MARKETPLACE}, then claude plugin install {beta} --scope local, "
+                + (f"then {disable}, " if has_stable else "") + f"then {restart}.")
+    except Exception:
+        return None

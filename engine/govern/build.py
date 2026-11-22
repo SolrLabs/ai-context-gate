@@ -838,7 +838,9 @@ def close_brief(root: Path, ledger: Ledger, workspace: bool = False) -> str:
             + (f"This brief is for the workspace repository's own documents: its handoff, decision log "
                f"and roadmap. `{ledger.project}`'s own documents have their own brief. Commit your "
                f"report on your branch together with your document changes; if git says the "
-               f"report is ignored, leave it uncommitted and do not force it.\n\n"
+               f"report is ignored, leave it uncommitted and do not force it. This worktree holds no member repositories, so "
+               f"`govern check` fails here on them: do not run it here; the coordinator runs it "
+               f"after merging your branch.\n\n"
                if workspace else "")
             + ("## What landed\n\n" + landed + "\n" if landed else "")
             + (RULINGS_HEADING + "\n\n" + rulings + "\n" if rulings else "")
@@ -904,9 +906,27 @@ def unadded(ledger: Ledger, planned: list[str] | None) -> list[str]:
     return [uid for uid in planned or [] if uid not in have]
 
 
-def next_action(ledger: Ledger, planned: list[str] | None = None) -> str:
+def driven() -> bool:
+    """True in a session the driver started (`GOVERN_DRIVE=1`)."""
+    return os.environ.get("GOVERN_DRIVE") == "1"
+
+
+def _driver_command(ledger: Ledger) -> str:
+    return f"{govern_build(ledger.project)} drive {ledger.plan or '<plan>'}"
+
+
+def next_action(ledger: Ledger, planned: list[str] | None = None, *, driven: bool = False) -> str:
     """One sentence: what the coordinator does next, and the command for it. A function of the
-    ledger and, when given, the unit ids the plan names for the phase."""
+    ledger and, when given, the unit ids the plan names for the phase. Outside a driver session
+    (`driven` False) it says to start the driver, and keeps the step in a parenthesis."""
+    step = _next_step(ledger, planned)
+    if driven:
+        return step
+    return (f"Start the driver: `{_driver_command(ledger)}`, in the background. (In a driver "
+            f"session, or with `--here`, the step is: {step.removesuffix('.')}.)")
+
+
+def _next_step(ledger: Ledger, planned: list[str] | None = None) -> str:
     govern = govern_build(ledger.project)
     stuck = next((u for u in ledger.units if u["status"] in ("blocked", "failed")), None)
     if stuck:
@@ -969,7 +989,7 @@ def _local(root: Path, path: Path) -> str:
         return str(path)
 
 
-def status_data(root: Path, ledger: Ledger | None, branch: str) -> dict:
+def status_data(root: Path, ledger: Ledger | None, branch: str, *, driven: bool = False) -> dict:
     """What `build status --json` prints. The keys are a contract; with no build in flight
     they are all there, `phase` is null and the lists are empty."""
     if ledger is None:
@@ -983,7 +1003,7 @@ def status_data(root: Path, ledger: Ledger | None, branch: str) -> dict:
             "plan": ledger.plan or None, "high_risk": ledger.high_risk, "visual": ledger.visual, "stage": ledger.stage,
             "ledger": _posix(_base(root, ledger.path), ledger.path), "rulings": list(ledger.rulings), "units": units,
             "done": sum(1 for u in ledger.units if u["status"] == "done"),
-            "total": len(ledger.units), "next": next_action(ledger, planned),
+            "total": len(ledger.units), "next": next_action(ledger, planned, driven=driven),
             "unadded": unadded(ledger, planned)}
 
 
@@ -999,7 +1019,8 @@ def _rulings(ledger: Ledger) -> list[str]:
     return ["Rulings:"] + [f"  {n}. {r}" for n, r in enumerate(ledger.rulings, 1)]
 
 
-def status_lines(ledger: Ledger, planned: list[str] | None = None) -> list[str]:
+def status_lines(ledger: Ledger, planned: list[str] | None = None, *,
+                 driven: bool = False) -> list[str]:
     facts = [f"stage {ledger.stage}", f"base {ledger.base[:12]}"]
     if ledger.plan:
         facts.append(f"plan {ledger.plan}")
@@ -1018,7 +1039,7 @@ def status_lines(ledger: Ledger, planned: list[str] | None = None) -> list[str]:
                      + (f"  ({'; '.join(more)})" if more else ""))
     if not ledger.units:
         lines.append("  no units yet")
-    return lines + _rulings(ledger) + [f"Next: {next_action(ledger, planned)}"]
+    return lines + _rulings(ledger) + [f"Next: {next_action(ledger, planned, driven=driven)}"]
 
 
 def session_line(root: Path) -> str | None:
@@ -1032,7 +1053,7 @@ def session_line(root: Path) -> str | None:
         return None
     done = sum(1 for u in ledger.units if u["status"] == "done")
     return (f"A build is in flight: {ledger.phase}, {done} of {len(ledger.units)} units done. "
-            f"Next: {next_action(ledger, planned_units(root, ledger))}")
+            f"Next: {next_action(ledger, planned_units(root, ledger), driven=driven())}")
 
 
 def compact_text(root: Path) -> str:
@@ -1046,7 +1067,7 @@ def compact_text(root: Path) -> str:
             return ""
         where = _rel(root, ledger.path)
         return "\n".join(["Build in flight: keep this in the summary.",
-                          *status_lines(ledger, planned_units(root, ledger)),
+                          *status_lines(ledger, planned_units(root, ledger), driven=driven()),
                           f"The ledger at {where} is the truth; drop tool output and file "
                           f"contents from the summary."])
     except Exception:
@@ -1213,7 +1234,7 @@ def _hygiene_refusal(ctx, project: str | None, root: Path, state: Path) -> None:
 
 def start(ctx, name: str, plan: str | None, high_risk: bool, source: str | None = None,
           visual: bool = False, project: str | None = None, session: Path | None = None,
-          take_over: bool = False) -> int:
+          take_over: bool = False, here: bool = False) -> int:
     """`session` is the governance root, where runs are logged; `ctx.root` is the member's.
     `take_over` restarts a phase another person owns, as its new owner (one write)."""
     root = ctx.root
@@ -1320,7 +1341,7 @@ def start(ctx, name: str, plan: str | None, high_risk: bool, source: str | None 
                   f"{exc.strerror or exc}", file=sys.stderr)
     if taken:
         lines.insert(0, f"took over {name} from {taken}")
-    _say(lines + [f"Next: {next_action(ledger, planned_units(root, ledger))}"])
+    _say(lines + [f"Next: {next_action(ledger, planned_units(root, ledger), driven=driven() or here)}"])
     return 0
 
 
@@ -1361,6 +1382,28 @@ def _exclude_state(root: Path) -> None:
         exclude.write_bytes(have + gap + line.encode("utf-8"))
     except OSError as exc:
         raise BuildError(f"cannot write {exclude}: {exc}") from exc
+
+
+def _exclude_copy(repo: Path, tree: Path, rel: str) -> None:
+    """Make git ignore the brief copied into a writer's `tree` (`rel`, from its root) through the
+    `info/exclude` its worktrees share, so the copy neither blocks `git worktree remove` nor is
+    committed by accident. A copy git already ignores or tracks is left as it is; the line is
+    anchored at the top. Any failure is ignored: the copy is only a convenience."""
+    try:
+        if phase._run(tree, "check-ignore", "-q", "--", rel).returncode != 1:
+            return
+        if phase._yes(tree, "ls-files", "--error-unmatch", "--", rel):
+            return
+        common = phase._run(repo, "rev-parse", "--git-common-dir")
+        if common.returncode != 0:
+            return
+        exclude = repo / phase._out(common) / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        have = exclude.read_bytes() if exclude.exists() else b""
+        gap = b"" if not have or have.endswith(b"\n") else b"\n"
+        exclude.write_bytes(have + gap + f"/{rel}\n".encode("utf-8"))
+    except (OSError, phase.PhaseError):
+        pass
 
 
 def _ledger_ignored(root: Path, ledger: Ledger) -> str | None:
@@ -1449,6 +1492,9 @@ def unit_add(ctx, uid: str, title: str, role: str | None, red: bool,
     if not SLUG.fullmatch(uid):
         raise BuildError(f"{uid!r} is not a unit id: lower-case letters, digits and hyphens, "
                          f"starting with a letter or a digit")
+    if re.fullmatch(r".*-a\d+", uid):
+        raise BuildError(f"{uid} ends in -a and digits: that suffix is kept for retries "
+                         f"(a unit's second attempt is u-a2): pick another id")
     if uid in RESERVED:
         raise BuildError(f"{uid} is one of the phase's own folders ({', '.join(RESERVED)}): "
                          f"pick another id")
@@ -2251,7 +2297,8 @@ def team_status(ctx, as_json: bool) -> int:
     return 0
 
 
-def status(ctx, as_json: bool, project: str | None = None, team: bool = False) -> int:
+def status(ctx, as_json: bool, project: str | None = None, team: bool = False,
+           here: bool = False) -> int:
     if team:
         return team_status(ctx, as_json)
     branch = checked_out(ctx.root)
@@ -2260,9 +2307,9 @@ def status(ctx, as_json: bool, project: str | None = None, team: bool = False) -
         ledger.project = ledger.project or project or ""
         ledger.folder = _folder(ctx, ledger.project)
     if as_json:
-        _say([json.dumps(status_data(ctx.root, ledger, branch), indent=2, ensure_ascii=False)])
+        _say([json.dumps(status_data(ctx.root, ledger, branch, driven=driven() or here), indent=2, ensure_ascii=False)])
     else:
-        _say(status_lines(ledger, planned_units(ctx.root, ledger)) if ledger else [nothing_in_flight(branch, project)])
+        _say(status_lines(ledger, planned_units(ctx.root, ledger), driven=driven() or here) if ledger else [nothing_in_flight(branch, project)])
     return 0
 
 
@@ -2470,11 +2517,14 @@ def _no_index(folder: Path) -> None:
         pass
 
 
-def _agent_tree(member: Path, session: Path, project: str, slug: str, uid: str) -> Path:
+def _agent_tree(member: Path, session: Path, project: str, slug: str, uid: str,
+                attempt: int = 1) -> Path:
     """The worktree of `member` an agent of unit `uid` works in, made if it is not there:
-    `<session>/.claude/worktrees/<project>-<slug>-<uid>` on the branch `build/<slug>/<uid>`. One
-    already there for that branch is reused; anything else at the path, or the branch checked out
-    elsewhere, is refused and nothing is removed."""
+    `<session>/.claude/worktrees/<project>-<slug>-<uid>` on the branch `build/<slug>/<uid>`. From
+    the second `attempt` on, a new one beside it: `<uid>-a<attempt>` in both names, cut from HEAD;
+    the earlier ones are left as they are. One already there for that branch is reused; anything
+    else at the path, or the branch checked out elsewhere, is refused and nothing is removed."""
+    uid = f"{uid}-a{attempt}" if attempt > 1 else uid
     branch = f"build/{slug}/{uid}"
     path = session / ".claude" / "worktrees" / f"{project}-{slug}-{uid}"
     try:
@@ -2521,47 +2571,21 @@ def _default_ahead(root: Path) -> None:
                              f"--no-edit {short}, commit, then launch again.")
 
 
-def _retry_base(root: Path, ledger: Ledger, unit: dict, head: str) -> str:
-    """Where a retried unit's agent starts: its own branch with HEAD merged in, so the first
-    attempt's commits are there. HEAD when the unit has no branch here; the branch's tip when
-    it already has HEAD, and HEAD when the branch holds nothing HEAD lacks."""
-    branch = unit["branch"]
-    ref = f"refs/heads/{branch}"
-    if not branch or not phase._yes(root, "rev-parse", "--verify", "--quiet", ref):
-        return head
-    if phase._yes(root, "merge-base", "--is-ancestor", "HEAD", ref):
-        return phase._ask(root, "rev-parse", ref)
-    if phase._yes(root, "merge-base", "--is-ancestor", ref, "HEAD"):
-        return head           # nothing the attempt made that HEAD lacks: no merge, ref unmoved
-    refusal = BuildError(f"{branch} does not merge cleanly with HEAD: merge it by hand, then "
-                         "launch again.")
-    tip = phase._ask(root, "rev-parse", ref)
-    tree = phase._worktrees(root).get(branch)
-    if tree is not None:
-        if phase._ask(Path(tree), "status", "--porcelain"):
-            raise refusal
-        if phase._run(Path(tree), "merge", "--no-edit", head).returncode != 0:
-            phase._run(Path(tree), "merge", "--abort")
-            raise refusal
-        return phase._ask(root, "rev-parse", ref)
-    res = phase._run(root, "merge-tree", "--write-tree", ref, "HEAD")
-    if res.returncode != 0:
-        raise refusal
-    merged = phase._out(res).splitlines()[0]
-    new = phase._ask(root, "commit-tree", merged, "-p", tip, "-p", head, "-m",
-                     f"Merge {ledger.branch} into {branch} for attempt {unit['attempts'] + 1}")
-    phase._ask(root, "update-ref", ref, new, tip)
-    return new
-
-
-def launch(ctx, what: str, project: str | None = None, session: Path | None = None) -> int:
+def launch(ctx, what: str, project: str | None = None, session: Path | None = None,
+           here: bool = False) -> int:
     """Check every brief `what` covers (filled in, committed at HEAD), mark a unit running, and
     print each launch prompt: the role, the brief's path from the repository root, and for a role
-    that works in a worktree the commit that worktree must start from. In a workspace (`project`)
+    that works in a worktree the commit that worktree must start from: always HEAD, so a retried
+    unit starts fresh on current code; its earlier attempt's branch is only named, on an
+    `Earlier attempt:` line, and nothing is merged from it. In a workspace (`project`)
     that worktree is made here, inside the member's repository, and named on a `Worktree:` line;
     a role that writes nothing is told the member's folder. `session` is the governance root."""
     root = ctx.root
     ledger = _need(ctx, project)
+    if not (driven() or here):
+        raise BuildError(f"Builds run under the driver: start `{_driver_command(ledger)}` in the "
+                         f"background. To launch this step from this session on purpose, run "
+                         f"`{govern_build(ledger.project)} launch {what} --here`.")
     found = _covered(root, ledger, what)
     ignored = _ledger_ignored(root, ledger)
     if ignored is not None:
@@ -2583,7 +2607,8 @@ def launch(ctx, what: str, project: str | None = None, session: Path | None = No
         _default_ahead(root)
     head = phase._ask(root, "rev-parse", "HEAD")
     unit = ledger.unit(what) if what not in RESERVED else None
-    base = _retry_base(root, ledger, unit, head) if unit is not None else head
+    earlier = unit["branch"] if unit is not None and unit["branch"] and phase._yes(
+        root, "rev-parse", "--verify", "--quiet", f"refs/heads/{unit['branch']}") else ""
     prefix = phase._ask(root, "rev-parse", "--show-prefix")
     lines = []
     again = what == "fix" and all(p.name in ledger.launched for p in _fix_briefs(ledger))
@@ -2591,13 +2616,21 @@ def launch(ctx, what: str, project: str | None = None, session: Path | None = No
         lines.append(AGAIN)
     for role, brief in found:
         workspace = project and what == "close" and brief.name == "workspace-brief.md"
-        lines += [f"launch {role} with the prompt:",
-                  launch_line(str(brief) if moved or workspace else prefix + _posix(root, brief))]
+        if not workspace:
+            lines += [f"launch {role} with the prompt:",
+                      launch_line(str(brief) if moved else prefix + _posix(root, brief))]
         if workspace:
             # The writer of the workspace repository's own documents: a worktree of that
-            # repository, from its HEAD, on the branch it has checked out.
+            # repository, from its HEAD, on the branch it has checked out. Its brief is copied
+            # into that tree, beside where its report goes, so it finds it there.
             repo = where if moved else session or root
             tree = _agent_tree(repo, session or root, project, ledger.dir.name, "close-workspace")
+            rel = (Path(_close_produces(root, ledger, True)).parent / brief.name).as_posix()
+            copy = tree / rel
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(brief, copy)
+            _exclude_copy(repo, tree, rel)
+            lines += [f"launch {role} with the prompt:", launch_line(str(copy))]
             on = checked_out(repo)
             if not on:
                 short = phase._ask(repo, "rev-parse", "--short", "HEAD")
@@ -2608,11 +2641,15 @@ def launch(ctx, what: str, project: str | None = None, session: Path | None = No
         elif role in WORKTREE_ROLES:
             if (root / ".claude" / "worktrees").is_dir():
                 _no_index(root / ".claude" / "worktrees")
-            lines += [f"Base: {base}", f"Phase branch: {ledger.branch}"]
+            lines.append(f"Base: {head}")
+            if earlier:
+                lines.append(f"Earlier attempt: {earlier}")
+            lines.append(f"Phase branch: {ledger.branch}")
             if project:
                 uid = what if what not in RESERVED else brief.parent.name \
                     + ("-" + brief.stem if what == "fix" else "")
-                tree = _agent_tree(root, session or root, project, ledger.dir.name, uid)
+                tree = _agent_tree(root, session or root, project, ledger.dir.name, uid,
+                                   unit["attempts"] + 1 if unit is not None else 1)
                 lines += [f"Worktree: {tree}",
                           "launch it without isolation: the worktree is made"]
         elif project:
@@ -2620,7 +2657,7 @@ def launch(ctx, what: str, project: str | None = None, session: Path | None = No
     if unit is not None:
         unit["status"] = "running"
         unit["attempts"] += 1
-        unit["base"] = base
+        unit["base"] = head
         unit["agent"] = ""
         save(ledger)
     elif what == "fix" and not again:
@@ -2682,7 +2719,7 @@ def run(ctx, args) -> int:
             _owned(root, getattr(args, "take_over", False))
         if args.build_cmd == "start":
             return start(ctx, args.phase, args.plan, args.high_risk, args.source, args.visual,
-                         project, session, getattr(args, "take_over", False))
+                         project, session, getattr(args, "take_over", False), args.here)
         if args.build_cmd == "unit":
             if args.unit_cmd == "add":
                 return unit_add(ctx, args.id, args.title, args.role, args.red, project)
@@ -2691,7 +2728,7 @@ def run(ctx, args) -> int:
             return unit_set(ctx, args.id, args.status, args.branch, args.commit, args.note,
                             args.role, project, args.accept_red, args.agent)
         if args.build_cmd == "launch":
-            return launch(ctx, args.what, project, session)
+            return launch(ctx, args.what, project, session, args.here)
         if args.build_cmd == "collect":
             return collect(ctx, args.branch, project)
         if args.build_cmd == "verify":
@@ -2701,7 +2738,7 @@ def run(ctx, args) -> int:
         if args.build_cmd == "ruling":
             return ruling(ctx, " ".join(args.text), project)
         if args.build_cmd == "status":
-            return status(ctx, args.as_json, project, args.team)
+            return status(ctx, args.as_json, project, args.team, args.here)
         if args.build_cmd == "review":
             return review(ctx, project, args.accept_red)
         if args.build_cmd == "fix":

@@ -981,6 +981,8 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     badd = functools.partial(bsub.add_parser, parents=[bproj, btake])
     bs = badd("start", help="start a phase on the checked-out branch")
     bs.add_argument("phase", help="a slug: lower-case letters, digits and hyphens")
+    bs.add_argument("--here", action="store_true",
+                    help="run the step from this session on purpose, outside the driver")
     bs.add_argument("--plan", metavar="FILE", help="the phase's plan, from the project's root")
     bs.add_argument("--high-risk", action="store_true", dest="high_risk",
                     help="qa-engineer runs beside code-reviewer when the phase is reviewed")
@@ -1019,6 +1021,8 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
                              "`close`, mark a unit running and print the launch "
                              "prompt of each")
     bl.add_argument("what", metavar="{unit id|review|fix|close}")
+    bl.add_argument("--here", action="store_true",
+                    help="run the step from this session on purpose, outside the driver")
     bc = badd("collect", help="copy the files git ignores under this phase's folder "
                               "from the worktree that has BRANCH checked out into "
                               "this checkout, for an agent that is not a unit")
@@ -1033,6 +1037,8 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     bt = bsub.add_parser("status", parents=[bproj],
                          help="the phase, a line per unit, and the next action")
     bt.add_argument("--json", action="store_true", dest="as_json")
+    bt.add_argument("--here", action="store_true",
+                    help="run the step from this session on purpose, outside the driver")
     bt.add_argument("--team", action="store_true", dest="team",
                     help="every build in flight, here and on fetched remote branches")
     bdr = bsub.add_parser("drive", parents=[bproj],

@@ -45,7 +45,7 @@ class UnitGate(unittest.TestCase):
     def test_the_rules_hold_the_merge_gate_bullet_after_the_worktree_bullet(self):
         rules = rendered(roles.RULES, full_gate="make ci", unit_gate="scoped")
         self.assertIn(
-            "You merge unit branches into the phase branch.\n"
+            "; you merge unit branches into the phase branch.\n"
             "- After you merge a unit, `build unit set <id> done --branch <b>` accepts the "
             "unit's own gate when nothing outside the build folder and docs changed since it "
             "ran; otherwise run the local suite on the phase branch (`make ci`). A "

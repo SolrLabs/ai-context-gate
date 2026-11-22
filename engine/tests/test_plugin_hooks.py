@@ -14,6 +14,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import profile_guard  # noqa: E402,F401
+from source_version import SOURCE_VERSION  # noqa: E402
 
 from plugin_support import *  # noqa: E402,F401,F403
 from build_support import Build, GATES  # noqa: E402
@@ -25,6 +26,7 @@ class Plugin(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
+        self.enterContext(mock.patch.dict(os.environ, {"GOVERN_DRIVE": "1"}))  # a driver session
         self.home = self.tmp / "home"
         self.project = self.tmp / "project"
         self.home.mkdir()
@@ -90,8 +92,8 @@ class Plugin(unittest.TestCase):
         text = " ".join((PLUGIN / "skills/plan/SKILL.md").read_text(encoding="utf-8").split())
         self.assertIn("search what exists", text)
 
-    def test_build_skill_carries_a_first_attempt_by_its_own_branch(self):
-        self.assertIn("by its own branch", self.build_text())
+    def test_build_skill_starts_a_fresh_agent_on_the_current_base(self):
+        self.assertIn("A fresh agent starts on the current Base.", self.build_text())
 
     def test_build_skill_deletes_the_plan_file_after_the_last_checkpoint(self):
         self.assertIn("delete the plan file", self.build_text())
@@ -127,8 +129,8 @@ class Plugin(unittest.TestCase):
         self.assertIn("The gate is red after its merge, or the diff is not what the brief asked:",
                       text)
         self.assertNotIn("The gate is red on its branch", text)
-        self.assertIn("The fresh agent's brief says which tests fail and that the first attempt "
-                      "is already in its base.", text)
+        self.assertIn("The fresh agent's brief says which tests fail and names the earlier "
+                      "attempt's branch, read only for what it needs.", text)
 
     def test_plan_skill_marks_owner_checkpoints(self):
         text = " ".join((PLUGIN / "skills/plan/SKILL.md").read_text(encoding="utf-8").split())
@@ -362,7 +364,7 @@ class Plugin(unittest.TestCase):
         """The built plugin as a beta's: its bundled engine says it is that beta."""
         (self.built / "govern" / "__init__.py").write_text(
             (ENGINE / "govern" / "__init__.py").read_text(encoding="utf-8").replace(
-                f'__version__ = "{__version__}"', f'__version__ = "{version}"'), encoding="utf-8")
+                f'__version__ = "{SOURCE_VERSION}"', f'__version__ = "{version}"'), encoding="utf-8")
 
     def local(self, text: str) -> None:
         (self.project / layout.LOCAL).write_text(text, encoding="utf-8")
@@ -992,7 +994,7 @@ class BuildInFlight(Plugin):
         made = self.ledger("done", "pending", "pending")
         out = json.loads(self.start())
         line = ("A build is in flight: p1, 1 of 3 units done. Next: "
-                + build.next_action(made))
+                + build.next_action(made, driven=True))
         self.assertEqual(out["systemMessage"], line)
         self.assertEqual(out["hookSpecificOutput"],
                          {"hookEventName": "SessionStart", "additionalContext": line})

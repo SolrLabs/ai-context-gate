@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import profile_guard  # noqa: E402,F401
 
 from regressions_support import *  # noqa: E402,F401,F403
+from source_version import SOURCE_VERSION  # noqa: E402
 
 TIER = "e2e"
 
@@ -413,6 +414,9 @@ class EnginePin(Base):
         src = self.tmp / "source"
         shutil.copytree(ENGINE / "govern", src / "engine" / "govern",
                         ignore=shutil.ignore_patterns("__pycache__"))
+        init = src / "engine" / "govern" / "__init__.py"   # the tag carries the version it names
+        wtext(init, init.read_text(encoding="utf-8").replace(
+            f'__version__ = "{SOURCE_VERSION}"', f'__version__ = "{__version__}"'))
         git = lambda *a: subprocess.run(
             ["git", "-C", str(src), "-c", "user.email=t@t", "-c", "user.name=t",
              "-c", "tag.gpgSign=false", "-c", "commit.gpgSign=false", *a],

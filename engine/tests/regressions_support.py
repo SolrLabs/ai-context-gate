@@ -30,6 +30,7 @@ sys.path.insert(0, str(ENGINE))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import profile_guard  # noqa: E402,F401
+from source_version import SOURCE_VERSION  # noqa: E402
 
 from govern import __version__, cli, config, installer, layout, manifest, notice  # noqa: E402
 from govern import ratchet, registry, text  # noqa: E402
@@ -257,7 +258,7 @@ def make_source(where: Path, tags: tuple) -> Path:
     init = src / "engine" / "govern" / "__init__.py"
     original = init.read_text(encoding="utf-8")
     for version in tags:
-        wtext(init, original.replace(f'__version__ = "{__version__}"', f'__version__ = "{version}"'))
+        wtext(init, original.replace(f'__version__ = "{SOURCE_VERSION}"', f'__version__ = "{version}"'))
         git("add", "-A")
         git("commit", "-qm", version, "--allow-empty")
         git("tag", f"v{version}")

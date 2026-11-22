@@ -782,13 +782,13 @@ The engine's agent roles and the coordinator's build rules are rendered into the
 | Ratchet | No |
 | Since | 0.7.0 |
 
-**Question:** Should the engine render its standard agent roles (developer, senior developer, code reviewer, QA engineer, technical writer) and the coordinator's build rules into this project, with your models, commands and rules filled in?
+**Question:** Should the engine render its standard agent roles (developer, senior developer, code reviewer, QA engineer, technical writer, architect) and the coordinator's build rules into this project, with your models, commands and rules filled in?
 
 **Why:** A role copied by hand drifts from the standard the day after it is copied; one rendered from the engine changes with it, and a hand edit is caught.
 
 | Parameter | Type | Default | Looser when | Meaning |
 |---|---|---|---|---|
-| `extra_roles` | list | `[]` | — | Roles rendered beyond the five every project gets: ux-reviewer, architect |
+| `extra_roles` | list | `[]` | — | Roles rendered beyond the six every project gets: ux-reviewer |
 | `models` | table | `{}` | — | A role's model, over the engine's choice for it |
 | `efforts` | table | `{}` | — | A role's effort, over the engine's choice for it |
 | `max_turns` | table | `{}` | — | A role's turn cap; a role without one renders `maxTurns: false` |

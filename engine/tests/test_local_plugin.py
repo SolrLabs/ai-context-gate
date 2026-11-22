@@ -24,6 +24,7 @@ sys.path.insert(0, str(ENGINE))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import profile_guard  # noqa: E402,F401
+from source_version import SOURCE_VERSION  # noqa: E402
 
 from govern import __version__, layout, local_plugin, profile  # noqa: E402
 
@@ -56,7 +57,7 @@ def release_tree(where: Path, version: str = VERSION, plugin_version: str | None
     shutil.copytree(ENGINE / "govern", where / "engine" / "govern", ignore=ignore)
     init = where / "engine" / "govern" / "__init__.py"
     wtext(init, init.read_text(encoding="utf-8").replace(
-        f'__version__ = "{__version__}"', f'__version__ = "{version}"'))
+        f'__version__ = "{SOURCE_VERSION}"', f'__version__ = "{version}"'))
     manifest = where / "plugin" / ".claude-plugin" / "plugin.json"
     data = json.loads(manifest.read_text(encoding="utf-8"))
     data["version"] = plugin_version or version

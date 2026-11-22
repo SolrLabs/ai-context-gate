@@ -13,6 +13,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import profile_guard  # noqa: E402,F401
+from source_version import SOURCE_VERSION  # noqa: E402
 
 from regressions_support import *  # noqa: E402,F401,F403
 from fixture_cache import copy_of  # noqa: E402
@@ -80,7 +81,7 @@ class BetaFetch(Base):
             data = json.loads(manifest.read_text(encoding="utf-8"))
             data["name"] = plugin_name or data["name"]
             for version in tags:
-                wtext(init, engine.replace(f'__version__ = "{__version__}"',
+                wtext(init, engine.replace(f'__version__ = "{SOURCE_VERSION}"',
                                            f'__version__ = "{version}"'))
                 data["version"] = "0.0.1" if version in mismatched else version
                 wtext(manifest, json.dumps(data, indent=2) + "\n")

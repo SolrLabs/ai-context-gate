@@ -13,6 +13,7 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -37,6 +38,9 @@ def set_build_root(space: Space, value: str) -> None:
 class Base(Case):
     def setUp(self) -> None:
         super().setUp()
+        env = mock.patch.dict(os.environ, {"GOVERN_DRIVE": "1"})    # a driver session
+        env.start()
+        self.addCleanup(env.stop)
         build.state_root.cache_clear()
         self.addCleanup(build.state_root.cache_clear)
 
@@ -437,8 +441,9 @@ class Cycle(Started):
         self.assertEqual(lines.count("launch technical-writer with the prompt:"), 2)
         second = lines[lines.index("launch technical-writer with the prompt:",
                                    lines.index("launch technical-writer with the prompt:") + 1):]
-        brief = (folder / "workspace-brief.md").resolve()
         tree = self.w.root / ".claude" / "worktrees" / "alpha-p1-close-workspace"
+        # The writer reads the copy of the brief in its own worktree.
+        brief = tree / folder.resolve().relative_to(self.w.root.resolve()) / "workspace-brief.md"
         self.assertEqual(second[1:], [
             build.launch_line(brief),
             f"Base: {self.w.git('rev-parse', 'HEAD').strip()}",

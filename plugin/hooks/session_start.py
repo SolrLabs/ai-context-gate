@@ -58,7 +58,8 @@ def main() -> None:
                                                      "additionalContext": left}}))
         return
     msgs = [notice.for_project(root, home), notice.both_plugins_warning(root, home),
-            notice.plugin_behind(root, home), left, differs]
+            notice.plugin_behind(root, home), notice.channel_plugin(root, home),
+            _stable_on_beta(root), left, differs]
     msgs.extend(_usage(root, home))
     msgs.append(_driver_missing(root))
     if _source() == "compact":
@@ -73,6 +74,37 @@ def main() -> None:
         print(json.dumps({"systemMessage": msg,
                           "hookSpecificOutput": {"hookEventName": "SessionStart",
                                                  "additionalContext": msg}}))
+
+
+def _own_plugin_id() -> str | None:
+    """`<plugin>@<marketplace>` of this hook's install, read from its path: Claude Code installs
+    a marketplace plugin at `<profile>/plugins/cache/<marketplace>/<plugin>/<version>/`, and
+    both marketplaces' plugins are named `context-gate`. None for any other location, and on
+    any failure."""
+    try:
+        version_dir = PLUGIN_ROOT
+        if version_dir.parent.parent.parent.name != "cache":
+            return None
+        return f"{version_dir.parent.name}@{version_dir.parent.parent.name}"
+    except Exception:
+        return None
+
+
+def _stable_on_beta(root: Path) -> str | None:
+    """The line saying this session loaded the stable plugin, when the project is on the beta
+    channel. None in any other state; never raises."""
+    try:
+        import tomllib
+        from govern import layout
+        if _own_plugin_id() != layout.PLUGIN_ID:
+            return None
+        with (root / layout.CONFIG).open("rb") as fh:
+            if (tomllib.load(fh).get("governance") or {}).get("channel") != "beta":
+                return None
+        return (f"{layout.DISPLAY_NAME}: this session loaded the stable plugin ({layout.PLUGIN_ID}) "
+                f"on a beta-channel project, so its skills are not the beta's.")
+    except Exception:
+        return None
 
 
 def _driver_missing(root: Path) -> str | None:

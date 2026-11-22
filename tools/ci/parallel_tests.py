@@ -23,6 +23,14 @@ import time
 import unittest
 from pathlib import Path
 
+# The runner imports tests as top-level modules, so engine/tests/__init__.py never runs here: set the
+# switch for the class subprocesses (govern._as_release) before they start, to the source version
+# read from the file text (never by importing govern).
+os.environ.setdefault("GOVERN_TEST_AS_RELEASE", re.search(
+    r'^__version__ = "([^"]+)"$',
+    (Path(__file__).resolve().parents[2] / "engine" / "govern" / "__init__.py").read_text(encoding="utf-8"),
+    re.MULTILINE).group(1))
+
 FAILED_LOAD = "unittest.loader._FailedTest."
 RAN = re.compile(r"^Ran (\d+) tests? in ", re.MULTILINE)
 OUTCOME = re.compile(r"^(OK|FAILED)(?: \((.*)\))?\s*$", re.MULTILINE)

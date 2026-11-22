@@ -198,7 +198,8 @@ def _status(ctx, project: str | None) -> tuple[str, dict] | None:
         argv += ["--project", project]
     try:
         res = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                             encoding="utf-8", errors="replace", cwd=str(ctx.root))
+                             encoding="utf-8", errors="replace", cwd=str(ctx.root),
+                             env={**os.environ, "GOVERN_DRIVE": "1"})
         data = json.loads(res.stdout)
     except (OSError, ValueError):
         return None
@@ -503,6 +504,10 @@ def _run(ctx, plan, cap, hours, max_sessions, compact_pct, permission_mode, clau
     stale = _roles_stale(ctx)
     if stale is not None:
         changes = [int(m.group(1)) for m in re.finditer(r"(\d+) file\(s\) would change", stale)]
+        channel = [ln.strip() for ln in stale.splitlines() if ln.strip().startswith("channel")]
+        if channel:
+            print(channel[0], file=sys.stderr)
+            return 1
         if any(changes):
             print("error: agent roles are stale: run python3 .context-gate/bin/govern agents "
                   "render, commit, and start the driver again", file=sys.stderr)
@@ -515,7 +520,7 @@ def _run(ctx, plan, cap, hours, max_sessions, compact_pct, permission_mode, clau
         return 1
     prompt = PROMPT.read_text(encoding="utf-8")
     env = {**os.environ, "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": str(pct),
-           "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "0"}
+           "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "0", "GOVERN_DRIVE": "1"}
     deadline = None if hours is None else time.time() + float(hours) * 3600
     readings: list[float] = []
     reset: list[float | None] = [None]

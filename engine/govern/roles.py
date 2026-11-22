@@ -35,9 +35,12 @@ EXCLUDE_START = "# context-gate: rendered on this machine"
 EXCLUDE_END = "# context-gate: end"
 TEMPLATES = Path(__file__).resolve().parent / "templates"
 
-# The five roles every project with the option on gets, and the two `extra_roles` can add.
-CORE = ("developer", "senior-developer", "code-reviewer", "qa-engineer", "technical-writer")
-EXTRA = ("ux-reviewer", "architect")
+# The six roles every project with the option on gets, and the one `extra_roles` can add.
+CORE = ("developer", "senior-developer", "code-reviewer", "qa-engineer", "technical-writer",
+        "architect")
+EXTRA = ("ux-reviewer",)
+# Projects that named it in `extra_roles` before 0.9.5-beta.8 still may.
+FORMERLY_EXTRA = ("architect",)
 ROLES = CORE + EXTRA
 # The name the coordinator's rules file goes by in its note.
 RULES = "build-rules"
@@ -127,6 +130,9 @@ HOUSEKEEPING = (
     "remote holds it, and only then removes branches and worktrees already merged into it. It "
     "opens no pull request and merges nothing upward. Run it only when no agent is still "
     "working.\n")
+
+MEASURE = (f"- Before you close a phase with `phase close`, run `{GOVERN} runs report` and give "
+           "the owner its suggestions; apply none yourself.\n")
 
 ESCAPED_PIPE = "\\|"       # a `|` inside a table cell
 SLOT_RE = re.compile(r"\{\{(.*?)\}\}")
@@ -320,6 +326,7 @@ def slots(role: str, params: dict, inserts: str = "") -> dict[str, str]:
         out["visual_paths"] = (VISUAL + "\n" + _bullets(params["visual_paths"], "")
                                if params["visual_paths"] else NO_VISUAL)
         out["housekeeping_rule"] = HOUSEKEEPING if params["housekeeping"] else ""
+        out["measure_rule"] = MEASURE if params.get("measure") else ""
         return out
     setup = params.get("worktree_setup", "")
     # A whole line and its break, or nothing: the slot starts a line (a bullet in the code roles).
@@ -401,7 +408,7 @@ def problems(params: dict) -> list[str]:
     no declared set of names for the loader to hold it to."""
     where = f"[checks.{CHECK}]"
     out = [f"{where} extra_roles names '{name}': the roles it can add are {', '.join(EXTRA)}"
-           for name in params["extra_roles"] if name not in EXTRA]
+           for name in params["extra_roles"] if name not in EXTRA + FORMERLY_EXTRA]
     live = rendered(params)
     for key in ("models", "efforts", "max_turns"):
         for role, value in params[key].items():
@@ -463,6 +470,8 @@ class Plan:
     targets: list[Target] = field(default_factory=list)
     # A file that carries the note for a role no longer rendered: (path, the role it names).
     orphans: list[tuple[Path, str]] = field(default_factory=list)
+    # Lines to print: a role not rendered because the file is the project's own.
+    notes: list[str] = field(default_factory=list)
 
     @property
     def writes(self) -> list[Target]:
@@ -565,6 +574,12 @@ def _target(path: Path, role: str, text: str) -> Target:
     return Target(path, role, text, CURRENT if lf(got.text) == text else STALE)
 
 
+def _measure_on(ctx) -> bool:
+    """Whether the project has the `agent-measure` option on, as `build start` tests it."""
+    check = ctx.cfg.checks.get("agent-measure")
+    return check is not None and check.level != "off"
+
+
 def plan(ctx, params: dict | None = None) -> Plan:
     """What `render` would do, built in memory and writing nothing. With a problem in the
     params it plans nothing at all. Raises `Unreadable` for an insert that cannot be read, and
@@ -581,11 +596,18 @@ def plan(ctx, params: dict | None = None) -> Plan:
         return Plan(problems=found)
     out = Plan()
     for role in rendered(params):
-        out.targets.append(_target(adir / f"{role}.md", role,
-                                   render(shipped(role), role, params,
-                                          project_rules(ctx.root, role))))
+        target = _target(adir / f"{role}.md", role,
+                         render(shipped(role), role, params, project_rules(ctx.root, role)))
+        if (target.state == CONFLICT and role in FORMERLY_EXTRA
+                and role not in params["extra_roles"]
+                and target.why == f"was not rendered by {layout.TOOL}"):
+            out.notes.append(f"the `{role}` role is not rendered: {ctx.rel(target.path)} is the "
+                             f"project's own (move it or rename it to get the rendered role)")
+            continue
+        out.targets.append(target)
     out.targets.append(_target(ctx.root / params["rules_file"], RULES,
-                               render(shipped(RULES), RULES, params)))
+                               render(shipped(RULES), RULES,
+                                      {**params, "measure": _measure_on(ctx)})))
     wanted = {t.path for t in out.targets}
     # Rendered earlier and no longer wanted: in the agents directory, or wherever a record says
     # one was written (a rules file whose `rules_file` has since moved).
@@ -991,6 +1013,8 @@ def run(ctx, check_only: bool = False, untrack: bool = False) -> int:
         return 1
     for t in todo.conflicts:
         print(f"  conflict    {conflict(ctx, t)}")
+    for line in todo.notes:
+        print(f"  note        {line}")
     changes = len(todo.writes) + len(todo.orphans)
     root = ctx.root
     mine = [r["path"] for r in records(root, todo)]
@@ -1019,7 +1043,11 @@ def run(ctx, check_only: bool = False, untrack: bool = False) -> int:
             print(f"  exclude     {_rel(root, where)}")
         if held:
             print(_tracked_line(held))
-        failed = bool(changes or todo.conflicts)
+        from govern import notice
+        wrong = notice.channel_plugin(ctx.root, layout.home())
+        if wrong:
+            print(f"  channel     {wrong}")
+        failed = bool(changes or todo.conflicts or wrong)
         if failed:
             if solo and any(t.state == MISSING for t in todo.writes):
                 print(f"  note        {LOST_NOTE}")
@@ -1028,7 +1056,8 @@ def run(ctx, check_only: bool = False, untrack: bool = False) -> int:
             if changes:      # a conflict is left alone by the render
                 print(f"  note        run {RENDER}")
         print(f"[{'FAIL' if failed else 'OK'}] {label}  ({changes} file(s) would change"
-              + (f", {len(todo.conflicts)} conflict(s)" if todo.conflicts else "") + ")")
+              + (f", {len(todo.conflicts)} conflict(s)" if todo.conflicts else "")
+              + (", plugin on the wrong channel" if wrong else "") + ")")
         return 1 if failed else 0
     switching = not solo and (root / LOCAL_RECORD).is_file()
     try:
