@@ -295,6 +295,11 @@ class Render(unittest.TestCase):
         self.assertIn("Before you close a phase with `phase close`, run", rules)
         self.assertNotIn("After closing it, run", rules)
 
+    def test_rules_say_when_the_skill_passes_here(self):
+        rules = rendered(roles.RULES)
+        self.assertIn("which the build skill passes in a session the driver started, or when the owner typed `--here`, a phase or `--one`.", rules)
+        self.assertNotIn("which only the owner asks for", rules)
+
     def test_rules_order_how_work_is_built(self):
         rules = rendered(roles.RULES)
         at = [rules.index(s) for s in ("You build nothing in your own context.",

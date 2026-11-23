@@ -30,7 +30,7 @@ Each check has a level: `off`, `warn` or `error`. At `error`, a check reports wh
 | [`doc-links`](#doc-links) | `error` | Every relative link in a governed doc points at a file that exists. |
 | [`doc-reachability`](#doc-reachability) | `error` | Every governed doc is listed in the project's generated doc registry. |
 | [`working-file-count`](#working-file-count) | `warn` | Bounds how many files sit directly in a project's working-files directory. |
-| [`finished-files`](#finished-files) | `warn` | A working file whose status says it is finished should be deleted once it has sat untouched for a few days. A finished file that was never committed is flagged at once instead, so it is committed before it is deleted. |
+| [`finished-files`](#finished-files) | `warn` | A working file whose status says it is finished should be deleted once it has sat untouched for a few days. A finished file that was never committed is flagged at once instead, so it is committed before it is deleted. A plan whose every phase is closed is flagged too. |
 | [`handoff-words`](#handoff-words) | `error` | Bounds a project's HANDOFF: a snapshot of where things stand, not a log. |
 | [`agents`](#agents) | `error` | Every agent definition pins its name, model, effort and whether it may read CLAUDE.md, an optional turn cap stays under the ceiling, and prose never contradicts the cap. |
 | [`skills`](#skills) | `error` | Every skill definition has frontmatter with a description. |
@@ -492,7 +492,7 @@ Bounds how many files sit directly in a project's working-files directory.
 
 ### `finished-files`
 
-A working file whose status says it is finished should be deleted once it has sat untouched for a few days. A finished file that was never committed is flagged at once instead, so it is committed before it is deleted.
+A working file whose status says it is finished should be deleted once it has sat untouched for a few days. A finished file that was never committed is flagged at once instead, so it is committed before it is deleted. A plan whose every phase is closed is flagged too.
 
 | | |
 |---|---|

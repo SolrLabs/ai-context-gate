@@ -3,7 +3,7 @@
 Policy lives in each project's `.context-gate/config.toml`; this package is the logic. See
 docs/how-it-works.md in this repository.
 """
-__version__ = "0.9.5-beta.8"
+__version__ = "0.10.0"
 
 import os as _os
 

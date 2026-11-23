@@ -96,6 +96,16 @@ class FinishedDocs(unittest.TestCase):
         self.assertEqual(self.names(self.FILES), ["alpha/a.md", "alpha/b.md"])
         self.assertEqual(self.names(self.FILES, statuses=["superseded"]), ["alpha/a.md"])
 
+    def test_a_built_plan_is_named_and_an_exempt_or_uncommitted_one_is_not(self):
+        from unittest import mock
+        files = [("plan.md", working("planned")), ("c.md", working("active")),
+                 ("HANDOFF.md", working("planned"))]
+        with mock.patch("govern.build.built_plan", lambda path: path.name != "c.md"):
+            self.assertEqual(self.names(files), ["alpha/plan.md"])
+            self.assertEqual(self.names(files, committed=lambda path: False), [])
+        with mock.patch("govern.build.built_plan", lambda path: False):
+            self.assertEqual(self.names(files), [])
+
     def test_finished_files_off_gives_no_names(self):
         self.assertEqual(self.names(self.FILES, level="off"), [])
 
@@ -152,6 +162,65 @@ class TickedFinishedDocs(unittest.TestCase):
 
     def test_not_when_uncommitted(self):
         self.assertEqual(self.names(self.FILES, committed=lambda path: False), [])
+
+
+class BuiltPlans(unittest.TestCase):
+    """A plan whose every phase has a `Close phase <slug>:` commit is finished."""
+
+    PLAN = "# Plan\n\n## One (slug: a; owner: x)\n\n## Two (slug: b)\n"
+
+    def run_check(self, text, closed, age_days=30, max_days=7):
+        import os
+        import subprocess
+        from datetime import datetime, timedelta
+        from govern.checks import working as working_checks
+        with tempfile.TemporaryDirectory() as tmp:
+            top = Path(tmp)
+            env = {**os.environ, "HOME": tmp, "GIT_CONFIG_NOSYSTEM": "1",
+                   "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                   "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+
+            def git(*args):
+                subprocess.run(["git", *args], cwd=top, env=env, check=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            git("init", "-q")
+            wf = top / "working"
+            wf.mkdir()
+            (wf / "plan.md").write_text(working("planned").replace("Body.\n", text),
+                                        encoding="utf-8")
+            git("add", "-A")
+            git("commit", "-qm", "plan")
+            for slug in closed:
+                git("commit", "--allow-empty", "-qm", f"Close phase {slug}: done")
+            touched = datetime.now() - timedelta(days=age_days)
+            ctx = SimpleNamespace(
+                cfg=SimpleNamespace(dialect={"finished_age": "gt"}), markers=Markers("t"),
+                working_dir=lambda scope: wf, last_touched=lambda path: touched,
+                committed=lambda path: True, rel=lambda path: path.name)
+            params = {"max_days": max_days, "finished_statuses": ["complete"],
+                      "exempt": [], "ticked": True}
+            scope = SimpleNamespace(name="alpha")
+            f = working_checks.finished_files(ctx, params, scope)
+            return f, working_checks.finished_candidates(ctx, params, scope)
+
+    def test_a_plan_with_every_phase_closed_is_warned_and_listed(self):
+        f, listed = self.run_check(self.PLAN, ("a", "b"))
+        self.assertEqual(f.warnings, ["alpha/plan.md: every phase of this plan is closed: "
+                                      "delete it, or set a finished status"])
+        self.assertEqual([(p.name, s) for p, s, _ in listed], [("plan.md", "planned")])
+
+    def test_a_plan_with_a_phase_unclosed_is_neither(self):
+        f, listed = self.run_check(self.PLAN, ("a",))
+        self.assertEqual((f.warnings, listed), ([], []))
+
+    def test_a_working_file_with_no_slug_heading_is_unaffected(self):
+        f, listed = self.run_check("## One\n\nText.\n", ("a", "b"))
+        self.assertEqual((f.warnings, listed), ([], []))
+
+    def test_a_built_plan_touched_inside_max_days_is_warned_not_listed(self):
+        f, listed = self.run_check(self.PLAN, ("a", "b"), age_days=1)
+        self.assertEqual(len(f.warnings), 1)
+        self.assertEqual(listed, [])
 
 
 class CouldGo(unittest.TestCase):

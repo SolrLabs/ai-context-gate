@@ -1108,9 +1108,10 @@ A clone in a git-ignored folder inside a governed folder is not governed.
 ## Agent roles
 
 With `agent-roles` on, the engine writes the project's agent definitions and the coordinator's
-build rules, so they are never copied by hand. Five roles are always rendered: `developer`,
-`senior-developer`, `code-reviewer`, `qa-engineer` and `technical-writer`. `extra_roles` adds
-`ux-reviewer` and `architect`. Each definition comes from an engine template, the check's params
+build rules, so they are never copied by hand. Six roles are always rendered: `developer`,
+`senior-developer`, `code-reviewer`, `qa-engineer`, `technical-writer` and `architect`. The plan
+skill runs `architect` only when it can turn a `senior-developer` unit into `developer` work.
+`extra_roles` adds `ux-reviewer`, which `visual_paths` also renders. Each definition comes from an engine template, the check's params
 and the project's own text. The rules go to `.claude/rules/context-gate-build.md`.
 
 ```toml
@@ -1119,7 +1120,7 @@ engine = "0.4.0"
 
 [checks.agent-roles]
 level = "error"
-extra_roles = ["architect"]
+extra_roles = ["ux-reviewer"]
 scoped_test = "python3 -m unittest -k"
 full_gate = "python3 -m unittest discover"
 high_risk_paths = ["engine/govern/installer.py"]
@@ -1313,12 +1314,13 @@ attempts = 0
 
 | Command | Does |
 |---|---|
+| `build drive <plan>` | Runs a plan unattended, one fresh headless session per build step; see Overnight driver below |
 | `build start <phase> [--plan FILE] [--from BRANCH] [--high-risk] [--visual]` | Writes the ledger; `--visual` marks the phase visual, so `build review` writes a third brief for `ux-reviewer`, and is refused unless `visual_paths` renders that role. Refuses on the default branch, a dirty tree, an existing ledger, or when git ignores the ledger (it prints the line to add to `.gitignore`) |
 | `build unit add <id> --title T [--role R] [--red]` | Adds a unit and writes its `brief.md` |
 | `build unit set <id> <status> [--role R] [--branch B] [--commit C] [--note N] [--agent ID] [--accept-red REASON]` | Updates a unit. `done` with `--branch` runs `build verify`; `--agent` stores the agent that built it (cleared on `failed`, `blocked` and relaunch). With `full_gate` set and `unit_gate = "scoped"` (not the default `"phase"`), `done` is refused on a red, missing or stale gate record; `--accept-red` lets it through and records a ruling. Under `scoped`, `done --branch` also copies the worktree's gate record to `gate/<id>.json` |
 | `build gate [--cmd CMD]` | Runs `full_gate` and records `<phase folder>/gate/last.json` (`status`, `rc`, `head`, `dirty`, `seconds`, `at`, `cmd`) and `gate/last.log`. A HEAD that moves during the run leaves the record stale. When the only changes since a green run are `docs_paths`, it runs only `govern check` (and the project's `docs_gate` command, if set) and records `scope: "docs"`. It also runs in a linked worktree on a branch no ledger names, using the one ledger there. `--cmd` runs another command and records nothing |
 | `build verify <id> --branch B` | Read-only hand-back check. Refuses: no commit past the unit's base, an empty diff, uncommitted files in the branch's worktree, a git-ignored ledger, a commit line matching `forbidden_trailers`. Warns: a report `Scope:` path the diff does not touch; ignored files in a folder the diff touches |
-| `build launch <unit, review, fix or close>` | Refuses an unfilled or uncommitted brief; prints the launch prompt |
+| `build launch <unit, review, fix or close> [--here]` | Refuses an unfilled or uncommitted brief, and refuses outside a driver session (`GOVERN_DRIVE=1`, which `build drive` sets) unless given `--here`; prints the launch prompt |
 | `build collect <branch>` | Copies what the agent on that branch produced (reports, failing output) from its worktree into this checkout's build folder |
 | `build ruling <text>` | Records a decision made without the owner: what, why, cost if wrong |
 | `build status [--json]` | The phase, a line per unit, and what is next |

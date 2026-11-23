@@ -580,8 +580,8 @@ for the states and the command.
 ### Agents
 
 Three options carry the agent loop. `agent-roles` renders the engine's role definitions
-(`developer`, `senior-developer`, `code-reviewer`, `qa-engineer`, `technical-writer`, and
-optionally `ux-reviewer` and `architect`) into the project's agents folder, and the coordinator's
+(`developer`, `senior-developer`, `code-reviewer`, `qa-engineer`, `technical-writer`,
+`architect`, and optionally `ux-reviewer`) into the project's agents folder, and the coordinator's
 build rules into `.claude/rules/context-gate-build.md`, from templates, check params and the
 project's own text in `.context-gate/agents/`. A rendered file starts with a note saying so.
 Upgrade re-renders them, uninstall removes them, and a file the engine did not render is never

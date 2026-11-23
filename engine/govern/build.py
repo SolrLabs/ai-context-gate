@@ -819,10 +819,33 @@ def _close_produces(root: Path, ledger: Ledger, workspace: bool) -> str:
     return report.relative_to(repo).as_posix()
 
 
+def _finishes_plan(root: Path, ledger: Ledger) -> bool:
+    """True when every phase of the ledger's plan other than its own is already closed, so
+    closing this one finishes the plan."""
+    if not ledger.plan:
+        return False
+    try:
+        text = (state_root(root) / ledger.plan).read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        return False
+    slugs = _plan_slugs(text)
+    if ledger.phase not in slugs:
+        return False
+    others = [slug for slug in slugs if slug != ledger.phase]
+    if not others:
+        return True
+    top = gitq.toplevel((state_root(root) / ledger.plan).parent)
+    if top is None or top.returncode != 0:
+        return False
+    closed = _closed_slugs(Path(phase._out(top)))
+    return closed is not None and all(slug in closed for slug in others)
+
+
 def close_brief(root: Path, ledger: Ledger, workspace: bool = False) -> str:
     """The technical writer's close brief: the member's own documents, or with `workspace` the
     workspace repository's (its handoff, decision log and roadmap), in a worktree of that
     repository."""
+    finishes = _finishes_plan(root, ledger)
     landed = "".join(
         f"- Unit {u['id']}, {u['title']}"
         + (f" (commit {u['commit']})" if u["commit"] else "")
@@ -844,6 +867,9 @@ def close_brief(root: Path, ledger: Ledger, workspace: bool = False) -> str:
                if workspace else "")
             + ("## What landed\n\n" + landed + "\n" if landed else "")
             + (RULINGS_HEADING + "\n\n" + rulings + "\n" if rulings else "")
+            + (f"This close finishes the plan: every other phase of it is already closed. "
+               f"Delete the plan file `{ledger.plan}` and fix every link to it.\n\n"
+               if finishes else "")
             + _sections((CLOSE_SECTION,))
             + f"{scratch_note(ledger, 'close')}\n\n{AS_BUILT_NOTE}\n\n{REPORT_NOTE}\n"
             + (PATHS_NOTE_WORKSPACE_REPO.format(project=ledger.project) if workspace
@@ -872,6 +898,47 @@ def phase_close(project: str | None, folder: str) -> str:
 
 PHASE_HEADING = re.compile(r"^##\s.*?\(.*?\bslug:\s*(?P<slug>[^\s;)]+)\s*[;)]")
 UNIT_HEADING = re.compile(r"^### ([A-Za-z0-9_-]+):\s")
+
+
+def _plan_slugs(text: str) -> list[str]:
+    """The phase slugs a plan's `## ` headings name, in plan order (fences and comments skipped)."""
+    lines = text.splitlines()
+    live = mask_lines(lines, Markers("\x00"))
+    return [m["slug"] for line, is_live in zip(lines, live)
+            if is_live and line.startswith("## ") and (m := PHASE_HEADING.match(line))]
+
+
+def _closed_slugs(repo: Path) -> set[str] | None:
+    """The slugs of every `Close phase <slug>:` commit subject in the repository's history,
+    read once per repository per command (`gitq.scope`); None when git cannot say."""
+    key = gitq._key(repo, "log", "--format=%s", "closed-phases")
+    if gitq._depth and key in gitq._cache:
+        return gitq._cache[key]  # type: ignore[return-value]
+    res = phase._git(repo, "log", "--format=%s")
+    if res is None or res.returncode != 0:
+        return None
+    found = {m[1] for line in phase._out(res).splitlines()
+             if (m := re.match(r"Close phase (\S+?):", line))}
+    if gitq._depth:
+        gitq._cache[key] = found
+    return found
+
+
+def built_plan(path: Path) -> bool:
+    """True when the plan names at least one phase by `slug:` and the git history of its
+    repository holds a `Close phase <slug>:` commit for every one. False for a plan with no
+    slug, a file outside a git repository, or a git call that fails."""
+    try:
+        slugs = _plan_slugs(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not slugs:
+        return False
+    top = gitq.toplevel(path.parent)
+    if top is None or top.returncode != 0:
+        return False
+    closed = _closed_slugs(Path(phase._out(top)))
+    return closed is not None and all(slug in closed for slug in slugs)
 
 
 def planned_units(root: Path, ledger: Ledger) -> list[str] | None:

@@ -173,9 +173,10 @@ def all_ticked(text, markers) -> bool:
 
 def finished_docs(ctx, scope) -> list[str]:
     """The labels of the scope's working files whose status says they are finished, or (with
-    `ticked` on) whose every checkbox is ticked, sorted. The statuses, the exempt names and
-    `ticked` are `finished-files`' own; empty when that check is off. An unreadable file is
+    `ticked` on) whose every checkbox is ticked, or a plan whose every phase is closed, sorted.
+    The statuses, the exempt names and `ticked` are `finished-files`' own; empty when that check is off. An unreadable file is
     skipped (the doc check reports it)."""
+    from govern import build
     cfg = ctx.cfg.checks["finished-files"]
     finished = cfg.params["finished_statuses"]
     ticked = cfg.params["ticked"]
@@ -194,7 +195,8 @@ def finished_docs(ctx, scope) -> list[str]:
         if fm.get("doc_type") != "working":
             continue
         if (status_keyword(fm.get("status", "")) in finished
-                or (ticked and all_ticked(body, ctx.markers))):
+                or (ticked and all_ticked(body, ctx.markers))
+                or build.built_plan(path)):
             names.append(doc_label(ctx, scope, rel, path))
     return sorted(names)
 

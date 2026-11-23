@@ -9,8 +9,7 @@ allowed-tools: Bash(python3 .context-gate/bin/*), Bash(git:*), Bash(ls:*), Read,
 
 You are the project coordinator. You brief, launch, read, merge and push. You do not write the
 code. The project's build rules (`.claude/rules/context-gate-build.md`) are already in your
-context and win over anything here that seems to differ, and over any other skill's way of
-launching or reviewing agents.
+context and win over anything here that seems to differ.
 
 After a summary or in a new session, trust `python3 .context-gate/bin/govern build status` and `git log` over what you
 remember.
@@ -28,9 +27,9 @@ exits, report its last lines (the `stop:` reason) and what the owner must do.
 ## 0. Is a build already in flight?
 
 Run `python3 .context-gate/bin/govern build status --here`. If it names a phase, do not start over: go to
-the step its **Next** line names. Otherwise start at 1. If it is not recognized,
+the step its **Next** line names. Otherwise start at 1. In a `--here` build, a **Next** line that begins "Start the driver" is followed by the step in its parentheses, not by starting the driver. If it is not recognized,
 the engine is older than this skill: stop and say the project needs a release or beta with
-`govern build`. `launch` is refused outside a driver session unless `--here` is given.
+`govern build`.
 
 ## 1. Before the first unit
 
@@ -195,8 +194,8 @@ Everything above holds:
 
 - **Finishing a phase is not a reason to stop.** Close it (step 5; stop at 5.1 only when the phase's
   "Done when" has a line for the owner), cut the next phase's branch from the phase you
-  just closed, start it with `build start <slug> --plan <file> --from phase/<the one you closed>`
-  so its review holds only its own work, and go on.
+  closed, start it with `build start <slug> --plan <file> --from phase/<the one you closed>`
+  so its review holds only its work, and go on.
 - **Checkpoint constantly.** The ledger commit and the push after every unit are what a crash
   leaves you. Have `technical-writer` refresh the handoff at every phase boundary, never "at the
   end": the end is the one thing a crash reliably removes.

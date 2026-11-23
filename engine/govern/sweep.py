@@ -45,6 +45,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 
 from govern import build, config, manifest, phase
+from govern.checks.docs import status_keyword
 
 MERGED, PR_MERGED, PUSHED, STALE = "MERGED", "PR-MERGED", "PUSHED", "STALE"
 IN_USE, DIRTY, REVIEW = "IN-USE", "DIRTY", "REVIEW"
@@ -523,7 +524,10 @@ def render(ctx, sections: list[Section]) -> list[str]:
         lines += sec.unpushed
         lines += [f"build     {slug} in flight on {branch}" for slug, branch in sec.builds]
         for path, status, age in sec.finished:
-            lines.append(f"finished  {ctx.rel(path)}  status {status}, last touched {age}d ago")
+            finished = ctx.cfg.checks["finished-files"].params["finished_statuses"]
+            what = (f"status {status}" if status_keyword(status) in finished
+                    else f"every phase closed, status {status}")
+            lines.append(f"finished  {ctx.rel(path)}  {what}, last touched {age}d ago")
     memory = _memory(ctx)
     if memory:
         lines.append(memory)
