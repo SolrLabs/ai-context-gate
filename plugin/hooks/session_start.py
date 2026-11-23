@@ -15,6 +15,28 @@ import time
 from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+_INPUT: bytes | None = None     # this hook's stdin, read once: `main` and `_usage` both need it
+
+
+def _input() -> bytes:
+    """The hook's stdin bytes, read once; empty when run by hand or when it cannot be read."""
+    global _INPUT
+    if _INPUT is None:
+        try:
+            _INPUT = b"" if sys.stdin is None or sys.stdin.isatty() else sys.stdin.buffer.read()
+        except Exception:
+            _INPUT = b""
+    return _INPUT
+
+
+def _source() -> str:
+    """The `source` of this start ("startup", "compact", ...); "" when unreadable."""
+    try:
+        data = json.loads(_input().decode("utf-8") or "{}")
+        src = data.get("source") if isinstance(data, dict) else ""
+        return src if isinstance(src, str) else ""
+    except Exception:
+        return ""
 
 
 def main() -> None:
@@ -36,14 +58,53 @@ def main() -> None:
                                                      "additionalContext": left}}))
         return
     msgs = [notice.for_project(root, home), notice.both_plugins_warning(root, home),
-            notice.plugin_behind(root, home), left, differs]
+            notice.plugin_behind(root, home), notice.channel_plugin(root, home),
+            _stable_on_beta(root), left, differs]
     msgs.extend(_usage(root, home))
     msgs.append(_driver_missing(root))
+    if _source() == "compact":
+        # After a compact the build's state comes back word for word (see compact.py).
+        try:
+            from govern import build
+            msgs.append(build.compact_text(root))
+        except Exception:
+            pass
     msg = "\n".join(m for m in msgs if m)
     if msg:
         print(json.dumps({"systemMessage": msg,
                           "hookSpecificOutput": {"hookEventName": "SessionStart",
                                                  "additionalContext": msg}}))
+
+
+def _own_plugin_id() -> str | None:
+    """`<plugin>@<marketplace>` of this hook's install, read from its path: Claude Code installs
+    a marketplace plugin at `<profile>/plugins/cache/<marketplace>/<plugin>/<version>/`, and
+    both marketplaces' plugins are named `context-gate`. None for any other location, and on
+    any failure."""
+    try:
+        version_dir = PLUGIN_ROOT
+        if version_dir.parent.parent.parent.name != "cache":
+            return None
+        return f"{version_dir.parent.name}@{version_dir.parent.parent.name}"
+    except Exception:
+        return None
+
+
+def _stable_on_beta(root: Path) -> str | None:
+    """The line saying this session loaded the stable plugin, when the project is on the beta
+    channel. None in any other state; never raises."""
+    try:
+        import tomllib
+        from govern import layout
+        if _own_plugin_id() != layout.PLUGIN_ID:
+            return None
+        with (root / layout.CONFIG).open("rb") as fh:
+            if (tomllib.load(fh).get("governance") or {}).get("channel") != "beta":
+                return None
+        return (f"{layout.DISPLAY_NAME}: this session loaded the stable plugin ({layout.PLUGIN_ID}) "
+                f"on a beta-channel project, so its skills are not the beta's.")
+    except Exception:
+        return None
 
 
 def _driver_missing(root: Path) -> str | None:
@@ -99,6 +160,13 @@ def _beta_differs(root: Path) -> str | None:
         import tomllib
         import govern
         from govern import layout, versions
+        try:
+            with (root / layout.CONFIG).open("rb") as fh:
+                engine_dir = (tomllib.load(fh).get("governance") or {}).get("engine_dir")
+        except (OSError, ValueError):
+            engine_dir = None
+        if isinstance(engine_dir, str) and engine_dir:
+            return None     # bin/govern runs that tree's engine ahead of local.toml
         with (root / layout.LOCAL).open("rb") as fh:
             named = (tomllib.load(fh).get("governance") or {}).get("engine")
         plugin = govern.__version__
@@ -188,7 +256,7 @@ def _usage(root: Path, home: Path) -> list:
     try:
         if sys.stdin is None or sys.stdin.isatty():
             return msgs        # run by hand, not by Claude Code: no hook input to wait for
-        data = json.loads(sys.stdin.buffer.read() or b"{}")
+        data = json.loads(_input() or b"{}")
         sid = data.get("session_id")
         if not isinstance(sid, str) or not sid or "/" in sid or "\\" in sid:
             return msgs

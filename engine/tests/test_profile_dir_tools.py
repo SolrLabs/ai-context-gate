@@ -15,6 +15,8 @@ import profile_guard  # noqa: E402,F401
 
 from regressions_support import *  # noqa: E402,F401,F403
 
+TIER = "e2e"
+
 REPO = Path(__file__).resolve().parents[2]
 INSTALL = REPO / "tools" / "release" / "install-plugin.py"
 BOTH = "both the beta and the stable plugin"

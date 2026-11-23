@@ -4,6 +4,52 @@ Newest first. Each release says what changed and, under **Upgrading**, anything 
 do or decide. The upgrade report quotes every entry between the engine a project ran and the one
 it upgraded to.
 
+## 0.10.0 — 2026-11-22
+
+An overnight driver that builds a plan unattended, fewer test-suite runs per build, a beta channel, and a faster local suite.
+
+**Upgrading:** run `govern agents render`; it refreshes the rendered roles and adds the `architect` role file. A project with its own `.claude/agents/architect.md` keeps it.
+
+- `[checks.agent-roles] unit_gate` now defaults to `"phase"`. Set `unit_gate = "scoped"` (per-merge runs) or `"full"` to keep the old behavior.
+- `docs_paths` now defaults to every Markdown file (`**/*.md`), less `.claude`, skills, templates and agents. A project whose code reads Markdown outside those folders adds `!` patterns to `docs_paths`, so a change there still runs the suite. A project that set `docs_paths` keeps its own.
+- `/context-gate:build <plan>` typed by a person now starts the driver in the background. That needs the `claude` CLI on PATH, and its background sessions spend your usage. `--here` (or a phase name, or `--one`) builds in your session as before.
+- `build launch` outside the driver now needs `--here`.
+- The compaction hooks live in the plugin: update the plugin and start a new session to get them. The driver and its report need only the engine. On Windows the driver's time-limit kill ends only the top process.
+
+**Added**
+
+- `govern build drive <plan>` runs a plan unattended: one headless `claude -p` coordinator session per build step (`--permission-mode auto`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, default 50). It stops on the session's `LOOP:` exit line (plan-done only when `build status` confirms it), on the weekly usage cap (`--cap N`, or today's line when no `--cap` is given: `cap N% (today)`; read from each session's rate-limit event and a first one-turn probe), on `--hours`, on `--max-sessions`, or after two sessions without progress. It kills the session's process group on the time limit and when the driver is signalled. Sessions are named `drive-<project>-s<n>`.
+- The driver writes `status.json` in its run folder (`skill`, `doing`, `doing_since`, `units`, `owner_session`) and prints a `run folder:` line. Before the usage probe it runs `govern agents render --check` and exits 1 with `error: agent roles are stale: ...` when it fails. It reads which build skill is loaded (`context-gate-beta:build` or `context-gate:build`) and stops before session 1 when neither is. Each session sets `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0`, so `claude -p` no longer kills background agents 10 minutes after its last turn.
+- Every driver session appends a measurement row to `~/.local/state/context-gate/drive/sessions.jsonl`. `govern build drive-report [name]` prints peaks and a suggested `--compact-pct` (p95 + 10, per project and overall, from 20 sessions).
+- A PreCompact hook prints the build's state as the compact instructions; SessionStart with source `compact` re-injects it.
+- The drive band ships in the plugin (`plugin/hooks/drive_band.tsx`, `drive_status.py`): green running, orange stale or ended without a stop, blue stopped. It shows the live step with its minutes and the units, and draws only in the Claude Code session that started the driver (a driver started from a terminal draws in every session of the project). With two plugin copies enabled, only the copy matching `status.json`'s `skill` draws it. A nested project finds its workspace's run. `drive_status.py` honors `CLAUDE_CONFIG_DIR`.
+- `[checks.agent-roles] docs_gate`: after a green run, a change only to `docs_paths` files runs `govern check` (and `docs_gate` when set) instead of the suite, recorded with `scope: "docs"`.
+- Under `unit_gate = "scoped"`, `build gate` runs in a unit's linked worktree, and `build unit set <id> done --branch <b>` takes that record.
+- `[governance] channel = "beta"` and `python3 -m govern.installer channel --root DIR stable|beta`: every machine and CI run the newest beta newer than the pin, and Claude Code loads `context-gate@context-gate-beta`. One note line shows when the channel runs a beta. The installer's `channel beta` refreshes `.context-gate/bin/` with the beta's launcher, all or none with the config and settings writes. A whole project moves with `channel beta`, one machine with `beta on`. The public `beta` branch carries a `context-gate-beta` marketplace, and a release also moves it.
+- `agents render --check` and the SessionStart hook name a session whose enabled plugin is on the other channel than the project's `[governance] channel`, with the install commands, apart from file changes.
+- `[governance] engine_dir` runs an engine folder of the repository instead of the pinned release; for the engine's own repository only.
+- An `e2e` test tier holds the slow launcher and install tests. `tools/ci/run-tests.sh --host` skips it; run `--host --all` before a pull request. CI runs it.
+
+**Changed**
+
+- Units run only their own tests under the new `phase` default; the coordinator runs the local suite once per phase, before review, and once after the fix pass. Rendered text says "local suite", not "full gate". The technical-writer runs `govern check` only, and the build skill no longer dispatches CI before review.
+- `govern build drive` sets `GOVERN_DRIVE=1` on its sessions. `build status` and `build start` end with a `Next:` line that points at the driver.
+- The rendered build rules open with "How work is built", three orders: the driver builds plan phases, role agents work from brief files for work no phase fits, and the session only plans, merges, pushes and tidies. The run-report order appears only when `agent-measure` is on. The rules and the build skill agree on `--here`.
+- Every attempt of a unit starts on the commit the unit starts from (its Base), as it stands now. A retry prints `Earlier attempt: <branch>`. In a workspace, attempt N gets its own worktree and branch with an `-a<N>` suffix. Unit ids ending `-a<digits>` are refused.
+- `architect` is a core rendered role. The plan skill launches it only for a unit that would go to `senior-developer` for its difficulty, when settling its design could let `developer` build it. A hand-made `.claude/agents/architect.md` that context-gate did not render is skipped with a note, not a conflict.
+- Any table of units shown to the user has an Agent column, written `role (model)`.
+- `govern runs report` groups contract refusals by what was missing (report, red output) and gives the Produces advice only for a brief that had no `Produces:` line.
+- A plan whose every phase slug has a `Close phase <slug>:` commit is finished: `finished-files` warns, `govern sweep` lists it as `finished ... every phase closed`, the `max_docs` could-go hint counts it, and the close brief tells the writer to delete it. A slug reused from an older plan counts as closed.
+- The local suite is faster: `tools/ci/run-tests.sh --host` runs in about 170 s, down from about 270 s (tests split across workers, slowest first; `-j` sets the worker count, default 6 or the CPU count when lower). The engine reuses read-only answers from its version-control calls within one command; results are unchanged.
+
+**Fixed**
+
+- The SessionStart notice no longer says a project with `[governance] engine_dir` runs the beta in `local.toml`; it follows the order the launcher uses. On `channel = "beta"` the plugin-behind notice names `context-gate@context-gate-beta` and its marketplace.
+- A `-beta` plugin copy rewrites its band's state owner to its own name, so the beta copy draws its band.
+- The driver's prompt says it owns the build: other Claude sessions are not rival coordinators, and `.context-gate/installed.toml` is never hand-edited.
+- The workspace close writer's brief is copied into its own worktree and excluded from version control there, so the printed cleanup works.
+- `docs/configuration.md` no longer says "Five roles", and its `build launch` row names `--here`.
+
 ## 0.9.4 — 2026-11-17
 
 Agent hygiene: a fresh agent for every fix, two new refusals under `agent-gates`, and workspace builds that brief and close correctly.
@@ -254,8 +300,8 @@ Agent hygiene: a fresh agent for every fix, two new refusals under `agent-gates`
   delete what is finished`. Before: `… — put permanent content behind an index, or delete what is
   finished`.
 - **The "superseded" advice shows the project's dash:** the `decision-log` error for a superseded
-  entry reads `… reduce it to `## D-12 - Replaced by <id>` …` in a hyphen-form log, and with the
-  dash of the entry's own heading in any other. Before: always `## D-12 — Replaced by <id>`.
+  entry reads `… reduce it to `## <id> - Replaced by <id>` …` in a hyphen-form log, and with the
+  dash of the entry's own heading in any other. Before: always `## <id> — Replaced by <id>`.
 - **`bin/upgrade --to X.Y.Z-beta.N` installs nothing:** it exits 2 with `error: an upgrade takes
   a release, and X.Y.Z-beta.N is a beta; run a beta with govern beta on X.Y.Z-beta.N`. Before, it
   downloaded the beta into the engines directory and then refused to pin it.
@@ -266,7 +312,7 @@ Agent hygiene: a fresh agent for every fix, two new refusals under `agent-gates`
   other trap files, else a hyphen (`## T-N - Title`). With
   `decision_heading = "em-dash"` it is always ` — `. `govern show` prints an entry's heading as it
   is written in the file, where it printed an em dash.
-- **The docs show the hyphen form:** examples read `## D-12 - Title`. The default `any-dash`
+- **The docs show the hyphen form:** examples read `## <id> - Title`. The default `any-dash`
   grammar reads an em or en dash as before.
 - **Betas are published as prereleases:** a `vX.Y.Z-beta.N` tag is now in the public repository,
   as a GitHub prerelease on a `beta` branch. Releases stay on `main`, and no project is offered a

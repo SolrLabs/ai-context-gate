@@ -100,14 +100,24 @@ class Worktree(ws.Workspace):
         self.ok("--project", "alpha", "launch", "u1")
         self.assertTrue((own / ".metadata_never_index").is_file())
 
-    def test_a_second_launch_reuses_the_worktree(self):
-        self.ready()
+    def test_a_second_launch_makes_an_a2_worktree_at_head(self):
+        member = self.ready()
         self.ok("--project", "alpha", "launch", "u1")
         marker = self.tree() / "kept.txt"
         marker.write_text("mine\n", encoding="utf-8")
+        self.w.write("alpha/later.txt", "moved on\n")
+        self.w.commit("later", at=member, index=False)
+        head = self.w.git("rev-parse", "HEAD", at=member).strip()
+        first = self.w.git("rev-parse", "build/p1/u1", at=member).strip()
         out = self.ok("--project", "alpha", "launch", "u1")
-        self.assertIn(f"Worktree: {self.tree()}", out.splitlines())
+        second = self.w.root / ".claude" / "worktrees" / "alpha-p1-u1-a2"
+        self.assertIn(f"Worktree: {second}", out.splitlines())
+        self.assertIn(f"Base: {head}", out.splitlines())
+        self.assertEqual(self.w.git("rev-parse", "--abbrev-ref", "HEAD", at=second).strip(),
+                         "build/p1/u1-a2")
+        self.assertEqual(self.w.git("rev-parse", "HEAD", at=second).strip(), head)
         self.assertTrue(marker.is_file())
+        self.assertEqual(self.w.git("rev-parse", "build/p1/u1", at=member).strip(), first)
         self.assertEqual(self.ledger("alpha")["unit"][0]["attempts"], 2)
 
     def test_something_else_at_the_path_is_refused_and_nothing_is_removed(self):
@@ -197,7 +207,7 @@ class Worktree(ws.Workspace):
             f"Base: {head}", "Phase branch: phase/p1",
             f"Worktree: {self.close_tree()}", NOTE,
             "launch technical-writer with the prompt:",
-            f"Brief: {member / BUILD / 'p1' / 'close' / 'workspace-brief.md'}",
+            f"Brief: {self.close_tree('close-workspace') / BUILD / 'p1' / 'close' / 'workspace-brief.md'}",
             f"Base: {top}", "Workspace branch: main",
             f"Worktree: {self.close_tree('close-workspace')}", NOTE])
         branches = {self.close_tree(): ("build/p1/close", member),
@@ -241,6 +251,23 @@ class Worktree(ws.Workspace):
         self.assertNotIn("build/p1/close-workspace", build.phase._worktrees(self.w.root))
         self.assertNotIn("build/p1/close-workspace",
                          self.w.git("branch", "--format=%(refname:short)").split())
+
+    def test_the_workspace_close_writer_finds_its_brief_in_its_own_tree(self):
+        member = self.closing()
+        out = self.ok("--project", "alpha", "launch", "close").splitlines()
+        copy = self.close_tree("close-workspace") / BUILD / "p1" / "close" / "workspace-brief.md"
+        self.assertEqual(out[7], f"Brief: {copy}")
+        self.assertEqual(copy.read_text(encoding="utf-8"),
+                         (member / BUILD / "p1" / "close" / "workspace-brief.md")
+                         .read_text(encoding="utf-8"))
+
+    def test_the_workspace_brief_says_not_to_run_check_there(self):
+        member = self.closing()
+        folder = member / BUILD / "p1" / "close"
+        said = ("This worktree holds no member repositories, so `govern check` fails here on "
+                "them: do not run it here; the coordinator runs it after merging your branch.")
+        self.assertIn(said, (folder / "workspace-brief.md").read_text(encoding="utf-8"))
+        self.assertNotIn(said, (folder / "brief.md").read_text(encoding="utf-8"))
 
     def test_the_workspace_brief_asks_its_writer_to_commit_the_report(self):
         member = self.closing()

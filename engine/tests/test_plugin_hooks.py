@@ -14,15 +14,19 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import profile_guard  # noqa: E402,F401
+from source_version import SOURCE_VERSION  # noqa: E402
 
 from plugin_support import *  # noqa: E402,F401,F403
 from build_support import Build, GATES  # noqa: E402
+
+TIER = "e2e"
 
 
 class Plugin(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
+        self.enterContext(mock.patch.dict(os.environ, {"GOVERN_DRIVE": "1"}))  # a driver session
         self.home = self.tmp / "home"
         self.project = self.tmp / "project"
         self.home.mkdir()
@@ -88,8 +92,8 @@ class Plugin(unittest.TestCase):
         text = " ".join((PLUGIN / "skills/plan/SKILL.md").read_text(encoding="utf-8").split())
         self.assertIn("search what exists", text)
 
-    def test_build_skill_carries_a_first_attempt_by_its_own_branch(self):
-        self.assertIn("by its own branch", self.build_text())
+    def test_build_skill_starts_a_fresh_agent_on_the_current_base(self):
+        self.assertIn("A fresh agent starts on the current Base.", self.build_text())
 
     def test_build_skill_deletes_the_plan_file_after_the_last_checkpoint(self):
         self.assertIn("delete the plan file", self.build_text())
@@ -116,8 +120,7 @@ class Plugin(unittest.TestCase):
 
     def test_build_skill_says_what_a_red_gate_after_the_merge_means(self):
         text = self.build_text()
-        self.assertIn('have no "After you merge a unit" line, the agent ran the full gate itself',
-                      text)
+        self.assertIn("With no bullet, the agent ran the suite: read its result", text)
         self.assertIn("Green: record it with `python3 .context-gate/bin/govern build unit set "
                       "<id> done", text)
         self.assertIn("Red: the unit you just merged is failed; leave the merge in place, launch "
@@ -126,8 +129,8 @@ class Plugin(unittest.TestCase):
         self.assertIn("The gate is red after its merge, or the diff is not what the brief asked:",
                       text)
         self.assertNotIn("The gate is red on its branch", text)
-        self.assertIn("The fresh agent's brief says which tests fail and that the first attempt "
-                      "is already in its base.", text)
+        self.assertIn("The fresh agent's brief says which tests fail and names the earlier "
+                      "attempt's branch, read only for what it needs.", text)
 
     def test_plan_skill_marks_owner_checkpoints(self):
         text = " ".join((PLUGIN / "skills/plan/SKILL.md").read_text(encoding="utf-8").split())
@@ -172,6 +175,48 @@ class Plugin(unittest.TestCase):
         self.assertIn("The owner reviews the `## Agents` table before any build", text)
         self.assertIn("only on the owner's word", text)
         self.assertIn("`python3 .context-gate/bin/govern check` before the plan is committed", text)
+
+    def who_builds(self) -> str:
+        text = self.build_text()
+        start = text.index("## Who builds")
+        return text[start:text.index("## 0. Is a build already in flight?")]
+
+    def test_build_skill_who_builds_comes_before_step_zero(self):
+        text = self.build_text()
+        self.assertIn("## Who builds", text)
+        self.assertLess(text.index("## Who builds"),
+                        text.index("## 0. Is a build already in flight?"))
+        section = self.who_builds()
+        for word in ("govern build drive", "run_in_background", "--here"):
+            self.assertIn(word, section)
+
+    def test_build_skill_review_launch_tells_reviewers_nothing_of_expectations(self):
+        text = self.build_text()
+        step = text[text.index("## 3. Review, once"):text.index("## 4. One fix pass")]
+        self.assertIn("Tell them nothing about what you expect them to find.", step)
+
+    def test_build_skill_who_builds_detects_the_appended_paragraph(self):
+        section = self.who_builds()
+        self.assertNotIn("open with", section)
+        for word in ("contain", "--one", "build status"):
+            self.assertIn(word, section)
+
+    def test_build_skill_marker_is_the_drive_prompts_opening(self):
+        prompt = (ENGINE / "govern/templates/drive-prompt.md").read_text(encoding="utf-8")
+        marker = prompt.split(":", 1)[0]
+        self.assertEqual(marker, "Unattended run")
+        self.assertIn("`%s`" % marker, self.who_builds())
+
+    def test_build_skill_argument_hint_names_here(self):
+        text = (PLUGIN / "skills/build/SKILL.md").read_text(encoding="utf-8")
+        hint = re.search(r"^argument-hint:\s*(.*)$", text, re.M).group(1)
+        self.assertIn("--here", hint)
+
+    def test_build_rules_say_build_starts_the_driver(self):
+        for path in (ENGINE / "govern/templates/build-rules.md",
+                     REPO / ".claude/rules/context-gate-build.md"):
+            text = " ".join(path.read_text(encoding="utf-8").split())
+            self.assertIn("`build` starts the driver", text, path)
 
     def test_build_skill_stops_on_an_unreviewed_agents_table(self):
         text = self.build_text()
@@ -319,7 +364,7 @@ class Plugin(unittest.TestCase):
         """The built plugin as a beta's: its bundled engine says it is that beta."""
         (self.built / "govern" / "__init__.py").write_text(
             (ENGINE / "govern" / "__init__.py").read_text(encoding="utf-8").replace(
-                f'__version__ = "{__version__}"', f'__version__ = "{version}"'), encoding="utf-8")
+                f'__version__ = "{SOURCE_VERSION}"', f'__version__ = "{version}"'), encoding="utf-8")
 
     def local(self, text: str) -> None:
         (self.project / layout.LOCAL).write_text(text, encoding="utf-8")
@@ -781,6 +826,26 @@ class AgentHooks(Plugin):
         self.local(f'[governance]\nengine = "{self.NINE}"\n')
         self.assertNotIn("this machine's plugin is beta", self.start())
 
+    def test_session_start_is_silent_on_a_local_beta_when_engine_dir_runs_the_tree(self):
+        """bin/govern runs engine_dir ahead of local.toml, so the project does not run the beta."""
+        import importlib.util
+        import govern
+        self.beta_plugin(self.NINE)
+        spec = importlib.util.spec_from_file_location(
+            "session_start_engine_dir", PLUGIN / "hooks" / "session_start.py")
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        self.local('[governance]\nengine = "9.9.0-beta.8"\n')
+        for engine_dir, said in (('"engine"', False), ('""', True)):
+            self.pin(self.NINE)
+            cfg = self.project / layout.CONFIG
+            cfg.write_text(cfg.read_text(encoding="utf-8").replace(
+                "schema = 1", f"schema = 1\nengine_dir = {engine_dir}"), encoding="utf-8")
+            with mock.patch.object(govern, "__version__", self.NINE):
+                self.assertEqual(hook._beta_differs(self.project) is not None, said)
+            lines = json.loads(self.start() or '{"systemMessage": ""}')["systemMessage"].splitlines()
+            self.assertEqual(any("this project runs beta" in line for line in lines), said)
+
     def test_session_start_says_when_the_settings_could_not_be_read(self):
         said = ("context-gate: this project's settings could not be read by the plugin; usage "
                 "alerts, agent gates and run measurement are OFF for this session. Run python3 "
@@ -929,7 +994,7 @@ class BuildInFlight(Plugin):
         made = self.ledger("done", "pending", "pending")
         out = json.loads(self.start())
         line = ("A build is in flight: p1, 1 of 3 units done. Next: "
-                + build.next_action(made))
+                + build.next_action(made, driven=True))
         self.assertEqual(out["systemMessage"], line)
         self.assertEqual(out["hookSpecificOutput"],
                          {"hookEventName": "SessionStart", "additionalContext": line})
@@ -1074,7 +1139,7 @@ class BetaStandsDown(unittest.TestCase):
 
 
 class PushGuard(Build):
-    """A coordinator's `git push` is refused while the phase's last full gate is red at HEAD."""
+    """A coordinator's `git push` is refused while the phase's last local suite run is red at HEAD."""
     CONFIG = '\n[checks.agent-roles]\nlevel = "warn"\nfull_gate = "exit 3"\n'
 
     def setUp(self) -> None:
@@ -1097,7 +1162,7 @@ class PushGuard(Build):
         out = self.push()
         self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
         self.assertEqual(self.reason(out),
-                         f"push refused: the last full gate on this phase is red (rc 3 at "
+                         f"push refused: the last local suite run on this phase is red (rc 3 at "
                          f"{self.head()[:7]}). Run python3 .context-gate/bin/govern build gate.")
 
     def test_no_record_a_running_record_or_another_head_never_blocks(self):

@@ -389,6 +389,21 @@ class Whole(Sweep):
                                         "last touched "), line)
         self.assertTrue(line.endswith("d ago"), line)
 
+    PLAN = ("two phases", "## Phase one (slug: a; owner: x)\n\n## Phase two (slug: b)\n")
+
+    def close_phase(self, slug):
+        self.w.git("commit", "--allow-empty", "-qm", f"Close phase {slug}: done", at=self.w.top)
+
+    def test_a_plan_whose_every_phase_is_closed_is_listed_as_finished(self):
+        self.w.write("docs/working/plan-x.md",
+                     fm("working", status="planned") + "# Plan\n" + self.PLAN[1])
+        self.w.commit("plan", at=self.w.top, index=False)
+        self.close_phase("a")
+        self.close_phase("b")
+        line = [ln for ln in self.lines() if ln.startswith("finished  ")][0]
+        self.assertRegex(line, r"^finished  docs/working/plan-x\.md  every phase closed, "
+                               r"status planned, last touched \d+d ago$")
+
     def test_a_repository_git_cannot_read_is_reported_and_the_exit_is_1(self):
         profile.rmtree(self.w.top / ".git")
         code, out, err = self.sweep()

@@ -1,10 +1,11 @@
 {
   "name": "context-gate",
   "displayName": "context-gate",
-  "version": "0.9.4",
+  "version": "0.10.0",
   "description": "Centralized governance for Claude Code projects: one engine, per-project policy in .context-gate/config.toml, guided upgrades.",
   "author": { "name": "SolrLabs LLC" },
   "license": "Apache-2.0",
   "homepage": "https://github.com/SolrLabs/ai-context-gate",
-  "repository": "https://github.com/SolrLabs/ai-context-gate"
+  "repository": "https://github.com/SolrLabs/ai-context-gate",
+  "types": "./types/index.d.ts"
 }

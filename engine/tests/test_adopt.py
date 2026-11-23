@@ -33,6 +33,8 @@ from govern import cli, config, installer, layout, migrate, profile, registry  #
 from test_measure import (BODY, FM, example_workspace, commit, orbit, pair, put,  # noqa: E402
                           single_repo, snapshot)
 
+TIER = "e2e"
+
 
 def run(*args: str) -> tuple[int, str, str]:
     out, err = io.StringIO(), io.StringIO()
@@ -702,7 +704,7 @@ class LocalOnlyRoles(Base):
         self.assertEqual(code, 0, out + err)
         roles = self.roles
         self.assertEqual(installer.read_manifest(self.root)["rendered"], [])
-        self.assertEqual(len(roles._rows(self.root / roles.LOCAL_RECORD)), 6)
+        self.assertEqual(len(roles._rows(self.root / roles.LOCAL_RECORD)), 7)
         exclude = (self.root / ".git/info/exclude").read_text(encoding="utf-8")
         self.assertIn("/.claude/agents/developer.md\n", exclude)
         self.assertIn(f"/{roles.LOCAL_RECORD}\n", exclude)

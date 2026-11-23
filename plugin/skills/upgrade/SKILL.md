@@ -43,6 +43,8 @@ regenerates the generated blocks (the `index` line says how many changed), and w
 `.context-gate/upgrade-report.md`. Those regenerated blocks are part of the upgrade's diff. If it reports "rolled back", nothing changed:
 show the user the error and stop.
 
+A whole project moves to betas with the `channel beta` command run by the beta's own engine (`PYTHONPATH=<engines>/<beta> python3 -P -m govern.installer channel --root . beta`); one machine moves with `govern beta on`.
+
 ## 3. Explain the report
 
 Read `.context-gate/upgrade-report.md`. Tell the user, briefly:

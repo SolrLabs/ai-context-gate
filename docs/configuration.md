@@ -3,7 +3,7 @@ doc_type: reference
 purpose: Every table and key .context-gate/config.toml accepts, with types, defaults and examples.
 audience: human
 load_when: writing or changing a project's config.toml or a profile's principles.toml
-last_reviewed: 2026-10-14
+last_reviewed: 2026-11-18
 ---
 
 # Configuration reference
@@ -58,6 +58,8 @@ The tables:
 | `schema` | integer | `1` | The config schema version. This engine reads schema 1 only. |
 | `extensions` | list of strings | `[]` | Directories, relative to the governance root, whose `*.py` files register extension checks. Each directory must exist. See [Extensions](#extensions). |
 | `require_reasons` | boolean | `true` | Whether a loosened setting needs a `reason` (see [Loosening](#loosening-needs-a-reason)). |
+| `channel` | string | `"stable"` | `"stable"` runs the pinned release. `"beta"` runs, on every machine and in CI, the newest beta whose release is newer than the pin, installed or tagged at `source` (asked at most once an hour), and, when the newest beta cannot be installed, the newest installed beta newer than the pin, and the pin only when there is none. The pin itself stays a release. See [Beta channel](#beta-channel). |
+| `engine_dir` | string | `""` | A folder of this repository whose engine the launcher runs instead of the pinned release, skipping the pin's version match; for the engine's own repository only, never an adopter. |
 
 ```toml
 [governance]
@@ -753,6 +755,37 @@ one line saying why, and does not fail. Run `govern beta off` to clear the file.
 Run `govern beta off` before `bin/uninstall`. Uninstall does not know about `local.toml`, and
 the beta plugin keys would stay in `.claude/settings.local.json`.
 
+## Beta channel
+
+`[governance] channel = "beta"` makes the whole project follow the betas: every machine and CI run
+the newest beta whose release is newer than the pin (the pin itself stays a release), and Claude
+Code loads the matching plugin. The default, `"stable"`, runs the pinned release.
+
+Switch with the installer's `channel` command, from the project root. Run it with the beta's own
+engine, not the pinned one (the pinned launcher refuses a beta target); `govern beta on <beta>`
+installs that engine first:
+
+```sh
+PYTHONPATH=~/.local/share/context-gate/engines/<beta version> python3 -P -m govern.installer channel --root . beta
+```
+
+It needs an installed project (`.context-gate/installed.toml`). It changes, in one go:
+
+- `.context-gate/config.toml`: adds `channel = "beta"` after `engine = ...`, leaving every other
+  byte as it was.
+- `.claude/settings.json`: `extraKnownMarketplaces["context-gate-beta"]` (the `beta` branch of the
+  public repository), `enabledPlugins["context-gate@context-gate-beta"] = true` and
+  `enabledPlugins["context-gate@context-gate"] = false`. The plugin keeps its name, so skills stay
+  `context-gate:*`. Commit the file so teammates get the same plugin.
+- `.context-gate/installed.toml`: each settings key's previous value, so the switch can be undone.
+- `.context-gate/bin/`: the beta's launcher replaces the project's, written with the config and settings, all or none. On a project already on the beta channel, `channel beta` still refreshes `bin/`.
+
+Running it again says the project is already on the channel and changes nothing.
+
+To go back, run the same command with `stable`: the config key is removed and the three settings
+keys return to the values recorded (a key that was absent is removed again; edits you made to other
+keys stay). `uninstall` undoes the same keys.
+
 ## On a pull request
 
 `govern ci github` prints a GitHub Actions workflow that runs `check --base` and `diff` on every
@@ -1075,9 +1108,10 @@ A clone in a git-ignored folder inside a governed folder is not governed.
 ## Agent roles
 
 With `agent-roles` on, the engine writes the project's agent definitions and the coordinator's
-build rules, so they are never copied by hand. Five roles are always rendered: `developer`,
-`senior-developer`, `code-reviewer`, `qa-engineer` and `technical-writer`. `extra_roles` adds
-`ux-reviewer` and `architect`. Each definition comes from an engine template, the check's params
+build rules, so they are never copied by hand. Six roles are always rendered: `developer`,
+`senior-developer`, `code-reviewer`, `qa-engineer`, `technical-writer` and `architect`. The plan
+skill runs `architect` only when it can turn a `senior-developer` unit into `developer` work.
+`extra_roles` adds `ux-reviewer`, which `visual_paths` also renders. Each definition comes from an engine template, the check's params
 and the project's own text. The rules go to `.claude/rules/context-gate-build.md`.
 
 ```toml
@@ -1086,7 +1120,7 @@ engine = "0.4.0"
 
 [checks.agent-roles]
 level = "error"
-extra_roles = ["architect"]
+extra_roles = ["ux-reviewer"]
 scoped_test = "python3 -m unittest -k"
 full_gate = "python3 -m unittest discover"
 high_risk_paths = ["engine/govern/installer.py"]
@@ -1132,8 +1166,17 @@ tracks (`--untrack` stops that, leaving the files). A param that `local.toml` se
 `forbidden_trailers` is a list of regexes (default empty): `build verify` refuses a unit branch
 whose commit message has a line matching one, for example `["(?im)^co-authored-by:.*claude"]`.
 `fast_checks` is a list of commands, rendered for `developer` and `senior-developer` as the
-hand-back key `Fast checks` (not under `unit_gate = "full"`). `worktree_setup` is one command,
+hand-back key `Fast checks` (not under `unit_gate = "full"`). `unit_gate` is `"phase"` by
+default: a unit runs its own tests, and the coordinator runs the local suite once per phase,
+before review. `"scoped"` has each unit also run `build gate` and the coordinator run the suite
+after each merge; `"full"` has each unit run the suite. `worktree_setup` is one command,
 rendered as a line in `developer`, `senior-developer` and `technical-writer`.
+
+`docs_paths` is a list of globs, default `["**/*.md", "!.claude/**", "!**/skills/**",
+"!**/templates/**", "!**/agents/**"]`: every Markdown file is docs except rendered or shipped
+text. Patterns are read in order; a `!` pattern excludes and the last match decides. A change only
+to docs runs `govern check` (and `docs_gate`) instead of the suite. A project whose code reads
+Markdown (templates, skills, fixtures) adds `!` patterns after the first one.
 
 ## Agent gates
 
@@ -1242,7 +1285,10 @@ successful close also marks planning in it and prints `run log: planning from he
 
 ## The build loop
 
-`/context-gate:plan` and `/context-gate:build` run a phase with the rendered roles. Their state is
+`/context-gate:plan` and `/context-gate:build` run a phase with the rendered roles. Typed by a
+person, `/context-gate:build` starts `govern build drive` in the background and the driver's own
+sessions run the steps; `--here`, a phase name or `--one` builds in the person's session as before.
+Their state is
 `govern build`'s ledger, `.context-gate/build/<phase>/ledger.toml`, written only by the commands
 and committed on the phase branch with the briefs. Reports, diffs and failing-test output under
 `.context-gate/build/` are ignored by git. One phase is in flight per branch.
@@ -1268,12 +1314,13 @@ attempts = 0
 
 | Command | Does |
 |---|---|
+| `build drive <plan>` | Runs a plan unattended, one fresh headless session per build step; see Overnight driver below |
 | `build start <phase> [--plan FILE] [--from BRANCH] [--high-risk] [--visual]` | Writes the ledger; `--visual` marks the phase visual, so `build review` writes a third brief for `ux-reviewer`, and is refused unless `visual_paths` renders that role. Refuses on the default branch, a dirty tree, an existing ledger, or when git ignores the ledger (it prints the line to add to `.gitignore`) |
 | `build unit add <id> --title T [--role R] [--red]` | Adds a unit and writes its `brief.md` |
-| `build unit set <id> <status> [--role R] [--branch B] [--commit C] [--note N] [--agent ID] [--accept-red REASON]` | Updates a unit. `done` with `--branch` runs `build verify`; `--agent` stores the agent that built it (cleared on `failed`, `blocked` and relaunch). With `full_gate` set and `unit_gate = "scoped"`, `done` is refused on a red, missing or stale gate record; `--accept-red` lets it through and records a ruling |
-| `build gate [--cmd CMD]` | Runs `full_gate` and records `<phase folder>/gate/last.json` (`status`, `rc`, `head`, `dirty`, `seconds`, `at`, `cmd`) and `gate/last.log`. A HEAD that moves during the run leaves the record stale. `--cmd` runs another command and records nothing |
+| `build unit set <id> <status> [--role R] [--branch B] [--commit C] [--note N] [--agent ID] [--accept-red REASON]` | Updates a unit. `done` with `--branch` runs `build verify`; `--agent` stores the agent that built it (cleared on `failed`, `blocked` and relaunch). With `full_gate` set and `unit_gate = "scoped"` (not the default `"phase"`), `done` is refused on a red, missing or stale gate record; `--accept-red` lets it through and records a ruling. Under `scoped`, `done --branch` also copies the worktree's gate record to `gate/<id>.json` |
+| `build gate [--cmd CMD]` | Runs `full_gate` and records `<phase folder>/gate/last.json` (`status`, `rc`, `head`, `dirty`, `seconds`, `at`, `cmd`) and `gate/last.log`. A HEAD that moves during the run leaves the record stale. When the only changes since a green run are `docs_paths`, it runs only `govern check` (and the project's `docs_gate` command, if set) and records `scope: "docs"`. It also runs in a linked worktree on a branch no ledger names, using the one ledger there. `--cmd` runs another command and records nothing |
 | `build verify <id> --branch B` | Read-only hand-back check. Refuses: no commit past the unit's base, an empty diff, uncommitted files in the branch's worktree, a git-ignored ledger, a commit line matching `forbidden_trailers`. Warns: a report `Scope:` path the diff does not touch; ignored files in a folder the diff touches |
-| `build launch <unit, review, fix or close>` | Refuses an unfilled or uncommitted brief; prints the launch prompt |
+| `build launch <unit, review, fix or close> [--here]` | Refuses an unfilled or uncommitted brief, and refuses outside a driver session (`GOVERN_DRIVE=1`, which `build drive` sets) unless given `--here`; prints the launch prompt |
 | `build collect <branch>` | Copies what the agent on that branch produced (reports, failing output) from its worktree into this checkout's build folder |
 | `build ruling <text>` | Records a decision made without the owner: what, why, cost if wrong |
 | `build status [--json]` | The phase, a line per unit, and what is next |
@@ -1293,6 +1340,41 @@ folder (`<unit id>`, `fix-N`, `review-code`, `review-qa`, `review-ux`, `close`, 
 OS error says `stopped at <path>: <reason>; anything written before it stays`; a failed run-record
 write is a warning. With `agent-gates` on, a coordinator `git push` is denied when the phase's last
 gate is red at HEAD. SessionStart tells the coordinator when a build is in flight.
+
+## Overnight driver
+
+The build skill starts it: typed by a person, `/context-gate:build <plan>` runs `govern build drive`
+in the background, and the driver's own sessions run the steps. Add `--here`, a phase name or `--one`
+to build in your own session instead; with no plan named, it takes the plan `govern build status`
+names.
+
+`govern build drive <plan>` runs a plan unattended. It starts one fresh headless `claude -p`
+coordinator session per build step (`/context-gate:build <plan>`), each resuming from
+`govern build status`, the ledger and git, so no session re-reads a long context. A session ends
+its final message with `LOOP: continue`, `LOOP: plan-done` or `LOOP: stop <reason>`; one that ends
+without such a line is recorded as `unfinished` and the next session carries on.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--cap N` | today's line | stop when the weekly (seven-day) usage reaches N percent; by default N is today's line, the weekly figure when today began plus today's allowance (the status row's `today` figure), recomputed before each session; an off day, or no reading or reset time, stops as "cap unknown" |
+| `--hours H` | none | stop after H hours (may be fractional); the running session is ended |
+| `--max-sessions N` | 50 | stop after N sessions |
+| `--compact-pct P` | 50 | auto-compact at P percent of the window, 20 to 90, or `auto` for the measured suggestion |
+| `--permission-mode M` | `auto` | claude's permission mode |
+| `--claude CMD` | `claude` | the claude command |
+| `--project NAME` | none | passed to `build status` in a workspace |
+
+Stops: `plan done` and `stop <reason>` (a person is needed) exit 0, as do `cap reached` (the
+usage read at the start of the run and after each session, plus the largest rise one session has
+caused, would reach the cap; no reading also stops), `session limit` and `time limit`. `no
+progress` (two sessions in a row left `build status` unchanged) exits 1, as does a `--compact-pct`
+outside 20 to 90, which is refused before anything starts.
+
+Each run keeps every session's stream and errors as `<n>.jsonl` and `<n>.err` in
+`~/.local/state/context-gate/drive/runs/<project folder>-<UTC time>/`. One row per session
+(project, plan, phase, next step, times, exit, peak context percent, compactions) is appended to
+`~/.local/state/context-gate/drive/sessions.jsonl`; `govern build drive-report [project folder]`
+prints them with a suggested `--compact-pct`.
 
 ## Profiles
 

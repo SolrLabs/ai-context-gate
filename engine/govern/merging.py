@@ -15,7 +15,7 @@ import tempfile
 from pathlib import Path
 
 from govern.context import Context
-from govern import blocks, ratchet
+from govern import blocks, gitq, phase, ratchet
 from govern.decisions import FENCE, Grammar, id_key, line_kinds, mask_lines
 
 BOTH_ADDED = ("<!-- context-gate: {ident} was added on both branches; keep one and give the "
@@ -420,10 +420,6 @@ HOOK_MARK = "# context-gate: refresh generated blocks"
 HOOKS = ("post-merge", "post-rewrite")
 
 
-def _git(ctx: Context, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(ctx.root), *args], capture_output=True, text=True)
-
-
 def _python() -> str:
     """The interpreter running this install, quoted, so git runs the same Python later."""
     return f'"{Path(sys.executable).as_posix()}"'
@@ -444,18 +440,22 @@ def install_clone(ctx: Context) -> int:
     blocks after a merge or a rebase. Each thing done is printed."""
     from govern import layout
     try:
-        top = _git(ctx, "rev-parse", "--show-toplevel")
-        hooks = _git(ctx, "rev-parse", "--git-path", "hooks")
-        path_set = _git(ctx, "config", "--get", "core.hooksPath")
-    except OSError as exc:
+        top = gitq.toplevel(ctx.root)
+        if top is None:
+            raise OSError("git could not run")
+        hooks = phase._git(ctx.root, "rev-parse", "--git-path", "hooks")
+        if hooks is None:
+            raise OSError("git could not run")
+        path_set = gitq.config_get(ctx.root, "core.hooksPath")
+    except (OSError, phase.PhaseError) as exc:
         print(f"merge-driver install: git did not run ({exc})", file=sys.stderr)
         return 1
     if top.returncode or hooks.returncode:
         print(f"merge-driver install: git cannot say where this clone is: "
-              f"{(top.stderr or hooks.stderr).strip()}", file=sys.stderr)
+              f"{(top.stderr.decode('utf-8', 'replace').strip() or hooks.stderr.decode('utf-8', 'replace').strip())}", file=sys.stderr)
         return 1
     try:
-        rel = ctx.root.resolve().relative_to(Path(top.stdout.strip()).resolve())
+        rel = ctx.root.resolve().relative_to(Path(phase._out(top)).resolve())
     except ValueError:
         print("merge-driver install: the governance root is not inside this git repository",
               file=sys.stderr)
@@ -466,13 +466,13 @@ def install_clone(ctx: Context) -> int:
     driver = f"{_python()} {bin_path} merge-driver %O %A %B %P"
     for key, value in (("merge.context-gate.name", "context-gate"),
                        ("merge.context-gate.driver", driver)):
-        res = _git(ctx, "config", key, value)
+        res = gitq.config_set(ctx.root, key, value)
         if res.returncode:
-            print(f"merge-driver install: git config {key} failed: {res.stderr.strip()}",
+            print(f"merge-driver install: git config {key} failed: {res.stderr.decode('utf-8', 'replace').strip()}",
                   file=sys.stderr)
             return 1
         print(f"  set          git config {key}")
-    hooks_dir = ctx.root / hooks.stdout.strip()
+    hooks_dir = ctx.root / phase._out(hooks)
     for name in HOOKS:
         target = hooks_dir / name
         ours = False
@@ -481,7 +481,7 @@ def install_clone(ctx: Context) -> int:
                 ours = HOOK_MARK in _read(target).splitlines()
             except (OSError, UnicodeDecodeError):
                 ours = False
-        if path_set.returncode == 0 and path_set.stdout.strip() or (target.exists() and not ours):
+        if path_set.returncode == 0 and phase._out(path_set) or (target.exists() and not ours):
             print(f"  kept         {name}: not context-gate's; add this line to it: "
                   f"python3 {bin_path} index")
             continue

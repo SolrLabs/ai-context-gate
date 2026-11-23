@@ -30,7 +30,7 @@ Each check has a level: `off`, `warn` or `error`. At `error`, a check reports wh
 | [`doc-links`](#doc-links) | `error` | Every relative link in a governed doc points at a file that exists. |
 | [`doc-reachability`](#doc-reachability) | `error` | Every governed doc is listed in the project's generated doc registry. |
 | [`working-file-count`](#working-file-count) | `warn` | Bounds how many files sit directly in a project's working-files directory. |
-| [`finished-files`](#finished-files) | `warn` | A working file whose status says it is finished should be deleted once it has sat untouched for a few days. A finished file that was never committed is flagged at once instead, so it is committed before it is deleted. |
+| [`finished-files`](#finished-files) | `warn` | A working file whose status says it is finished should be deleted once it has sat untouched for a few days. A finished file that was never committed is flagged at once instead, so it is committed before it is deleted. A plan whose every phase is closed is flagged too. |
 | [`handoff-words`](#handoff-words) | `error` | Bounds a project's HANDOFF: a snapshot of where things stand, not a log. |
 | [`agents`](#agents) | `error` | Every agent definition pins its name, model, effort and whether it may read CLAUDE.md, an optional turn cap stays under the ceiling, and prose never contradicts the cap. |
 | [`skills`](#skills) | `error` | Every skill definition has frontmatter with a description. |
@@ -492,7 +492,7 @@ Bounds how many files sit directly in a project's working-files directory.
 
 ### `finished-files`
 
-A working file whose status says it is finished should be deleted once it has sat untouched for a few days. A finished file that was never committed is flagged at once instead, so it is committed before it is deleted.
+A working file whose status says it is finished should be deleted once it has sat untouched for a few days. A finished file that was never committed is flagged at once instead, so it is committed before it is deleted. A plan whose every phase is closed is flagged too.
 
 | | |
 |---|---|
@@ -782,20 +782,22 @@ The engine's agent roles and the coordinator's build rules are rendered into the
 | Ratchet | No |
 | Since | 0.7.0 |
 
-**Question:** Should the engine render its standard agent roles (developer, senior developer, code reviewer, QA engineer, technical writer) and the coordinator's build rules into this project, with your models, commands and rules filled in?
+**Question:** Should the engine render its standard agent roles (developer, senior developer, code reviewer, QA engineer, technical writer, architect) and the coordinator's build rules into this project, with your models, commands and rules filled in?
 
 **Why:** A role copied by hand drifts from the standard the day after it is copied; one rendered from the engine changes with it, and a hand edit is caught.
 
 | Parameter | Type | Default | Looser when | Meaning |
 |---|---|---|---|---|
-| `extra_roles` | list | `[]` | — | Roles rendered beyond the five every project gets: ux-reviewer, architect |
+| `extra_roles` | list | `[]` | — | Roles rendered beyond the six every project gets: ux-reviewer |
 | `models` | table | `{}` | — | A role's model, over the engine's choice for it |
 | `efforts` | table | `{}` | — | A role's effort, over the engine's choice for it |
 | `max_turns` | table | `{}` | — | A role's turn cap; a role without one renders `maxTurns: false` |
 | `load_claude_md` | list | `[]` | — | Roles rendered with `omitClaudeMd: false` |
 | `authority` | str | `""` | — | What a brief answers to (a plan, a spec); empty renders "the plan or spec it names" |
 | `scoped_test` | str | `""` | — | The command that runs only the tests a unit touches |
-| `full_gate` | str | `""` | — | The command that runs the project's full gate |
+| `full_gate` | str | `""` | — | The command that runs the project's local suite |
+| `docs_paths` | list | `["**/*.md", "!.claude/**", "!**/skills/**", "!**/templates/**", "!**/agents/**"]` | — | Paths whose changes alone never make the last local suite run stale; `build gate` runs only `govern check` for them (and `docs_gate`). Patterns are read in order, a `!` pattern excludes, the last match decides; a project whose code or tests read other Markdown adds `!` patterns or sets `docs_gate` |
+| `docs_gate` | str | `""` | — | A command run beside govern check when only docs_paths changed since a green run; a project whose tests read its docs names them here |
 | `senior_triggers` | list | `["security: credentials, keys, tokens, signing, sign-in and sessions, the code that decides who may read or change protected data, or input from outside the project (a download, an archive, pasted text). A product rule about who may do what is not security."]` | — | What sends a unit to senior-developer instead of developer |
 | `operator_rules` | list | `[]` | — | Rules the operator gives every role, rendered above the project's own |
 | `handback_checks` | list | `[]` | — | Lines the operator adds to every role's hand-back checklist, each `Key: text` |
@@ -805,7 +807,7 @@ The engine's agent roles and the coordinator's build rules are rendered into the
 | `high_risk_paths` | list | `[]` | — | Paths that make a phase high-risk, so qa-engineer runs beside code-reviewer |
 | `visual_paths` | list | `[]` | — | Paths whose change means someone must look at the running product |
 | `escalate_after` | int | `2` | — | Failed or handed-back attempts by developer before a unit goes to senior-developer |
-| `unit_gate` | str | `"scoped"` | — | What a unit runs before it hands back: `scoped` (its own tests; the coordinator runs the full gate after the merge) or `full` |
+| `unit_gate` | str | `"phase"` | — | What a unit runs before it hands back: `phase` (its own tests; the coordinator runs the local suite once per phase, before review), `scoped` (its own tests, then build gate; the coordinator runs the local suite after each merge) or `full` |
 | `housekeeping` | bool | `true` | — | Whether the rules tell the coordinator to launch technical-writer and close the phase when a fix pass closes |
 | `fast_checks` | list | `[]` | — | Cheap whole-tree commands developer and senior-developer run once after their scoped tests and report; not rendered under `unit_gate = "full"` |
 | `worktree_setup` | str | `""` | — | One command the code and writing roles run in their worktree right after the Base merge, before the first edit |

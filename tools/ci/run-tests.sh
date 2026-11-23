@@ -3,43 +3,57 @@
 # Python the engine supports) in a Linux container, then the plugin's validation, then any extra
 # local checks: the gate before merging an engine change.
 #
-#     tools/ci/run-tests.sh            # host + 3.11 in Docker
-#     tools/ci/run-tests.sh --host     # host only
+#     tools/ci/run-tests.sh                # host + 3.11 in Docker, every test
+#     tools/ci/run-tests.sh --host         # host only, without the e2e tier (the launcher and
+#                                          # install tests: modules marked TIER = "e2e")
+#     tools/ci/run-tests.sh --host --all   # host only, every test
 #
 # Extra local checks: every executable tools/ci/extra.d/*.sh, if that directory exists, run last
-# from the repo root with this script's arguments (so `--host` reaches them too).
+# from the repo root with this script's arguments (so `--host` and `--all` reach them too).
 set -eu
 # A test that reads stdin must not wait on the caller's open pipe.
 exec </dev/null
 # A test must never see the owner's real profile.
 unset CLAUDE_CONFIG_DIR
 cd "$(dirname "$0")/../.."
-mode=${1:-}
+host=0
+all=0
+for arg in "$@"; do
+  case $arg in
+    --host) host=1 ;;
+    --all) all=1 ;;
+  esac
+done
 
 echo "== host: $(python3 --version)"
-python3 tools/ci/parallel_tests.py engine/tests
+if [ "$all" = 1 ]; then
+  python3 tools/ci/parallel_tests.py engine/tests
+else
+  python3 tools/ci/parallel_tests.py engine/tests --skip-tier e2e
+fi
 echo "== governance: govern check"
 PYTHONPATH=engine python3 -m govern check || { echo "govern check failed" >&2; exit 1; }
 
-if [ "$mode" != "--host" ]; then
+if [ "$host" = 0 ]; then
   if ! command -v docker >/dev/null 2>&1; then
     echo "docker not found: Python 3.11 not covered" >&2
     exit 1
   fi
   # In a linked worktree, `.git` is a file naming the main repo's git dir by absolute path: mount
   # that dir at the same path, or every git call in the container fails and git-backed tests break.
-  set --
+  # (Not `set --`: the extra checks below get this script's own arguments.)
+  mount=
   if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     # --path-format needs git 2.31+; older git prints the dir relative to here, so resolve it.
     C=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
       || C=$(cd "$(git rev-parse --git-common-dir)" 2>/dev/null && pwd) || C=
     case $C in
-      /*) set -- -v "$C":"$C":ro ;;
+      /*) mount=$C ;;
       *) echo "note: git common dir not found; a linked worktree's git tests may fail" >&2 ;;
     esac
   fi
   echo "== linux: python 3.11"
-  docker run --rm -v "$PWD":/w "$@" -w /w python:3.11-slim sh -c '
+  docker run --rm -v "$PWD":/w ${mount:+-v "$mount:$mount:ro"} -w /w python:3.11-slim sh -c '
     apt-get -qq update >/dev/null 2>&1 && apt-get -qq install -y git >/dev/null 2>&1
     git config --global user.email ci@example.invalid && git config --global user.name ci
     python tools/ci/parallel_tests.py engine/tests'
@@ -64,6 +78,6 @@ if [ -d tools/ci/extra.d ]; then
   for extra in tools/ci/extra.d/*.sh; do
     [ -x "$extra" ] || continue
     echo "== extra: $extra"
-    "$extra" ${mode:+"$mode"}
+    "$extra" "$@"
   done
 fi

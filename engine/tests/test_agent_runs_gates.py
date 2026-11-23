@@ -71,6 +71,25 @@ class ProducesGate(HookCase):
         self.assertIn("names", self.stop(final=f"All done.\nFull report: {ghost}")["reason"])
         self.assertIsNone(self.stop(final="All done. I wrote no report file."))
 
+    def test_the_run_row_says_whether_the_launch_had_a_produces_line(self):
+        ghost = self.work / "unit" / "report.md"
+        self.launch("Run date.")
+        self.assertEqual(self.stop(final=f"All done.\nFull report: {ghost}")["decision"], "block")
+        self.stop(final=f"All done.\nFull report: {ghost}")
+        self.assertIsNone(self.stop(final=f"All done.\nFull report: {ghost}"))
+        bare = self.rows()[-1]
+        self.assertIs(bare["contract"], False)
+        self.assertEqual(bare["gate_blocks"], 2)
+        advice = agent_runs.suggestions([bare] * 3)
+        self.assertTrue(any("3 of them had no `Produces:` line" in line for line in advice), advice)
+        report = self.work / "dev-report.md"
+        self.launch(f"Do it.\nProduces: {report}", agent="a2")
+        report.write_text("the report")
+        self.assertIsNone(self.stop(agent="a2"))
+        row = self.rows()[-1]
+        self.assertEqual(row["agent"], "a2")
+        self.assertIs(row["contract"], True)
+
     def test_ordinary_sentences_are_not_claims(self):
         self.launch("Run date.")
         for final in ("Wrote engine/tests/test_roles.py and ran it.",
@@ -358,9 +377,9 @@ class ChecklistGate(HookCase):
         self.assertEqual(self.resolved_keys(Resolve.Chk("off", {})), {})
 
     def test_only_rendered_roles_are_checked(self):
-        self.assertNotIn("architect", self.resolved_keys(Resolve.Chk("warn", {})))
-        self.assertIn("architect", self.resolved_keys(
-            Resolve.Chk("warn", {"extra_roles": ["architect"]})))
+        self.assertNotIn("ux-reviewer", self.resolved_keys(Resolve.Chk("warn", {})))
+        self.assertIn("ux-reviewer", self.resolved_keys(
+            Resolve.Chk("warn", {"extra_roles": ["ux-reviewer"]})))
 
     def test_a_bad_handback_entry_is_not_demanded(self):
         keys = self.resolved_keys(Resolve.Chk("warn", {"handback_checks": [

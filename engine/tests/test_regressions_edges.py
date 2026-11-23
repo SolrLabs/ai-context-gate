@@ -16,6 +16,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import profile_guard  # noqa: E402,F401
 
 from regressions_support import *  # noqa: E402,F401,F403
+from source_version import SOURCE_VERSION  # noqa: E402
+
+TIER = "e2e"
+
+# The release after this engine's, in its series: what a beta on the channel leads to.
+NEXT_PATCH = f"{SERIES}.{int(RELEASE.split('.')[2]) + 1}"
 
 class MalformedRange(Base):
     def test_finding_not_crash(self):
@@ -408,6 +414,9 @@ class EnginePin(Base):
         src = self.tmp / "source"
         shutil.copytree(ENGINE / "govern", src / "engine" / "govern",
                         ignore=shutil.ignore_patterns("__pycache__"))
+        init = src / "engine" / "govern" / "__init__.py"   # the tag carries the version it names
+        wtext(init, init.read_text(encoding="utf-8").replace(
+            f'__version__ = "{SOURCE_VERSION}"', f'__version__ = "{__version__}"'))
         git = lambda *a: subprocess.run(
             ["git", "-C", str(src), "-c", "user.email=t@t", "-c", "user.name=t",
              "-c", "tag.gpgSign=false", "-c", "commit.gpgSign=false", *a],
@@ -555,6 +564,316 @@ class EnginePin(Base):
             self.assertIn(f"running the committed pin {__version__}; govern beta off to clear it",
                           res.stderr)
             self.assertTrue(self._which(entry, env).endswith(__version__))
+
+    # The committed beta channel: [governance] channel = "beta" runs, on every machine, the
+    # newest beta newer than the pinned release, from those installed and those tagged at the
+    # source. The source is a local repository holding only tags: no network.
+    def _channel(self, w, channel="beta", source=None):
+        cfg = w.root / CFG
+        lines = "" if channel is None else f'channel = "{channel}"\n'
+        if source is not None:
+            lines += f'source = "{Path(source).as_posix()}"\n'
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace("schema = 1\n",
+                                                            "schema = 1\n" + lines, 1))
+
+    def _tag_source(self, *tags):
+        """A source of tags only, on one empty commit: `ls-remote` lists them, and a clone of
+        any of them carries no engine, so fetching one fails."""
+        src = self.tmp / "tags"
+        src.mkdir(exist_ok=True)
+        for args in ([] if (src / ".git").is_dir() else [["init", "-q"],
+                                                          ["commit", "-q", "--allow-empty",
+                                                           "-m", "tags"]]) \
+                + [["tag", tag] for tag in tags]:
+            subprocess.run(["git", "-C", str(src), "-c", "user.email=t@t", "-c", "user.name=t",
+                            "-c", "tag.gpgSign=false", "-c", "commit.gpgSign=false", *args],
+                           check=True, capture_output=True, cwd=self.tmp,
+                           env={**os.environ, "HOME": str(self.tmp)})
+        return src
+
+    def _channel_cache(self, w, src) -> Path:
+        digest = hashlib.sha256(Path(src).as_posix().encode("utf-8")).hexdigest()[:12]
+        return w.home / ".local" / "state" / "context-gate" / f"channel-{digest}.json"
+
+    def test_channel_beta_runs_the_newest_newer_beta(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        self._engines(w, (RELEASE, f"{NEXT_PATCH}-beta.2", f"{NEXT_PATCH}-beta.3",
+                          f"{RELEASE}-beta.7"))
+        src = self._tag_source(f"v{NEXT_PATCH}-beta.2", f"v{RELEASE}-beta.7")
+        self._channel(w, source=src)
+        res = self._check(entry, env)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotIn("installing engine", res.stderr)
+        self.assertTrue(self._which(entry, env).endswith(f"{NEXT_PATCH}-beta.3"))
+
+    def test_channel_runs_the_pin_once_a_release_passes_every_beta(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        self._engines(w, (NEXT_PATCH, f"{NEXT_PATCH}-beta.2", f"{NEXT_PATCH}-beta.3",
+                          f"{RELEASE}-beta.7"))
+        src = self._tag_source(f"v{NEXT_PATCH}-beta.2", f"v{NEXT_PATCH}-beta.3")
+        self._channel(w, source=src)
+        cfg = w.root / CFG
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(f'engine = "{RELEASE}"',
+                                                            f'engine = "{NEXT_PATCH}"'))
+        self.assertTrue(self._which(entry, env).endswith(NEXT_PATCH))
+
+    def test_channel_ignores_a_tag_that_is_no_beta(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        self._engines(w, (RELEASE,))
+        src = self._tag_source(f"v{NEXT_PATCH}-beta", f"v{NEXT_PATCH}-beta.03x",
+                               f"v{NEXT_PATCH}-beta.0", f"v{NEXT_PATCH}-beta.01",
+                               f"v{NEXT_PATCH}", "vnot-a-version")
+        self._channel(w, source=src)
+        res = self._check(entry, env)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotIn("installing engine", res.stderr)
+        self.assertTrue(self._which(entry, env).endswith(RELEASE))
+        cache = json.loads(self._channel_cache(w, src).read_text(encoding="utf-8"))
+        self.assertEqual(cache["betas"], [])
+
+    def test_stable_channel_never_runs_a_beta(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        self._engines(w, (RELEASE, f"{NEXT_PATCH}-beta.3"))
+        src = self._tag_source(f"v{NEXT_PATCH}-beta.3", f"v{NEXT_PATCH}-beta.4")
+        cfg = w.root / CFG
+        base = cfg.read_text(encoding="utf-8")
+        for channel in (None, "stable"):
+            with self.subTest(channel=channel):
+                wtext(cfg, base)
+                self._channel(w, channel, source=src)
+                res = self._check(entry, env)
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertNotIn("beta", res.stderr)
+                self.assertTrue(self._which(entry, env).endswith(RELEASE))
+                self.assertFalse(self._channel_cache(w, src).exists())   # never asked
+
+    def test_a_local_beta_wins_over_the_channel(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        self._engines(w, (RELEASE, f"{NEXT_PATCH}-beta.2", f"{NEXT_PATCH}-beta.3"))
+        self._channel(w, source=self._tag_source())
+        self._local(w, f'[governance]\nengine = "{NEXT_PATCH}-beta.2"\n')
+        self.assertTrue(self._which(entry, env).endswith(f"{NEXT_PATCH}-beta.2"))
+
+    def test_an_unreachable_source_runs_the_newest_installed_beta(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        self._engines(w, (RELEASE, f"{NEXT_PATCH}-beta.2"))
+        self._channel(w, source=self.tmp / "gone")
+        res = self._check(entry, env)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotIn("Traceback", res.stderr)
+        self.assertEqual(res.stderr.count("could not be asked"), 1, res.stderr)
+        res = self._check(entry, env)           # the same hour: not asked, so not said
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotIn("could not be asked", res.stderr)
+        self.assertTrue(self._which(entry, env).endswith(f"{NEXT_PATCH}-beta.2"))
+
+    def test_the_source_is_asked_once_an_hour(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        self._engines(w, (RELEASE,))
+        src = self._tag_source(f"v{RELEASE}-beta.1")      # not newer: nothing to fetch
+        self._channel(w, source=src)
+        self.assertEqual(self._check(entry, env).returncode, 0)
+        cache = self._channel_cache(w, src)
+        first = json.loads(cache.read_text(encoding="utf-8"))
+        self.assertEqual(first["betas"], [f"{RELEASE}-beta.1"])
+        self._tag_source(f"v{RELEASE}-beta.2")
+        self.assertEqual(self._check(entry, env).returncode, 0)
+        self.assertEqual(json.loads(cache.read_text(encoding="utf-8")), first)  # not asked
+        first["checked_at"] -= 7200
+        wtext(cache, json.dumps(first))
+        self.assertEqual(self._check(entry, env).returncode, 0)
+        again = json.loads(cache.read_text(encoding="utf-8"))
+        self.assertEqual(again["betas"], [f"{RELEASE}-beta.1", f"{RELEASE}-beta.2"])
+        self.assertGreater(again["checked_at"], time.time() - 600)
+
+    def test_a_failed_fetch_runs_the_pin(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        self._engines(w, (RELEASE,))
+        beta = f"{NEXT_PATCH}-beta.3"
+        self._channel(w, source=self._tag_source(f"v{beta}"))     # the tag holds no engine
+        res = self._check(entry, env)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotIn("Traceback", res.stderr)
+        self.assertNotIn("error:", res.stderr)
+        said = [line for line in res.stderr.splitlines() if f"could not install beta {beta}" in line]
+        self.assertEqual(len(said), 1, res.stderr)
+        self.assertIn(f"running the committed pin {RELEASE}", said[0])
+        self.assertFalse((layout.engines_dir(w.home) / beta).exists())
+        res = self._check(entry, env)           # the same hour: not fetched again
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotIn("installing engine", res.stderr)
+        self.assertTrue(self._which(entry, env).endswith(RELEASE))
+
+    def _run_saying(self, entry, env) -> tuple[str, str]:
+        """One run of the entry point: the engine it ran and what it said on stderr."""
+        probe = ("import sys, runpy\n"
+                 "try:\n"
+                 f"    runpy.run_path({str(entry)!r}, run_name='__main__')\n"
+                 "except SystemExit: pass\n"
+                 "print([p for p in sys.path if 'engines' in p][0])")
+        res = subprocess.run([sys.executable, "-c", probe], env=env, capture_output=True,
+                             text=True, cwd=env["HOME"])
+        return Path(res.stdout.strip()).name, res.stderr
+
+    def test_the_channel_says_which_beta_it_runs_once_an_hour(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        beta = f"{NEXT_PATCH}-beta.2"
+        self._engines(w, (RELEASE, beta))
+        self._channel(w, source=self._tag_source())
+        line = f"context-gate: running beta {beta} from the beta channel (committed pin {RELEASE})"
+        ran, said = self._run_saying(entry, env)
+        self.assertEqual(ran, beta, said)
+        self.assertEqual(said.count(line), 1, said)
+        ran, said = self._run_saying(entry, env)        # the same hour: not said again
+        self.assertEqual(ran, beta, said)
+        self.assertNotIn("running beta", said)
+        stamp = self._stamp(w, beta)
+        old = time.time() - 7200
+        os.utime(stamp, (old, old))
+        self.assertIn(line, self._run_saying(entry, env)[1])
+
+    def test_the_channel_on_the_pin_says_no_beta_line(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        self._engines(w, (RELEASE, f"{RELEASE}-beta.7"))           # not newer than the pin
+        self._channel(w, source=self._tag_source(f"v{RELEASE}-beta.7"))
+        for _ in range(2):
+            ran, said = self._run_saying(entry, env)
+            self.assertEqual(ran, RELEASE, said)
+            self.assertNotIn("running beta", said)
+        self.assertFalse(self._stamp(w, f"{RELEASE}-beta.7").exists())
+
+    def test_a_failed_fetch_runs_the_newest_installed_beta_all_hour(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        older, newest = f"{NEXT_PATCH}-beta.2", f"{NEXT_PATCH}-beta.3"
+        self._engines(w, (RELEASE, older))
+        self._channel(w, source=self._tag_source(f"v{newest}"))   # the tag holds no engine
+        ran, said = self._run_saying(entry, env)
+        self.assertEqual(ran, older, said)
+        failed = [line for line in said.splitlines() if f"could not install beta {newest}" in line]
+        self.assertEqual(len(failed), 1, said)
+        self.assertIn(f"running the installed beta {older}", failed[0])
+        self.assertNotIn("committed pin", failed[0])
+        self.assertNotIn("Traceback", said)
+        ran, said = self._run_saying(entry, env)        # the same hour: the same engine
+        self.assertEqual(ran, older, said)
+        self.assertNotIn("installing engine", said)
+        self.assertFalse((layout.engines_dir(w.home) / newest).exists())
+
+    def test_channel_installs_a_newer_beta_from_the_source(self):
+        beta = f"{NEXT_PATCH}-beta.3"
+        src = make_source(self.tmp, (beta,))
+        w = self.ws()
+        entry, env = self._installed(w)
+        self._engines(w, (RELEASE,))
+        self._channel(w, source=src)
+        res = self._check(entry, env)           # the beta's own pin check takes the channel
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertIn(f"installing engine {beta}", res.stderr)
+        self.assertTrue((layout.engines_dir(w.home) / beta / "govern" / "cli.py").is_file())
+        self.assertFalse((layout.claude_dir(w.home) / "skills" / layout.BETA_PLUGIN).exists())
+        self.assertTrue(self._which(entry, env).endswith(beta))
+
+    def test_the_engine_takes_a_newer_beta_only_on_the_beta_channel(self):
+        w = self.ws()
+        with mock.patch.object(config, "__version__", f"{NEXT_PATCH}-beta.1"):
+            code, _, err = w.run("check")
+            self.assertEqual(code, 2)
+            self.assertIn("but this is engine", err)
+            self._channel(w)
+            code, out, err = w.run("check")
+        self.assertEqual(code, 0, err + out)
+
+    # [governance] engine_dir: the engine's own repository runs the engine in its tree.
+    def _in_tree(self, w, engine_dir="eng", copy=True):
+        cfg = w.root / layout.GOV_DIR / "config.toml"
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(
+            "[governance]\n", f'[governance]\nengine_dir = "{engine_dir}"\n', 1))
+        if copy:
+            shutil.copytree(ENGINE / "govern", w.root / "eng" / "govern",
+                            ignore=shutil.ignore_patterns("__pycache__"))
+
+    def _runs(self, entry, env, marker: str) -> str:
+        """The sys.path entry the launcher added that ends in `marker`."""
+        probe = ("import sys, runpy\n"
+                 "try:\n"
+                 f"    runpy.run_path({str(entry)!r}, run_name='__main__')\n"
+                 "except SystemExit: pass\n"
+                 f"print([p for p in sys.path if p.endswith({marker!r})][0])")
+        res = subprocess.run([sys.executable, "-c", probe], env=env, capture_output=True,
+                             text=True, cwd=env["HOME"])
+        return res.stdout.strip().splitlines()[-1]
+
+    def test_engine_dir_runs_the_tree_ahead_of_a_local_beta_and_the_pin(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        self._engines(w, (__version__, BETA))
+        self._local(w, f'[governance]\nengine = "{BETA}"\n')
+        self._in_tree(w)
+        self.assertEqual(Path(self._runs(entry, env, "eng")).resolve(),
+                         (w.root / "eng").resolve())
+
+    def test_engine_dir_does_not_need_the_pinned_engine(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        cfg = w.root / CFG
+        wtext(cfg, cfg.read_text(encoding="utf-8").replace(
+            f'engine = "{__version__}"', f'engine = "{SERIES}.999"'))
+        self._in_tree(w)
+        res = self._check(entry, env)
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+
+    def test_engine_dir_naming_no_engine_is_refused(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        self._in_tree(w, "missing", copy=False)
+        res = self._check(entry, env)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn(str(Path("missing") / "govern" / "cli.py"), res.stderr)
+        self.assertNotIn("Traceback", res.stderr)
+
+    def test_an_empty_engine_dir_is_unset(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        self._engines(w, (__version__,))
+        self._in_tree(w, "", copy=False)
+        res = self._check(entry, env)
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertNotIn("engine_dir", res.stderr)
+
+    def _refused(self, absolute):
+        w = self.ws()
+        entry, env = self._installed(w)
+        value = (w.root.parent / "x").as_posix() if absolute else "../x"
+        self._in_tree(w, value, copy=False)
+        res = self._check(entry, env)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("engine_dir must be a folder inside the project", res.stderr)
+        self.assertNotIn("Traceback", res.stderr)
+
+    def test_engine_dir_outside_the_project_is_refused(self):
+        self._refused(absolute=False)
+
+    def test_an_absolute_engine_dir_is_refused(self):
+        self._refused(absolute=True)
+
+    def test_govern_engine_wins_over_engine_dir(self):
+        w = self.ws()
+        entry, env = self._installed(w)
+        self._engines(w, (__version__,))
+        self._in_tree(w)
+        env = {**env, "GOVERN_ENGINE": str(layout.engines_dir(w.home) / __version__)}
+        self.assertTrue(self._which(entry, env).endswith(__version__))
 
 
 class OldLauncherSwitchCorrected(Base):

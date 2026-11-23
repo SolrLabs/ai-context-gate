@@ -55,6 +55,23 @@ def export(tag: str, paths: list[str], dest: Path) -> None:
         tar.extractall(dest, filter="data")
 
 
+def own_state(stage: Path, old: str, new: str) -> None:
+    """Name the staged copy, `new`, as the owner of the state its band declares (the same rewrite
+    as `govern.local_plugin._own_state`, which this tool cannot import): only the exact tokens
+    change, and a file with none is not rewritten."""
+    targets = [(p, f"plugin: '{old}'", f"plugin: '{new}'")
+               for p in sorted((stage / "hooks").glob("*.tsx"))]
+    targets.append((stage / "types" / "index.d.ts", f"'{old}': {{", f"'{new}': {{"))
+    for path, was, now in targets:
+        if not path.is_file():
+            continue
+        with open(path, encoding="utf-8", newline="") as fh:
+            text = fh.read()
+        if was in text:
+            with open(path, "w", encoding="utf-8", newline="") as fh:
+                fh.write(text.replace(was, now))
+
+
 def main() -> int:
     args = sys.argv[1:]
     if not args or not re.fullmatch(r"v\d+\.\d+\.\d+(-beta\.[1-9]\d*)?", args[0]):
@@ -83,6 +100,7 @@ def main() -> int:
         manifest["defaultEnabled"] = False
         if beta:
             manifest["name"] = f"{name}-beta"
+            own_state(stage, name, manifest["name"])
         (stage / ".claude-plugin" / "plugin.json").write_text(
             json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         home = Path(os.environ.get("HOME") or Path.home())

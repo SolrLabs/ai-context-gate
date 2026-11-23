@@ -120,5 +120,167 @@ class PluginBehind(unittest.TestCase):
         self.assertIn("plugin (user) is 0.6.1", json.loads(res.stdout)["systemMessage"])
 
 
+class BetaChannel(unittest.TestCase):
+    """On `channel = "beta"` the plugin Claude Code loads is the beta channel's."""
+    BETA_KEY = layout.BETA_CHANNEL_PLUGIN_ID
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.home = self.tmp / "home"
+        self.project = self.tmp / "project"
+        self.home.mkdir()
+        (self.project / layout.GOV_DIR).mkdir(parents=True)
+        self.profile = layout.claude_dir(self.home)
+        self.channel("beta")
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def channel(self, value: str) -> None:
+        (self.project / layout.CONFIG).write_text(
+            f'[governance]\nengine = "0.9.4"\nschema = 1\nchannel = "{value}"\n',
+            encoding="utf-8")
+
+    def behind(self):
+        return notice.plugin_behind(self.project, self.home)
+
+    def record2(self, **by_id) -> None:
+        path = self.profile / "plugins" / "installed_plugins.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"version": 2, "plugins": by_id}), encoding="utf-8")
+
+    def test_beta_entry_behind_names_the_beta_channel(self):
+        self.record2(**{self.BETA_KEY: [{"scope": "user", "version": "0.9.3"}]})
+        self.assertEqual(self.behind(), (
+            "context-gate's plugin (user) is 0.9.3; this project runs 0.9.4. Run claude plugin "
+            "marketplace update context-gate-beta, then claude plugin update "
+            "context-gate@context-gate-beta --scope user, then /exit and start claude again "
+            "(claude -c keeps the old plugin)."))
+
+    def test_stable_entry_behind_is_not_reported_on_the_beta_channel(self):
+        self.record2(**{KEY: [{"scope": "user", "version": "0.9.3"}]})
+        self.assertIsNone(self.behind())
+
+    def test_with_both_entries_only_the_beta_one_is_reported(self):
+        self.record2(**{KEY: [{"scope": "user", "version": "0.9.2"}],
+                        self.BETA_KEY: [{"scope": "user", "version": "0.9.3"}]})
+        out = self.behind()
+        self.assertEqual(len(out.splitlines()), 1)
+        self.assertIn("is 0.9.3;", out)
+        self.assertIn("context-gate@context-gate-beta", out)
+
+    def test_another_channel_value_keeps_the_stable_ids(self):
+        self.channel("stable")
+        self.record2(**{KEY: [{"scope": "user", "version": "0.9.3"}]})
+        self.assertIn("update context-gate@context-gate --scope user", self.behind())
+
+
+class LocalBetaWithEngineDir(unittest.TestCase):
+    """notice.local_beta follows the launcher: a set engine_dir runs the tree, not local.toml."""
+    BETA = "9.9.0-beta.8"
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.home = self.tmp / "home"
+        self.project = self.tmp / "project"
+        (self.project / layout.GOV_DIR).mkdir(parents=True)
+        engine = layout.engines_dir(self.home) / self.BETA / "govern"
+        engine.mkdir(parents=True)
+        (engine / "cli.py").write_text("", encoding="utf-8")
+        (self.project / layout.LOCAL).write_text(
+            f'[governance]\nengine = "{self.BETA}"\n', encoding="utf-8")
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def config(self, extra: str) -> None:
+        (self.project / layout.CONFIG).write_text(
+            f'[governance]\nengine = "9.9.0"\nschema = 1\n{extra}', encoding="utf-8")
+
+    def test_the_beta_is_named_without_engine_dir(self):
+        self.config("")
+        self.assertEqual(notice.local_beta(self.project, self.home), self.BETA)
+
+    def test_an_empty_engine_dir_is_unset(self):
+        self.config('engine_dir = ""\n')
+        self.assertEqual(notice.local_beta(self.project, self.home), self.BETA)
+
+    def test_engine_dir_set_means_no_local_beta(self):
+        self.config('engine_dir = "engine"\n')
+        self.assertIsNone(notice.local_beta(self.project, self.home))
+
+
+class ChannelPlugin(unittest.TestCase):
+    """notice.channel_plugin: a beta-channel project whose session loads the wrong plugin."""
+    BETA = layout.BETA_CHANNEL_PLUGIN_ID
+    STABLE = layout.PLUGIN_ID
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.home = self.tmp / "home"
+        self.project = self.tmp / "project"
+        self.home.mkdir()
+        (self.project / layout.GOV_DIR).mkdir(parents=True)
+        self.config('channel = "beta"\n')
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def config(self, extra: str) -> None:
+        (self.project / layout.CONFIG).write_text(
+            f'[governance]\nengine = "0.9.4"\nschema = 1\n{extra}', encoding="utf-8")
+
+    def settings(self, *ids: str) -> None:
+        path = layout.claude_dir(self.home) / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"enabledPlugins": {i: True for i in ids}}), encoding="utf-8")
+
+    def say(self):
+        return notice.channel_plugin(self.project, self.home)
+
+    def test_only_the_stable_plugin_enabled_names_the_beta_and_the_commands(self):
+        self.settings(self.STABLE)
+        out = self.say()
+        self.assertEqual(len(out.splitlines()), 1)
+        self.assertIn(self.BETA, out)
+        self.assertIn("claude plugin marketplace update context-gate-beta", out)
+        self.assertIn(f"claude plugin install {self.BETA} --scope local", out)
+        self.assertIn(f"claude plugin disable {self.STABLE} --scope local", out)
+        self.assertIn("/exit and start claude again", out)
+
+    def test_no_plugin_enabled_has_no_disable_command(self):
+        self.settings()
+        out = self.say()
+        self.assertIn(f"claude plugin install {self.BETA} --scope local", out)
+        self.assertNotIn("disable", out)
+
+    def test_both_enabled_says_every_hook_runs_twice(self):
+        self.settings(self.STABLE, self.BETA)
+        out = self.say()
+        self.assertIn("every hook runs twice", out)
+        self.assertIn(f"claude plugin disable {self.STABLE} --scope local", out)
+        self.assertNotIn("install", out)
+
+    def test_only_the_beta_plugin_enabled_is_silent(self):
+        self.settings(self.BETA)
+        self.assertIsNone(self.say())
+
+    def test_no_user_settings_file_is_silent(self):
+        self.assertIsNone(self.say())
+
+    def test_the_stable_channel_is_silent(self):
+        self.config("")
+        self.settings(self.STABLE)
+        self.assertIsNone(self.say())
+
+    def test_an_unreadable_config_is_silent(self):
+        self.settings(self.STABLE)
+        (self.project / layout.CONFIG).write_bytes(b"\xff\xfe[governance")
+        self.assertIsNone(self.say())
+
+
 if __name__ == "__main__":
     unittest.main()

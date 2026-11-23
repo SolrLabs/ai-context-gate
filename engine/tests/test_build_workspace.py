@@ -5,6 +5,7 @@ which is its own git repository in a folder the root's `.gitignore` lists.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import unittest
@@ -18,6 +19,7 @@ import profile_guard  # noqa: E402,F401
 from build_support import *  # noqa: E402,F401,F403
 from base_support import PROJECT, TEAM_CONFIG, TEAM_REGISTRY, Tree  # noqa: E402
 from govern import __version__  # noqa: E402
+from fixture_cache import copy_of  # noqa: E402
 
 MEMBERS = (("alpha", "A", 100), ("beta", "B", 200))
 
@@ -33,24 +35,36 @@ class Space(Tree):
         member's name to a folder name that is not the name itself."""
         super().__init__(tmp / "space", tmp / "home")
         self.dirs = dirs or {}
-        rows = [(n, self.dirs.get(n, n), p, lo) for n, p, lo in MEMBERS] \
-            + ([("gamma", "gamma", "G", 300)] if plain else [])
-        self.write(layout.CONFIG, TEAM_CONFIG.format(version=__version__, extra=extra))
-        self.write("projects.toml", TEAM_REGISTRY + "".join(
-            PROJECT.format(name=n, dir=d, prefix=p, lo=lo, hi=lo + 99) for n, d, p, lo in rows))
-        if repos:
-            self.write(".gitignore", "".join(f"{self.dirs.get(n, n)}/\n" for n, _, _ in MEMBERS))
-        if plain:
-            self.write("gamma/readme.txt", "gamma\n")
-        if not repos:
-            for name, _, _ in MEMBERS:
-                self.write(f"{self.dirs.get(name, name)}/readme.txt", name + "\n")
-        self.init()
-        self.commit("start", index=False)
-        for name, _, _ in MEMBERS if repos else ():
-            self.write(f"{self.member(name).name}/readme.txt", name + "\n")
-            self.init(at=self.member(name))
-            self.commit("start", at=self.member(name), index=False)
+        key = ("space", plain, repos, extra, tuple(sorted(self.dirs.items())))
+        copy_of(key, tmp, lambda template: self._build(template, plain, repos, extra))
+
+    def _build(self, template: Path, plain: bool, repos: bool, extra: str) -> None:
+        """The tree, made once per process in a directory of its own."""
+        root, home = self.root, self.home
+        self.root, self.home = template / "space", template / "home"
+        try:
+            rows = [(n, self.dirs.get(n, n), p, lo) for n, p, lo in MEMBERS] \
+                + ([("gamma", "gamma", "G", 300)] if plain else [])
+            self.write(layout.CONFIG, TEAM_CONFIG.format(version=__version__, extra=extra))
+            self.write("projects.toml", TEAM_REGISTRY + "".join(
+                PROJECT.format(name=n, dir=d, prefix=p, lo=lo, hi=lo + 99)
+                for n, d, p, lo in rows))
+            if repos:
+                self.write(".gitignore",
+                           "".join(f"{self.dirs.get(n, n)}/\n" for n, _, _ in MEMBERS))
+            if plain:
+                self.write("gamma/readme.txt", "gamma\n")
+            if not repos:
+                for name, _, _ in MEMBERS:
+                    self.write(f"{self.dirs.get(name, name)}/readme.txt", name + "\n")
+            self.init()
+            self.commit("start", index=False)
+            for name, _, _ in MEMBERS if repos else ():
+                self.write(f"{self.member(name).name}/readme.txt", name + "\n")
+                self.init(at=self.member(name))
+                self.commit("start", at=self.member(name), index=False)
+        finally:
+            self.root, self.home = root, home
 
     def member(self, name: str) -> Path:
         return self.root / self.dirs.get(name, name)
@@ -60,6 +74,12 @@ class Space(Tree):
 
 
 class Workspace(Case):
+    def setUp(self) -> None:
+        super().setUp()
+        env = mock.patch.dict(os.environ, {"GOVERN_DRIVE": "1"})    # a driver session
+        env.start()
+        self.addCleanup(env.stop)
+
     def space(self, **kw) -> Space:
         self.w = Space(self.tmp, **kw)
         return self.w

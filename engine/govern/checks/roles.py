@@ -14,14 +14,14 @@ from govern.text import read
        summary="The engine's agent roles and the coordinator's build rules are rendered into "
                "the project, and each rendered file matches what `agents render` would write.",
        question="Should the engine render its standard agent roles (developer, senior "
-                "developer, code reviewer, QA engineer, technical writer) and the coordinator's "
+                "developer, code reviewer, QA engineer, technical writer, architect) and the coordinator's "
                 "build rules into this project, with your models, commands and rules filled in?",
        rationale="A role copied by hand drifts from the standard the day after it is copied; "
                  "one rendered from the engine changes with it, and a hand edit is caught.",
        params={
            "extra_roles": Param("list", [],
-                                "Roles rendered beyond the five every project gets: "
-                                "ux-reviewer, architect"),
+                                "Roles rendered beyond the six every project gets: "
+                                "ux-reviewer"),
            "models": Param("table", {}, "A role's model, over the engine's choice for it"),
            "efforts": Param("table", {}, "A role's effort, over the engine's choice for it"),
            "max_turns": Param("table", {},
@@ -31,7 +31,16 @@ from govern.text import read
                               "What a brief answers to (a plan, a spec); empty renders "
                               f"\"{roles.NO_AUTHORITY}\""),
            "scoped_test": Param("str", "", "The command that runs only the tests a unit touches"),
-           "full_gate": Param("str", "", "The command that runs the project's full gate"),
+           "full_gate": Param("str", "", "The command that runs the project's local suite"),
+           "docs_paths": Param("list", roles.DOCS_PATHS,
+                               "Paths whose changes alone never make the last local suite run "
+                               "stale; `build gate` runs only `govern check` for them (and "
+                               "`docs_gate`). Patterns are read in order, a `!` pattern "
+                               "excludes, the last match decides; a project whose code or tests "
+                               "read other Markdown adds `!` patterns or sets `docs_gate`"),
+           "docs_gate": Param("str", "", "A command run beside govern check when only docs_paths "
+                              "changed since a green run; a project whose tests read its docs "
+                              "names them here"),
            "senior_triggers": Param("list", list(roles.SENIOR_TRIGGERS),
                                     "What sends a unit to senior-developer instead of developer"),
            "operator_rules": Param("list", [],
@@ -59,9 +68,11 @@ from govern.text import read
            "escalate_after": Param("int", 2,
                                    "Failed or handed-back attempts by developer before a unit "
                                    "goes to senior-developer"),
-           "unit_gate": Param("str", "scoped",
-                              "What a unit runs before it hands back: `scoped` (its own tests; "
-                              "the coordinator runs the full gate after the merge) or `full`"),
+           "unit_gate": Param("str", "phase",
+                              "What a unit runs before it hands back: `phase` (its own tests; "
+                              "the coordinator runs the local suite once per phase, before "
+                              "review), `scoped` (its own tests, then build gate; the "
+                              "coordinator runs the local suite after each merge) or `full`"),
            "housekeeping": Param("bool", True,
                                  "Whether the rules tell the coordinator to launch "
                                  "technical-writer and close the phase when a fix pass closes"),

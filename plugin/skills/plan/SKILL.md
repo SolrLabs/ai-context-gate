@@ -10,13 +10,11 @@ allowed-tools: Bash(python3 .context-gate/bin/*), Bash(git status:*), Bash(git l
 Write the plan a coordinator can run without deciding anything new midway. A plan
 that leaves a design choice open comes back as a guess, and a guess costs a review round.
 
-You write the plan yourself.
-
 ## 1. What you are planning from
 
 `$ARGUMENTS` names a spec file or describes the work. Read the spec in full. If there is no spec
 and the work is more than one unit, say what you understand it to be and ask
-the user to confirm it. Ask only what the spec, the code or the decisions cannot settle.
+the user to confirm it. Ask only what the spec, code or decisions cannot settle.
 
 Read the project's build rules (`.claude/rules/context-gate-build.md`) for the roles this project
 has and the triggers that route work to `senior-developer`. If the file is missing, the
@@ -46,14 +44,12 @@ in one run.
 - Mark a unit **risky** when it holds a state machine or run loop, cancel, disable or timeout
   interplay, a held resource, or more than one exit path.
 - Size each unit: one holding more than one operation a user can call, or expected to add more than
-  about 500 lines with its tests, is split into units run in series or side by side. Each tool call
-  is re-read on every later turn, so one long run costs more than fresh ones.
+  about 500 lines with its tests, is split into units run in series or side by side.
 - Units that share no files may run side by side: say which.
 - A bug fix is marked **red-first**: the developer saves the failing test's output before the fix.
 
 **Routing.** Every unit goes to `developer` unless it meets one of the triggers in the build
-rules. Name the trigger when you route to `senior-developer`. Do not route by how hard a unit
-feels. A `senior-developer` unit holds only the work that sends it there; the rest is a `developer` unit.
+rules. Name the trigger for each `senior-developer` unit. A `senior-developer` unit holds only the work that sends it there; the rest is a `developer` unit.
 
 ## 3. Write it
 
@@ -109,20 +105,19 @@ Do this in order and fix what you find:
 4. **Done.** Each "Done when" line can be shown by a command or by the owner looking.
 5. **Routing.** Each `senior-developer` unit names a real trigger; nothing else is routed there.
 
-If the plan has more than one phase or a risky unit, launch `architect`: write a brief for it with
-`Produces:` on its last line, launch it with `Brief: <path>`, and rule on what it finds. Say which
-findings you did not accept and why. When `architect` is not rendered, offer `extra_roles` to turn
-it on.
+Launch `architect` only when a unit would go to `senior-developer` for a reason other than a
+trigger (its design is hard, not its subject) and settling that design could let `developer` build
+it: its brief names those units and asks for a design `developer` can follow, with `Produces:` on
+its last line. Never for a unit a trigger routes, nor when all units go to `developer`.
 
 ## 5. Hand over
 
-Tell the user where the plan is, each phase's unit count, what goes to `senior-developer` and why,
-and what you decided that they might decide differently.
+Tell the user where the plan is, each phase's unit count, what goes to `senior-developer` and why, whether `architect` ran and why, which units it moved to `developer`, and what they might decide differently.
+A table of units has an Agent column, `role (model)`, e.g. `senior-developer (opus)`, the model from the rendered roles table.
 
 The owner reviews the `## Agents` table before any build; fill its `Reviewed:` line only on the
 owner's word.
 
-Planning is a phase of its own. Before the build starts, commit the plan on a branch, push it, update the project's handoff and
-merge it the way the project merges: the build needs a clean tree.
+Planning is a phase of its own. Before the build starts, commit the plan on a branch, push it, update the handoff and merge it the way the project merges: the build needs a clean tree.
 
 The build starts with this plugin's `build` skill and the plan file. Never start it yourself.

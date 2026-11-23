@@ -49,9 +49,17 @@ def installed_betas(home: Path) -> list[str]:
 def local_beta(root: Path, home: Path) -> str | None:
     """The beta this project runs on this machine: the one its local.toml names, when that
     engine is installed (bin/govern runs the committed pin otherwise). None for a project with
-    no local.toml, which is every stable project."""
+    no local.toml, which is every stable project. None too when `[governance] engine_dir` is
+    set: bin/govern runs that tree's engine ahead of local.toml."""
     import tomllib
     try:
+        try:
+            with (root / layout.CONFIG).open("rb") as fh:
+                engine_dir = tomllib.load(fh).get("governance", {}).get("engine_dir")
+        except (OSError, ValueError, AttributeError):
+            engine_dir = None
+        if isinstance(engine_dir, str) and engine_dir:
+            return None
         with (root / layout.LOCAL).open("rb") as fh:
             beta = tomllib.load(fh)["governance"]["engine"]
     except (OSError, ValueError, KeyError, TypeError):
@@ -314,13 +322,18 @@ def plugin_behind(root: Path, home: Path) -> str | None:
     import tomllib
     try:
         with (root / layout.CONFIG).open("rb") as fh:
-            pin = tomllib.load(fh).get("governance", {}).get("engine")
+            governance = tomllib.load(fh).get("governance", {})
+        pin = governance.get("engine")
         if not isinstance(pin, str) or versions.is_beta(pin):
             return None
+        # On the beta channel the project loads the beta marketplace's plugin.
+        beta = governance.get("channel") == "beta"
+        plugin_id = layout.BETA_CHANNEL_PLUGIN_ID if beta else layout.PLUGIN_ID
+        marketplace = layout.BETA_MARKETPLACE if beta else layout.MARKETPLACE
         pin_key = versions.key(pin)
         record = json.loads((layout.claude_dir(home) / "plugins" / "installed_plugins.json")
                             .read_text(encoding="utf-8-sig"))
-        entries = record["plugins"][layout.PLUGIN_ID]
+        entries = record["plugins"][plugin_id]
         here = root.resolve()
         lines = []
         for entry in entries:
@@ -341,9 +354,40 @@ def plugin_behind(root: Path, home: Path) -> str | None:
                 continue
             lines.append(
                 f"{layout.DISPLAY_NAME}'s plugin ({scope}) is {version}; this project runs {pin}. "
-                f"Run claude plugin marketplace update {layout.MARKETPLACE}, then claude plugin "
-                f"update {layout.PLUGIN_ID} --scope {scope}, then /exit and start claude again "
+                f"Run claude plugin marketplace update {marketplace}, then claude plugin "
+                f"update {plugin_id} --scope {scope}, then /exit and start claude again "
                 f"(claude -c keeps the old plugin).")
         return "\n".join(lines) or None
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def channel_plugin(root: Path, home: Path) -> str | None:
+    """One line when the project is on the beta channel and this session's settings do not enable
+    the beta marketplace's plugin (it loads the stable one, or none), or enable both (every hook
+    runs twice). None for a project not on the beta channel, with no user settings file (a CI
+    runner), and when the right plugin alone is enabled: it never raises."""
+    import tomllib
+    try:
+        with (root / layout.CONFIG).open("rb") as fh:
+            if (tomllib.load(fh).get("governance") or {}).get("channel") != "beta":
+                return None
+        if not (layout.claude_dir(home) / "settings.json").is_file():
+            return None
+        enabled = enabled_plugins(root, home)
+        beta, stable = layout.BETA_CHANNEL_PLUGIN_ID, layout.PLUGIN_ID
+        has_beta, has_stable = enabled.get(beta) is True, enabled.get(stable) is True
+        disable = f"claude plugin disable {stable} --scope local"
+        restart = "/exit and start claude again"
+        if has_beta and not has_stable:
+            return None
+        if has_beta:
+            return (f"{layout.DISPLAY_NAME}: both {beta} and {stable} are enabled here, so every "
+                    f"hook runs twice and the stable skills still load. Run {disable}, then "
+                    f"{restart}.")
+        return (f"{layout.DISPLAY_NAME}: this project is on the beta channel but {beta} is not "
+                f"enabled in this session's settings. Run claude plugin marketplace update "
+                f"{layout.BETA_MARKETPLACE}, then claude plugin install {beta} --scope local, "
+                + (f"then {disable}, " if has_stable else "") + f"then {restart}.")
+    except Exception:
         return None

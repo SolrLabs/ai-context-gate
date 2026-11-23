@@ -24,6 +24,7 @@ sys.path.insert(0, str(ENGINE))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import profile_guard  # noqa: E402,F401
+from source_version import SOURCE_VERSION  # noqa: E402
 
 from govern import __version__, layout, local_plugin, profile  # noqa: E402
 
@@ -56,7 +57,7 @@ def release_tree(where: Path, version: str = VERSION, plugin_version: str | None
     shutil.copytree(ENGINE / "govern", where / "engine" / "govern", ignore=ignore)
     init = where / "engine" / "govern" / "__init__.py"
     wtext(init, init.read_text(encoding="utf-8").replace(
-        f'__version__ = "{__version__}"', f'__version__ = "{version}"'))
+        f'__version__ = "{SOURCE_VERSION}"', f'__version__ = "{version}"'))
     manifest = where / "plugin" / ".claude-plugin" / "plugin.json"
     data = json.loads(manifest.read_text(encoding="utf-8"))
     data["version"] = plugin_version or version
@@ -427,6 +428,35 @@ class LocalPlugin(unittest.TestCase):
     # A beta's plugin has a name of its own: context-gate-beta, with a marker for old launchers.
     def beta_out(self) -> Path:
         return self.skills / f"{layout.PLUGIN}-beta"
+
+    def test_a_beta_copy_owns_its_band_state(self):
+        tree = release_tree(self.tmp / "tree", BETA)
+        res = self.module(tree)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        old, new = f"plugin: '{layout.PLUGIN}'", f"plugin: '{layout.PLUGIN}-beta'"
+        old_key, new_key = f"'{layout.PLUGIN}': {{", f"'{layout.PLUGIN}-beta': {{"
+        files = [("hooks", "drive_band.tsx"), ("hooks", "drive_band.test.tsx"),
+                 ("types", "index.d.ts")]
+        for folder, fname in files:
+            src = (tree / "plugin" / folder / fname).read_text(encoding="utf-8")
+            got = (self.beta_out() / folder / fname).read_text(encoding="utf-8")
+            self.assertNotIn(old, got)
+            self.assertNotIn(old_key, got)
+            self.assertEqual(got, src.replace(old, new).replace(old_key, new_key))
+        band = (tree / "plugin" / "hooks" / "drive_band.tsx").read_text(encoding="utf-8")
+        self.assertGreater(band.count(old), 0)
+        self.assertEqual((self.beta_out() / "hooks" / "drive_band.tsx")
+                         .read_text(encoding="utf-8").count(new), band.count(old))
+        self.assertIn(new_key, (self.beta_out() / "types" / "index.d.ts")
+                      .read_text(encoding="utf-8"))
+
+    def test_a_stable_install_leaves_the_band_state_alone(self):
+        tree = release_tree(self.tmp / "tree")
+        res = self.module(tree)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        for folder, fname in [("hooks", "drive_band.tsx"), ("types", "index.d.ts")]:
+            self.assertEqual((self.out / folder / fname).read_bytes(),
+                             (tree / "plugin" / folder / fname).read_bytes())
 
     def test_a_beta_installs_under_its_own_name_and_leaves_a_marker(self):
         tree = release_tree(self.tmp / "tree", BETA)

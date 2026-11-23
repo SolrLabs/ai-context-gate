@@ -34,6 +34,11 @@ installed from there first, so a fresh clone or a CI runner bootstraps itself. A
 series ("0.4") runs the newest installed release in that series.
 .context-gate/local.toml, when present and naming an installed beta, runs that beta instead, on
 this machine only (`govern beta`); it is never committed.
+config.toml's [governance] channel = "beta", when local.toml names none, runs the newest beta
+newer than the pinned release, installed or tagged at the source (asked at most once an hour),
+on every machine and in CI; the pin when there is none, or when it cannot be installed.
+[governance] engine_dir, a path from the project root, runs the engine in that directory (for
+the engine's own repository), ahead of all of the above except $GOVERN_ENGINE.
 $GOVERN_ENGINE overrides all of this with an explicit engine directory, for engine development.
 
     python3 .context-gate/bin/govern beta [on [X.Y.Z-beta.N] | off]
@@ -75,6 +80,8 @@ PLUGIN_DIR = CLAUDE_DIR / "skills" / f"{PLUGIN}-beta"
 # link raises it with CONTEXT_GATE_FETCH_TIMEOUT.
 CLONE_TIMEOUT = 120
 FETCH_TIMEOUT_VAR = "CONTEXT_GATE_FETCH_TIMEOUT"
+# Seconds a `git ls-remote` of the source may take.
+LS_REMOTE_TIMEOUT = 30
 # Seconds after which a stage directory in ENGINES is what a killed install left. A live install
 # holds its stage for about a second, so nothing younger than this is touched.
 STAGE_AGE = 300
@@ -338,11 +345,25 @@ def _publish_hint(version: str) -> str:
             f"python3 tools/release/publish.py v{version} --public <dir> --push")
 
 
+class _FetchFailed(Exception):
+    """An engine could not be installed from its source; the message says why."""
+
+
 def bootstrap(version: str, source: str, then=None) -> Path:
+    """Install one engine release from its source, dying with the reason when it cannot be
+    (see _install)."""
+    try:
+        return _install(version, source, then)
+    except _FetchFailed as exc:
+        die(str(exc))
+
+
+def _install(version: str, source: str, then=None) -> Path:
     """Install one engine release from its source: the tag's engine/govern, read-only, copied
     beside its place and moved in whole (_place), so a copy that fails leaves no engine
     directory. An engine already installed is left as it is, whenever it got there. `then`,
-    when given, is called with the clone of the tag before the clone is deleted."""
+    when given, is called with the clone of the tag before the clone is deleted. Raises
+    _FetchFailed when the engine cannot be fetched or installed."""
     import subprocess
     import tempfile
     _refuse_option(source)
@@ -356,13 +377,16 @@ def bootstrap(version: str, source: str, then=None) -> Path:
             res = _run_clone(["git", "clone", "--quiet", "--depth", "1", "--branch",
                               f"v{version}", "--", source, tmp], limit)
         except subprocess.TimeoutExpired:
-            die(f"could not fetch engine v{version} from {source}: git clone did not finish in "
-                f"{limit} seconds; set {FETCH_TIMEOUT_VAR} to allow longer")
+            raise _FetchFailed(f"could not fetch engine v{version} from {source}: git clone did "
+                               f"not finish in {limit} seconds; set {FETCH_TIMEOUT_VAR} to allow "
+                               "longer") from None
         except OSError as exc:              # no git to run
-            die(f"could not fetch engine v{version} from {source}: {exc}")
+            raise _FetchFailed(f"could not fetch engine v{version} from {source}: {exc}") \
+                from None
         if res.returncode != 0:
             hint = f" — {_publish_hint(version)}" if BETA_RE.fullmatch(version) else ""
-            die(f"could not fetch engine v{version} from {source}: "
+            raise _FetchFailed(
+                f"could not fetch engine v{version} from {source}: "
                 + "; ".join(line.strip() for line in res.stderr.splitlines() if line.strip())
                 + hint)
         engine = Path(tmp) / "engine" / "govern"
@@ -371,12 +395,13 @@ def bootstrap(version: str, source: str, then=None) -> Path:
         except (OSError, ValueError):
             carried = ""
         if f'__version__ = "{version}"' not in carried:
-            die(f"{source} tag v{version} does not carry engine {version}")
+            raise _FetchFailed(f"{source} tag v{version} does not carry engine {version}")
         if not have:
             try:
                 _place(engine, version)
             except OSError as exc:
-                die(f"could not install engine {version} in {ENGINES} ({exc})")
+                raise _FetchFailed(f"could not install engine {version} in {ENGINES} ({exc})") \
+                    from None
         if then:
             then(Path(tmp))
     return dest
@@ -391,14 +416,29 @@ def engine_path() -> Path:
             gov = tomllib.load(fh).get("governance", {})
     except (OSError, tomllib.TOMLDecodeError) as exc:
         die(f"cannot read the engine pin from {GOV_DIR.name}/config.toml ({exc})")
-    pin, source = gov.get("engine"), gov.get("source")
+    pin, source, channel = gov.get("engine"), gov.get("source"), gov.get("channel")
     if not isinstance(pin, str) or not pin:
         die(f"{GOV_DIR.name}/config.toml has no [governance] engine pin")
     if not version_key(pin):
         die(f"{GOV_DIR.name}/config.toml engine pin {pin} is not a release")
+    engine_dir = gov.get("engine_dir")
+    if engine_dir is not None and not isinstance(engine_dir, str):
+        die(f"{GOV_DIR.name}/config.toml [governance] engine_dir must be a path string")
+    if engine_dir:                          # an empty string is unset, as `config` reads it
+        path = ROOT / engine_dir
+        if Path(engine_dir).is_absolute() or not path.resolve().is_relative_to(ROOT.resolve()):
+            die(f"[governance] engine_dir must be a folder inside the project, not {engine_dir}")
+        if not (path / "govern" / "cli.py").is_file():
+            die(f"[governance] engine_dir names {engine_dir}, but "
+                f"{path / 'govern' / 'cli.py'} does not exist")
+        return path
     beta = local_beta(pin)
     if beta:
         return beta
+    if channel == "beta":                   # any other value runs the pin, which refuses it
+        beta = channel_beta(pin, source if isinstance(source, str) and source else None)
+        if beta:
+            return beta
     if len(pin.split(".")) == 3:
         exact = ENGINES / pin
         if (exact / "govern" / "cli.py").is_file():
@@ -440,7 +480,10 @@ def upgrade(argv: list[str]) -> int:
         target = max(candidates, key=version_key)
     if BETA_RE.fullmatch(target):
         die(f"an upgrade takes a release, and {target} is a beta; "
-            f"run a beta with govern beta on {target}")
+            f"run a beta on this machine with govern beta on {target}; "
+            f"to move the whole project to betas: PYTHONPATH={ENGINES / target} "
+            f"python3 -P -m govern.installer channel --root . beta "
+            f"(govern beta on {target} installs that engine first)")
     if target == gov.get("engine"):
         print(f"already on context-gate {target}")
         return 0
@@ -704,15 +747,15 @@ def _source() -> str | None:
 def _source_betas(source: str | None) -> tuple[list[str], str | None]:
     """The betas tagged at the source, and None; or [] and why the source could not be asked,
     in git's own words: its first `fatal:` line, which names the cause, else its last line.
-    Only `beta on` with no version asks: nothing else looks for a beta there."""
+    Only `beta on` with no version and the beta channel (once an hour, channel_beta) ask. A
+    git that does not answer in LS_REMOTE_TIMEOUT seconds is killed with all it started."""
     import subprocess
     if not source:
         return [], f"{GOV_DIR.name}/config.toml names no [governance] source"
     _refuse_option(source)
     try:
-        res = subprocess.run(["git", "ls-remote", "--tags", "--refs", "--", source],
-                             capture_output=True, text=True, timeout=30,
-                             env=_git_env())
+        res = _run_clone(["git", "ls-remote", "--tags", "--refs", "--", source],
+                         LS_REMOTE_TIMEOUT)
     except (OSError, subprocess.SubprocessError) as exc:
         return [], f"{source}: {exc}"
     if res.returncode != 0:
@@ -747,6 +790,100 @@ def _newest_beta() -> str:
             f"newer than the release this project runs ({'.'.join(str(n) for n in runs)}); to "
             f"run it anyway: govern beta on {newest}")
     return newest
+
+
+# The beta channel: `[governance] channel = "beta"` in config.toml, for every machine and CI.
+CHANNEL_SECONDS = 3600
+
+
+def _channel_cache(source: str) -> Path:
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:12]
+    return HOME / ".local" / "state" / "context-gate" / f"channel-{digest}.json"
+
+
+def _cached_betas(source: str) -> tuple[list[str], float] | None:
+    """The betas the channel found tagged at the source less than an hour ago, and when it
+    asked; None when it is time to ask again (no record, an old, future or unreadable one, or
+    one for another source). Only names that are betas come back: the file is read as data."""
+    try:
+        data = json.loads(_channel_cache(source).read_text(encoding="utf-8"))
+        asked, betas = data["checked_at"], data["betas"]
+        fresh = 0 <= time.time() - asked < CHANNEL_SECONDS
+    except (OSError, ValueError, TypeError, KeyError, IndexError):
+        return None
+    if not fresh or data.get("source") != source or not isinstance(betas, list):
+        return None
+    return [b for b in betas if isinstance(b, str) and beta_key(b)], asked
+
+
+def _record_betas(source: str, betas: list[str], asked: float) -> None:
+    """Keep what the channel found at the source, replaced whole; one that cannot be written
+    is no error: the source is asked again on the next run."""
+    path = _channel_cache(source)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps({"source": source, "checked_at": asked, "betas": betas}),
+                       encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _channel_tags(source: str | None) -> list[str]:
+    """The betas tagged at the source, asked at most once an hour per source. A source that
+    cannot be asked gives [] after one line saying why, and that answer is kept for the hour
+    too, so the line comes at most once an hour. No source: []."""
+    if not source:
+        return []
+    cached = _cached_betas(source)
+    if cached is not None:
+        return cached[0]
+    there, why = _source_betas(source)
+    if why:
+        note(f"the source could not be asked for a newer beta ({why}); the beta channel takes "
+             "the newest installed")
+    there = sorted(set(there), key=beta_key)
+    _record_betas(source, there, time.time())
+    return there
+
+
+def channel_beta(pin: str, source: str | None) -> Path | None:
+    """The engine `channel = "beta"` runs: the newest beta, of those installed and those tagged
+    at the source, whose release is newer than the one the pin runs; None (the pin, silently)
+    when there is none. One not installed is installed from the source, its engine only (the
+    plugin comes from the beta marketplace); when that fails, the newest installed beta newer
+    than the pin (else None) after one line saying why and which runs, and that beta is not
+    tried again until the source is next asked, so every run that hour runs the same engine.
+    A beta that runs is said, as "running beta", once an hour per project and beta. Never
+    fatal."""
+    runs = _pinned_release()
+    newer = sorted((b for b in {*_installed_betas(), *_channel_tags(source)}
+                    if beta_key(b)[:3] > runs), key=beta_key)
+    if not newer:
+        return None
+    beta = newer[-1]
+    if not _holds_engine(ENGINES / beta):
+        if not source:
+            return None
+        try:
+            _install(beta, source)
+        except _FetchFailed as exc:
+            failed, beta = beta, next((b for b in reversed(newer[:-1])
+                                       if _holds_engine(ENGINES / b)), None)
+            note(f"could not install beta {failed} for the beta channel ({exc}); running "
+                 + (f"the installed beta {beta}" if beta else f"the committed pin {pin}"))
+            cached = _cached_betas(source)
+            if cached is not None:
+                _record_betas(source, [b for b in cached[0] if b != failed], cached[1])
+            if beta is None:
+                return None
+    if _beta_notice_due(beta):
+        note(f"running beta {beta} from the beta channel (committed pin {pin})")
+    return ENGINES / beta
 
 
 def _plugin_release() -> str | None:

@@ -61,9 +61,11 @@ def _file_owner(path) -> str:
 
 def _finished_scan(ctx, params, scope):
     """`(path, kind, status, age)` for each working file `finished-files` has something to say
-    about, in name order: kind `ticked` (every box ticked, status not finished), `uncommitted`
-    (finished, never committed) or `stale` (finished, committed, untouched past `max_days`; the
-    only kind with an age)."""
+    about, in name order: kind `built` (a plan whose every phase is closed, status not finished;
+    with its age), kind `ticked` (every box ticked, status not finished), `uncommitted`
+    (finished, never committed) or `stale` (finished, committed, untouched past
+    `max_days`). Kinds `built` and `stale` carry an age."""
+    from govern import build
     wf = ctx.working_dir(scope)
     if not wf.is_dir():
         return
@@ -75,7 +77,9 @@ def _finished_scan(ctx, params, scope):
         fm, body = parse_frontmatter(read(path))
         status = fm.get("status", "")
         if status_keyword(status) not in params["finished_statuses"]:
-            if params["ticked"] and all_ticked(body, ctx.markers):
+            if build.built_plan(path):
+                yield path, "built", status, (datetime.now() - ctx.last_touched(path)).days
+            elif params["ticked"] and all_ticked(body, ctx.markers):
                 yield path, "ticked", status, 0
             continue
         if not ctx.committed(path):
@@ -88,16 +92,20 @@ def _finished_scan(ctx, params, scope):
 
 def finished_candidates(ctx, params, scope) -> list[tuple[Path, str, int]]:
     """`(path, status, age in days)` for each finished, committed working file untouched past
-    `max_days`: the ones `finished-files` says to delete. A finished file never committed is
-    not one."""
+    `max_days`, and each built plan (every phase closed) untouched as long: the ones
+    `finished-files` says to delete. A finished file never committed is not one."""
+    inclusive = ctx.cfg.dialect["finished_age"] == "ge"
+    limit = params["max_days"]
     return [(path, status, age) for path, kind, status, age
-            in _finished_scan(ctx, params, scope) if kind == "stale"]
+            in _finished_scan(ctx, params, scope)
+            if kind == "stale" or (kind == "built" and (age > limit or (inclusive and age == limit)))]
 
 
 @check("finished-files", scope="project", since="0.4.0", applies="governed", default="warn",
        summary="A working file whose status says it is finished should be deleted once it has "
                "sat untouched for a few days. A finished file that was never committed is "
-               "flagged at once instead, so it is committed before it is deleted.",
+               "flagged at once instead, so it is committed before it is deleted. A plan "
+               "whose every phase is closed is flagged too.",
        question="Which statuses mean finished, and how long may a finished file linger?",
        rationale="Git keeps the history, so nothing is lost by deleting a finished file once "
                  "it has been committed, and nothing is gained by every sweep re-reading it.",
@@ -117,7 +125,10 @@ def finished_files(ctx, params, scope) -> Findings:
     f = Findings()
     for path, kind, status, age in _finished_scan(ctx, params, scope):
         where = f"{scope.name}/{ctx.rel(path)}"
-        if kind == "ticked":
+        if kind == "built":
+            f.warn(f"{where}: every phase of this plan is closed: delete it, or set a finished "
+                   f"status")
+        elif kind == "ticked":
             f.warn(f"{where}: every box is ticked: delete it (git keeps it), or set its "
                    f"status to complete")
         elif kind == "uncommitted":

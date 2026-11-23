@@ -1,7 +1,11 @@
 {
+  "modules": ["./drive_band.tsx"],
   "hooks": {
     "SessionStart": [
       {"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/session_start.py\"", "timeout": 15}]}
+    ],
+    "PreCompact": [
+      {"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/compact.py\"", "timeout": 10}]}
     ],
     "PreToolUse": [
       {"matcher": "Agent|SendMessage|Bash|Read", "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/agents.py\"", "timeout": 5}]}

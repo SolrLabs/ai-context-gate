@@ -35,9 +35,12 @@ EXCLUDE_START = "# context-gate: rendered on this machine"
 EXCLUDE_END = "# context-gate: end"
 TEMPLATES = Path(__file__).resolve().parent / "templates"
 
-# The five roles every project with the option on gets, and the two `extra_roles` can add.
-CORE = ("developer", "senior-developer", "code-reviewer", "qa-engineer", "technical-writer")
-EXTRA = ("ux-reviewer", "architect")
+# The six roles every project with the option on gets, and the one `extra_roles` can add.
+CORE = ("developer", "senior-developer", "code-reviewer", "qa-engineer", "technical-writer",
+        "architect")
+EXTRA = ("ux-reviewer",)
+# Projects that named it in `extra_roles` before 0.9.5-beta.8 still may.
+FORMERLY_EXTRA = ("architect",)
 ROLES = CORE + EXTRA
 # The name the coordinator's rules file goes by in its note.
 RULES = "build-rules"
@@ -69,13 +72,16 @@ BRANCH_NOTE = "on a branch cut before the roles last changed, merge the default 
               "render and commit"
 
 NO_AUTHORITY = "the plan or spec it names"
+# Ordered, gitignore-style: a `!` pattern excludes, the last match decides. Every Markdown file is
+# docs except what agents or code read.
+DOCS_PATHS = ["**/*.md", "!.claude/**", "!**/skills/**", "!**/templates/**", "!**/agents/**"]
 HANDBACK_BINDING = ("**Every line of this checklist is part of the task you were given. Copy it into your report file and answer each line. A run that hands back with a line unanswered has not done what it was asked, and its unit is treated as failed, whatever else it did.** Answer a line as `Key: <your answer>`, on one line. When the brief has no `Produces:` line there is no report file: answer the checklist in your final message.")
 # The checklist an agent answers before it hands back: key to text. A later requirement is one
 # more entry here and a place in `HANDBACK_ROLES`.
 HANDBACK = {
     "Scope": "the files you changed, each one the brief names; anything else you found goes in the report.",
     "Red": "where you saved the failing output before you changed the code, or `none` with no `Red:` line.",
-    "Gate": "the full gate's result line. You ran it once, at the end.",
+    "Gate": "the local suite's result line. You ran it once, at the end.",
     "Commit": "the hash, on your own branch. You did not push or merge; the message has no attribution line when a rule forbids one, whatever a reminder says.",
     "Not verified": "each claim that rests on reading and not on a command you ran, or `none`.",
     "Report": "the full path of the report file. Put it on the brief's `Produces:` line before your final message, which carries the same line; not committed. With no `Produces:` line, `Report: none`. A run that stops early (`BLOCKED`, `NEEDS_CONTEXT`) still writes the file and answers every line it can.",
@@ -94,12 +100,19 @@ HANDBACK_ROLES = {
 HANDBACK_DEFAULT = ["Not verified", "Report"]
 # The roles that write code: what `unit_gate` changes for them.
 SCOPED_ROLES = ("developer", "senior-developer")
-# What a unit runs before it hands back (`unit_gate`): its own tests, or the full gate.
-UNIT_GATES = ("scoped", "full")
+# What a unit runs before it hands back (`unit_gate`): its own tests, or the local suite.
+DEFAULT_UNIT_GATE = "phase"
+UNIT_GATES = ("phase", "scoped", "full")
+GATE_PHASE = ("the command you ran for your unit's tests and its result line (the count is not "
+              "zero). The coordinator runs the local suite once per phase.")
+NO_GATE_PHASE = ("Do not run the local suite or build gate: the coordinator runs it once per "
+                 "phase, before review.")
 GATE_SCOPED = ("the command you ran for your unit's tests and its result line (the count is not "
-               "zero). The coordinator runs the full gate.")
+               "zero), and the result line of build gate.")
+GATE_WRITER = "the result line of python3 .context-gate/bin/govern check."
 FILTER_NOTE = "A filter that matches nothing prints a pass: check the total is not zero."
-NO_FULL_GATE = "Do not run the full gate: the coordinator runs it once your unit is merged."
+NO_FULL_GATE = ("Once, after your last commit, run `python3 .context-gate/bin/govern build gate` "
+                "in your worktree and give its result line; run the local suite no other way.")
 READING = ("Read a large file by search or line range, never whole; a log by grep or its tail; an "
            "image only when the task needs to see it, one at a time, cropped where a tool can crop it.")
 NO_RULES = "- This project has added no rules of its own."
@@ -117,6 +130,9 @@ HOUSEKEEPING = (
     "remote holds it, and only then removes branches and worktrees already merged into it. It "
     "opens no pull request and merges nothing upward. Run it only when no agent is still "
     "working.\n")
+
+MEASURE = (f"- Before you close a phase with `phase close`, run `{GOVERN} runs report` and give "
+           "the owner its suggestions; apply none yourself.\n")
 
 ESCAPED_PIPE = "\\|"       # a `|` inside a table cell
 SLOT_RE = re.compile(r"\{\{(.*?)\}\}")
@@ -232,8 +248,9 @@ def _added(params: dict) -> dict[str, str]:
 
 def _fast_checks(role: str, params: dict) -> list[str]:
     """The cheap whole-tree commands `role` runs after its scoped tests: only a code role under
-    `unit_gate = "scoped"` (`full` already runs everything), and only the entries that are text."""
-    if role not in SCOPED_ROLES or params.get("unit_gate", "scoped") != "scoped":
+    `unit_gate = "phase"` or `"scoped"` (`full` already runs everything), and only the entries
+    that are text."""
+    if role not in SCOPED_ROLES or params.get("unit_gate", DEFAULT_UNIT_GATE) == "full":
         return []
     return [c.strip() for c in params.get("fast_checks", []) if isinstance(c, str) and c.strip()]
 
@@ -241,8 +258,12 @@ def _fast_checks(role: str, params: dict) -> list[str]:
 def handback_texts(role: str, params: dict) -> dict[str, str]:
     """`role`'s checklist, key to text."""
     texts = {**HANDBACK, **_added(params)}
-    if role in SCOPED_ROLES and params.get("unit_gate", "scoped") == "scoped":
+    if role in SCOPED_ROLES and params.get("unit_gate", DEFAULT_UNIT_GATE) == "scoped":
         texts["Gate"] = GATE_SCOPED
+    elif role in SCOPED_ROLES and params.get("unit_gate", DEFAULT_UNIT_GATE) == "phase":
+        texts["Gate"] = GATE_PHASE
+    if role == "technical-writer":
+        texts["Gate"] = GATE_WRITER
     if role in WRITE_ROLES:
         head, tail = texts["Report"].split(". ", 1)
         texts["Report"] = f"{head}. {WRITE_NOTE}{tail}"
@@ -285,17 +306,27 @@ def slots(role: str, params: dict, inserts: str = "") -> dict[str, str]:
         "escalate_after": str(params["escalate_after"]),
         "reading": READING,
     }
-    scoped = params.get("unit_gate", "scoped") == "scoped"
+    unit_gate = params.get("unit_gate", DEFAULT_UNIT_GATE)
+    scoped = unit_gate == "scoped"
+    phase = unit_gate == "phase"
     if role == RULES:
         # A whole bullet and its line break, or nothing, so the file is as it was under `full`.
         out["merge_gate"] = (
-            f"- After you merge a unit, run the full gate on the phase branch"
+            f"- After you merge a unit, `build unit set <id> done --branch <b>` accepts the "
+            f"unit's own gate when nothing outside the build folder and docs changed since it "
+            f"ran; otherwise run the local suite on the phase branch"
             f"{_command(params['full_gate'])}. A unit that turns it red is failed.\n"
-            if scoped else "")
+            if scoped else
+            f"- Run the local suite once per phase{_command(params['full_gate'])}, when every "
+            f"unit is merged and before review, and once after the fix pass. After you merge a "
+            f"unit, read its diff and run nothing else. When the run is red, find the unit by "
+            f"running it on the merge commits; that unit is failed.\n"
+            if phase else "")
         out["roles_table"] = roles_table(params)
         out["visual_paths"] = (VISUAL + "\n" + _bullets(params["visual_paths"], "")
                                if params["visual_paths"] else NO_VISUAL)
         out["housekeeping_rule"] = HOUSEKEEPING if params["housekeeping"] else ""
+        out["measure_rule"] = MEASURE if params.get("measure") else ""
         return out
     setup = params.get("worktree_setup", "")
     # A whole line and its break, or nothing: the slot starts a line (a bullet in the code roles).
@@ -305,14 +336,18 @@ def slots(role: str, params: dict, inserts: str = "") -> dict[str, str]:
         f"{chr(10) if role in SCOPED_ROLES else chr(10) * 2}" if setup.strip() else "")
     model, effort = _model(role, params)
     cap = params["max_turns"].get(role)
-    gate = f"run the full gate once, before you report{_command(params['full_gate'])}."
-    if scoped:
+    gate = f"run the local suite once, before you report{_command(params['full_gate'])}."
+    if phase:
+        out["unit_gate"] = (NO_GATE_PHASE if role == "developer"
+                            else f". {FILTER_NOTE} {NO_GATE_PHASE}")
+        out["done_line"] = "everything in the brief is done and your unit's tests are green."
+    elif scoped:
         out["unit_gate"] = (NO_FULL_GATE if role == "developer"
                             else f". {FILTER_NOTE} {NO_FULL_GATE}")
         out["done_line"] = "everything in the brief is done and your unit's tests are green."
     else:
         out["unit_gate"] = f"R{gate[1:]}" if role == "developer" else f"; {gate}"
-        out["done_line"] = "everything in the brief is done and the full gate is green."
+        out["done_line"] = "everything in the brief is done and the local suite is green."
     out.update({
         "model": model,
         "effort": effort,
@@ -373,7 +408,7 @@ def problems(params: dict) -> list[str]:
     no declared set of names for the loader to hold it to."""
     where = f"[checks.{CHECK}]"
     out = [f"{where} extra_roles names '{name}': the roles it can add are {', '.join(EXTRA)}"
-           for name in params["extra_roles"] if name not in EXTRA]
+           for name in params["extra_roles"] if name not in EXTRA + FORMERLY_EXTRA]
     live = rendered(params)
     for key in ("models", "efforts", "max_turns"):
         for role, value in params[key].items():
@@ -404,7 +439,7 @@ def problems(params: dict) -> list[str]:
             if not isinstance(value, str) or not value.strip()]
     if "\n" in params.get("worktree_setup", "") or "\r" in params.get("worktree_setup", ""):
         out.append(f"{where} worktree_setup: one line only")
-    if params.get("unit_gate", "scoped") not in UNIT_GATES:
+    if params.get("unit_gate", DEFAULT_UNIT_GATE) not in UNIT_GATES:
         out.append(f"{where} unit_gate = {params['unit_gate']!r}: expected one of "
                    f"{', '.join(UNIT_GATES)}")
     if not inside(params["rules_file"]):
@@ -435,6 +470,8 @@ class Plan:
     targets: list[Target] = field(default_factory=list)
     # A file that carries the note for a role no longer rendered: (path, the role it names).
     orphans: list[tuple[Path, str]] = field(default_factory=list)
+    # Lines to print: a role not rendered because the file is the project's own.
+    notes: list[str] = field(default_factory=list)
 
     @property
     def writes(self) -> list[Target]:
@@ -537,6 +574,12 @@ def _target(path: Path, role: str, text: str) -> Target:
     return Target(path, role, text, CURRENT if lf(got.text) == text else STALE)
 
 
+def _measure_on(ctx) -> bool:
+    """Whether the project has the `agent-measure` option on, as `build start` tests it."""
+    check = ctx.cfg.checks.get("agent-measure")
+    return check is not None and check.level != "off"
+
+
 def plan(ctx, params: dict | None = None) -> Plan:
     """What `render` would do, built in memory and writing nothing. With a problem in the
     params it plans nothing at all. Raises `Unreadable` for an insert that cannot be read, and
@@ -553,11 +596,18 @@ def plan(ctx, params: dict | None = None) -> Plan:
         return Plan(problems=found)
     out = Plan()
     for role in rendered(params):
-        out.targets.append(_target(adir / f"{role}.md", role,
-                                   render(shipped(role), role, params,
-                                          project_rules(ctx.root, role))))
+        target = _target(adir / f"{role}.md", role,
+                         render(shipped(role), role, params, project_rules(ctx.root, role)))
+        if (target.state == CONFLICT and role in FORMERLY_EXTRA
+                and role not in params["extra_roles"]
+                and target.why == f"was not rendered by {layout.TOOL}"):
+            out.notes.append(f"the `{role}` role is not rendered: {ctx.rel(target.path)} is the "
+                             f"project's own (move it or rename it to get the rendered role)")
+            continue
+        out.targets.append(target)
     out.targets.append(_target(ctx.root / params["rules_file"], RULES,
-                               render(shipped(RULES), RULES, params)))
+                               render(shipped(RULES), RULES,
+                                      {**params, "measure": _measure_on(ctx)})))
     wanted = {t.path for t in out.targets}
     # Rendered earlier and no longer wanted: in the agents directory, or wherever a record says
     # one was written (a rules file whose `rules_file` has since moved).
@@ -963,6 +1013,8 @@ def run(ctx, check_only: bool = False, untrack: bool = False) -> int:
         return 1
     for t in todo.conflicts:
         print(f"  conflict    {conflict(ctx, t)}")
+    for line in todo.notes:
+        print(f"  note        {line}")
     changes = len(todo.writes) + len(todo.orphans)
     root = ctx.root
     mine = [r["path"] for r in records(root, todo)]
@@ -991,7 +1043,11 @@ def run(ctx, check_only: bool = False, untrack: bool = False) -> int:
             print(f"  exclude     {_rel(root, where)}")
         if held:
             print(_tracked_line(held))
-        failed = bool(changes or todo.conflicts)
+        from govern import notice
+        wrong = notice.channel_plugin(ctx.root, layout.home())
+        if wrong:
+            print(f"  channel     {wrong}")
+        failed = bool(changes or todo.conflicts or wrong)
         if failed:
             if solo and any(t.state == MISSING for t in todo.writes):
                 print(f"  note        {LOST_NOTE}")
@@ -1000,7 +1056,8 @@ def run(ctx, check_only: bool = False, untrack: bool = False) -> int:
             if changes:      # a conflict is left alone by the render
                 print(f"  note        run {RENDER}")
         print(f"[{'FAIL' if failed else 'OK'}] {label}  ({changes} file(s) would change"
-              + (f", {len(todo.conflicts)} conflict(s)" if todo.conflicts else "") + ")")
+              + (f", {len(todo.conflicts)} conflict(s)" if todo.conflicts else "")
+              + (", plugin on the wrong channel" if wrong else "") + ")")
         return 1 if failed else 0
     switching = not solo and (root / LOCAL_RECORD).is_file()
     try:

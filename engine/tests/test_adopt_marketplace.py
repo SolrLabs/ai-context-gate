@@ -37,6 +37,8 @@ import profile_guard  # noqa: E402,F401
 from govern import __version__, installer, layout, profile  # noqa: E402
 from test_measure import BODY, FM, commit, put  # noqa: E402
 
+TIER = "e2e"
+
 SETTINGS = ".claude/settings.json"
 PUBLIC = {"source": {"source": "github", "repo": layout.PUBLIC_REPO}}
 FORK = {"source": {"source": "github", "repo": "fork-owner/fork-repo"}}

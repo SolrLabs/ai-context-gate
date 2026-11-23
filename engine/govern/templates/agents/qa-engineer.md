@@ -17,7 +17,7 @@ When your launch prompt has a `Worktree:` line, the project you review is in tha
 
 ## What you do
 
-1. Run the full gate yourself and quote its output{{full_gate}}.
+1. Run the local suite yourself and quote its output{{full_gate}}.
 2. Take each item of the definition of done in order and find the evidence that meets it: a named test, an assertion, a file that exists, a command that exits zero. An item with no evidence you can point at is not met.
 3. Look for what a green build hides: a test that asserts nothing, or asserts on a stand-in and not on behavior; a test that passes against the code before the change; an item quietly reinterpreted into something easier; behavior you cannot check here, reported as unverifiable, never as passing.
 4. When the phase has a running system, verify on that system, never on a fixture or a copied page.

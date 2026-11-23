@@ -41,6 +41,25 @@ class Scratch(Build):
             seen.append(found[0])
         self.assertEqual(len(set(seen)), len(seen))
 
+    def close_for(self, phase: str, closed: tuple[str, ...]) -> str:
+        w = self.project()
+        w.write("docs/plan-x.md", "# Plan\n\n## One (slug: p1; owner: x)\n\n"
+                "## Two (slug: p2)\n")
+        w.commit("plan", at=w.top, index=False)
+        for slug in closed:
+            w.git("commit", "--allow-empty", "-qm", f"Close phase {slug}: done", at=w.top)
+        led = ledger(self.tmp, ("u1", "done"), plan="docs/plan-x.md")
+        led.phase = phase
+        return build.close_brief(w.top, led)
+
+    def test_the_close_of_the_last_open_phase_says_to_delete_the_plan(self):
+        text = self.close_for("p2", ("p1",))
+        self.assertIn("This close finishes the plan", text)
+        self.assertIn("Delete the plan file `docs/plan-x.md` and fix every link to it.", text)
+
+    def test_the_close_of_an_earlier_phase_does_not(self):
+        self.assertNotIn("finishes the plan", self.close_for("p1", ()))
+
     def test_a_write_that_fails_after_the_ledger_is_saved_says_what_stays(self):
         self.project()
         with mock.patch.object(build, "_keep_in_history", side_effect=OSError(5, "boom", "/x/y")):

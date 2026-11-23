@@ -214,7 +214,7 @@ def _checklist(cfg) -> dict:
     params = {"extra_roles": list(chk.params.get("extra_roles", [])),
               "handback_checks": list(chk.params.get("handback_checks", [])),
               "visual_paths": list(chk.params.get("visual_paths", [])),
-              "unit_gate": chk.params.get("unit_gate", "scoped")}
+              "unit_gate": chk.params.get("unit_gate", roles.DEFAULT_UNIT_GATE)}
     return {role: roles.handback_texts(role, params) for role in roles.rendered(params)}
 
 
@@ -595,7 +595,7 @@ def on_pre_read(gates, data) -> dict | None:
 
 
 def _red_gate(root) -> str | None:
-    """The refusal for a coordinator's push when the current phase's last full gate is red at
+    """The refusal for a coordinator's push when the current phase's last local suite run is red at
     HEAD; None when there is no record, it is still running, it is for another head, or anything
     cannot be read: a push is never blocked on a guess."""
     try:
@@ -609,7 +609,7 @@ def _red_gate(root) -> str | None:
         head = phase._out(phase._run(top, "rev-parse", "HEAD"))
         if not head or rec.get("head") != head:
             return None
-        return (f"push refused: the last full gate on this phase is red (rc {rec['rc']} at "
+        return (f"push refused: the last local suite run on this phase is red (rc {rec['rc']} at "
                 f"{head[:7]}). Run python3 .context-gate/bin/govern build gate.")
     except Exception:
         return None
@@ -1006,7 +1006,7 @@ def _run_row(d, launch, agent_id, totals, tools, final, problems, produced, now)
         "result_bytes": sum(int(r.get("out_bytes") or 0) for r in mine),
         **summarize(mine), **parse_final(final),
         "gate_blocks": launch.get("blocks", 0), "gate_unmet": problems,
-        "produced": produced}
+        "contract": bool(launch.get("produces")), "produced": produced}
 
 
 def on_stop(home, sid, gates, measure, root, data) -> dict | None:
@@ -1300,6 +1300,25 @@ def build_report(runs: list[dict]) -> dict:
             "suggestions": suggestions(agents)}
 
 
+REPORT_KINDS = ("report not written", "report empty", "report not written by this run")
+
+
+def _unmet_kind(text: str) -> str:
+    """A short label for one `missing()` sentence, by its fixed wording."""
+    for needle, kind in (("your final message names", "final message names a missing file"),
+                         ("does not exist.", "report not written"),
+                         ("is empty.", "report empty"),
+                         ("is older than this run", "report not written by this run"),
+                         ("does not answer the checklist line", "checklist line unanswered"),
+                         ("holds no files", "failing output not saved"),
+                         ("holds only files from before this run", "failing output not saved"),
+                         ("was saved after your last edit", "failing output saved after the fix"),
+                         ("could not be read", "report unreadable")):
+        if needle in text:
+            return kind
+    return "other"
+
+
 def suggestions(runs: list[dict]) -> list[str]:
     """Fixed rules, each printed only when its pattern is present. Never applied."""
     out = []
@@ -1332,8 +1351,23 @@ def suggestions(runs: list[dict]) -> list[str]:
                    "every later turn of that agent re-reads it.")
     refused = [r for r in runs if r.get("gate_blocks")]
     if len(refused) >= 3:
-        out.append(f"contracts were refused in {len(refused)} runs: the briefs are not "
-                   "carrying the contract; put `Produces:` in the brief file.")
+        kinds = {}
+        for r in refused:
+            for k in {_unmet_kind(t) for t in r.get("gate_unmet") or []}:
+                kinds[k] = kinds.get(k, 0) + 1
+        ranked = sorted(kinds.items(), key=lambda kv: (-kv[1], kv[0]))
+        text = f"contracts were refused in {len(refused)} runs"
+        if ranked:
+            text += ": " + ", ".join(f"{k} ({n})" for k, n in ranked)
+        text += "."
+        bare = sum(1 for r in refused if r.get("contract") is False)
+        if bare:
+            text += (f" {bare} of them had no `Produces:` line: put `Produces:` in the "
+                     "brief file.")
+        elif ranked and ranked[0][0] in REPORT_KINDS:
+            text += (" Check each brief's `Produces:` path is inside the agent's own "
+                     "worktree, and that the agent writes it before its final message.")
+        out.append(text)
     blocked = {}
     for r in runs:
         if r.get("status") == "BLOCKED":
@@ -1343,6 +1377,11 @@ def suggestions(runs: list[dict]) -> list[str]:
             out.append(f"{role} finished BLOCKED {n} times: the briefs leave design open; "
                        "settle it in the plan before launching.")
     return [f"Suggestion: {s}" for s in out]
+
+
+def _kinds_text(row: dict) -> str:
+    kinds = list(dict.fromkeys(_unmet_kind(t) for t in row.get("gate_unmet") or []))
+    return ", ".join(kinds) or "no reason recorded"
 
 
 def render_report(report: dict, name: str | None, everything: bool) -> str:
@@ -1382,8 +1421,8 @@ def render_report(report: dict, name: str | None, everything: bool) -> str:
             out += [f"- {x.get('kb')} KB {x.get('tool')}" for x in big]
     unfinished = [r for r in runs if r.get("unfinished")]
     if unfinished:
-        out += [""] + [f"- {r.get('type') or 'an agent'}: blocked on its contract and never ended"
-                       for r in unfinished]
+        out += [""] + [f"- {r.get('type') or 'an agent'}: refused on its contract "
+                       f"({_kinds_text(r)}); no later stop was seen" for r in unfinished]
     if report["suggestions"]:
         out += [""] + report["suggestions"]
     return "\n".join(out)

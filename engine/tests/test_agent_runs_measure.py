@@ -589,6 +589,64 @@ class Suggestions(unittest.TestCase):
     def test_contracts_refused_in_three_runs(self):
         self.assert_one([row(str(i), gate_blocks=1) for i in range(3)], "contracts were refused")
 
+    def refused(self, n, unmet, **kw):
+        return [row(str(i), gate_blocks=1, contract=True, gate_unmet=list(unmet), **kw)
+                for i in range(n)]
+
+    def test_refused_contracts_name_the_kinds_not_the_briefs(self):
+        found = self.suggest(self.refused(3, ["/w/r.md does not exist."]))
+        (text,) = [s for s in found if "contracts were refused" in s]
+        self.assertIn("report not written (3)", text)
+        self.assertIn("inside the agent's own worktree", text)
+        self.assertNotIn("put `Produces:`", text)
+
+    def test_refused_runs_without_a_contract_still_say_put_produces(self):
+        runs = [row(str(i), gate_blocks=1, contract=False,
+                    gate_unmet=["/w/r.md does not exist."]) for i in range(3)]
+        (text,) = [s for s in self.suggest(runs) if "contracts were refused" in s]
+        self.assertIn("3 of them had no `Produces:` line: put `Produces:` in the brief file.",
+                      text)
+        self.assertNotIn("worktree", text)
+
+    def test_a_missing_contract_key_is_not_an_explicit_false(self):
+        runs = [row(str(i), gate_blocks=1, gate_unmet=["/w/r.md does not exist."])
+                for i in range(3)]
+        (text,) = [s for s in self.suggest(runs) if "contracts were refused" in s]
+        self.assertNotIn("no `Produces:`", text)
+
+    def test_kinds_order_by_count_then_label_and_count_once_per_run(self):
+        line = "/w/r.md does not answer the checklist line `Scope:`."
+        runs = (self.refused(2, ["/w/r.md is empty.", "/w/q.md is empty."])
+                + self.refused(1, [line, line]))
+        (text,) = [s for s in self.suggest(runs) if "contracts were refused" in s]
+        self.assertIn("in 3 runs: report empty (2), checklist line unanswered (1).", text)
+
+    def test_other_common_kinds_get_no_advice(self):
+        line = "/w/r.md does not answer the checklist line `Scope:`."
+        (text,) = [s for s in self.suggest(self.refused(3, [line]))
+                   if "contracts were refused" in s]
+        self.assertTrue(text.endswith("checklist line unanswered (3)."), text)
+
+    def test_unmet_kind_of_each_sentence(self):
+        cases = {
+            "/w/r.md does not exist.": "report not written",
+            "/w/r.md is empty.": "report empty",
+            "/w/r.md is older than this run; it was not written by you.":
+                "report not written by this run",
+            "/w/r.md does not answer the checklist line `Scope:`.":
+                "checklist line unanswered",
+            "/w/red holds no files. Run the test.": "failing output not saved",
+            "/w/red holds only files from before this run. Run.": "failing output not saved",
+            "the output in /w/red was saved after your last edit, so it x.":
+                "failing output saved after the fix",
+            "your final message names /w/x.md, which does not exist.":
+                "final message names a missing file",
+            "/w/r.md could not be read for the checklist.": "report unreadable",
+            "something new": "other",
+        }
+        for text, kind in cases.items():
+            self.assertEqual(agent_runs._unmet_kind(text), kind, text)
+
     def test_contracts_refused_in_two_runs_is_quiet(self):
         self.assert_none([row("a", gate_blocks=2), row("b", gate_blocks=1), row("c")],
                          "contracts were refused")
@@ -758,7 +816,7 @@ class HeldLaunchPairing(HookCase):
         self.assertEqual(out["decision"], "block")
         self.assertIn(str(self.tree / ".context-gate/build/p/u2/developer-report.md"),
                       out["reason"])
-        self.assertNotIn("u1", out["reason"])
+        self.assertNotIn("/build/p/u1/", out["reason"])
 
     def test_a_rightly_paired_contract_is_left_alone(self):
         transcript = self.paired_with_u1(f"Brief: {self.U1}")
@@ -816,7 +874,7 @@ class HeldLaunchPairing(HookCase):
 
 class UnfinishedRuns(HookCase):
     """A run blocked on its contract and never stopped again is still measured."""
-    LINE = "blocked on its contract and never ended"
+    LINE = "refused on its contract (report not written); no later stop was seen"
 
     def report(self):
         runs, name = agent_runs.load_runs(self.home, self.root, True)
@@ -835,6 +893,17 @@ class UnfinishedRuns(HookCase):
         self.assertEqual(len(runs), 1)
         self.assertIn("1 agent runs", text)
         self.assertIn(f"general-purpose: {self.LINE}", text)
+
+    def test_an_unfinished_row_names_its_kinds_or_no_reason(self):
+        def text(unmet):
+            r = row("a", "developer", unfinished=True, gate_blocks=1, gate_unmet=unmet)
+            report = {"runs": [r], "by_role": {}, "by_tool": {}, "largest": [],
+                      "suggestions": []}
+            return agent_runs.render_report(report, None, True)
+        self.assertIn("- developer: refused on its contract (report not written, report empty);"
+                      " no later stop was seen",
+                      text(["/w/a does not exist.", "/w/b is empty.", "/w/c does not exist."]))
+        self.assertIn("(no reason recorded); no later stop was seen", text([]))
 
     def test_the_same_run_ending_met_counts_once_with_the_whole_runs_tokens(self):
         report = self.work / "r.md"
@@ -903,13 +972,13 @@ class ChecklistUnitGate(unittest.TestCase):
         return agent_runs.resolve(cfg, Path("/p"))["gates"]["checklist_texts"]
 
     def test_a_developer_answering_the_scoped_gate_line_passes(self):
-        texts = self.texts()["developer"]
-        self.assertIn("The coordinator runs the full gate.", texts["Gate"])
+        texts = self.texts(unit_gate="scoped")["developer"]
+        self.assertIn("and the result line of build gate.", texts["Gate"])
         report = "Gate: python3 -m unittest -k roles: Ran 9 tests, OK\n"
         self.assertTrue(agent_runs.answers(report, "Gate", texts))
 
     def test_full_keeps_the_old_gate_line(self):
-        self.assertIn("the full gate's result line", self.texts(unit_gate="full")["developer"]["Gate"])
+        self.assertIn("the local suite's result line", self.texts(unit_gate="full")["developer"]["Gate"])
 
 
 class ReportCountsWhatHappened(HookCase):

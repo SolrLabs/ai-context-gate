@@ -65,7 +65,14 @@ def ledger(folder: Path, *units: tuple, stage: str = "build", **more) -> build.L
 
 class Build(Case):
     """A single repo on `phase/p1`, cut from `main`. With `remote`, `origin` is a bare
-    repository holding the default branch."""
+    repository holding the default branch. A test runs as a driver session (`GOVERN_DRIVE=1`);
+    one that needs the outside unsets it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        env = mock.patch.dict(os.environ, {"GOVERN_DRIVE": "1"})
+        env.start()
+        self.addCleanup(env.stop)
 
     def project(self, *, remote: bool = False, default: str = "main", branch: str = "phase/p1",
                 extra: str = "", below: str | None = None) -> Solo:

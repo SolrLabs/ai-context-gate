@@ -31,7 +31,7 @@ import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from govern import agent_runs, config, layout, phase, profile, registry, roles, tomlw
+from govern import agent_runs, config, gitq, layout, phase, profile, registry, roles, tomlw
 from govern.decisions import mask_lines
 from govern.text import Markers
 
@@ -448,7 +448,7 @@ def _state_repo(state: Path) -> Path:
     folder = state
     while not folder.is_dir() and folder != folder.parent:
         folder = folder.parent
-    res = phase._git(folder, "rev-parse", "--show-toplevel")
+    res = gitq.toplevel(folder)
     if res is None or res.returncode != 0:
         raise BuildError(f"{state} is not in a git repository: "
                          + ("git could not run" if res is None else phase._reason(res)))
@@ -460,7 +460,7 @@ def _team(root: Path) -> tuple[list[tuple[Ledger, str]], list[tuple[str, str]], 
     protects its own branch, and one warning names it on stderr."""
     from govern import base
     try:
-        remotes = sorted(phase._ask(root, "remote").split(), key=len, reverse=True)
+        remotes = sorted(gitq.remotes(root), key=len, reverse=True)
         res = phase._run(root, "for-each-ref", "--format=%(refname)", "refs/remotes")
     except phase.PhaseError as exc:
         return [], [], [BuildError(str(exc))]
@@ -515,7 +515,7 @@ def open_builds(path: Path, remote: bool = True) -> tuple[list[tuple[str, str]],
     branch (`team_ledgers`) not already listed. When git cannot name the top (no repository, or
     git cannot run) it is `([], [])` and the caller's own check refuses. A git call that fails
     after that is an error, never an empty answer."""
-    top = phase._git(path, "rev-parse", "--show-toplevel")
+    top = gitq.toplevel(path)
     if top is None or top.returncode != 0:
         return [], []     # no repository, or git cannot run: `phase.plan` refuses on its own check
     root = Path(phase._out(top))
@@ -573,7 +573,7 @@ def current(root: Path, branch: str) -> Ledger | None:
 
 def checked_out(root: Path) -> str:
     """The checked-out branch, or "" on a detached HEAD. Raises when git cannot say."""
-    if not phase._test(root, "rev-parse", "--git-dir"):
+    if not gitq.git_dir_ok(root):
         raise BuildError("not inside a git repository")
     res = phase._run(root, "symbolic-ref", "--quiet", "--short", "HEAD")
     return phase._out(res) if res.returncode == 0 else ""
@@ -586,7 +586,7 @@ def _known(root: Path, ref: str) -> bool:
 def _remote(root: Path, branch: str) -> str | None:
     """The remote whose default branch this repository answers to: the branch's upstream's,
     else the only one, else `origin`. None when the repository has no remote."""
-    remotes = phase._ask(root, "remote").split()
+    remotes = gitq.remotes(root)
     if not remotes:
         return None
     mine = phase._ask(root, "for-each-ref", "--format=%(upstream:remotename)",
@@ -613,7 +613,7 @@ def default_branch(root: Path, branch: str) -> tuple[str, list[str]]:
             raise BuildError("cannot tell which branch is the default: this repository has no "
                              "remote, and no branch named main or master")
         return local[0], [f"refs/heads/{local[0]}"]
-    name = phase._default_branch(root, remote)
+    name = gitq.default_branch(root, remote)
     refs = [r for r in (f"refs/remotes/{remote}/{name}", f"refs/heads/{name}") if _known(root, r)]
     if not refs and name != branch:
         raise BuildError(f"{remote}/{name} is not known here: run git fetch {remote}")
@@ -819,10 +819,33 @@ def _close_produces(root: Path, ledger: Ledger, workspace: bool) -> str:
     return report.relative_to(repo).as_posix()
 
 
+def _finishes_plan(root: Path, ledger: Ledger) -> bool:
+    """True when every phase of the ledger's plan other than its own is already closed, so
+    closing this one finishes the plan."""
+    if not ledger.plan:
+        return False
+    try:
+        text = (state_root(root) / ledger.plan).read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        return False
+    slugs = _plan_slugs(text)
+    if ledger.phase not in slugs:
+        return False
+    others = [slug for slug in slugs if slug != ledger.phase]
+    if not others:
+        return True
+    top = gitq.toplevel((state_root(root) / ledger.plan).parent)
+    if top is None or top.returncode != 0:
+        return False
+    closed = _closed_slugs(Path(phase._out(top)))
+    return closed is not None and all(slug in closed for slug in others)
+
+
 def close_brief(root: Path, ledger: Ledger, workspace: bool = False) -> str:
     """The technical writer's close brief: the member's own documents, or with `workspace` the
     workspace repository's (its handoff, decision log and roadmap), in a worktree of that
     repository."""
+    finishes = _finishes_plan(root, ledger)
     landed = "".join(
         f"- Unit {u['id']}, {u['title']}"
         + (f" (commit {u['commit']})" if u["commit"] else "")
@@ -838,10 +861,15 @@ def close_brief(root: Path, ledger: Ledger, workspace: bool = False) -> str:
             + (f"This brief is for the workspace repository's own documents: its handoff, decision log "
                f"and roadmap. `{ledger.project}`'s own documents have their own brief. Commit your "
                f"report on your branch together with your document changes; if git says the "
-               f"report is ignored, leave it uncommitted and do not force it.\n\n"
+               f"report is ignored, leave it uncommitted and do not force it. This worktree holds no member repositories, so "
+               f"`govern check` fails here on them: do not run it here; the coordinator runs it "
+               f"after merging your branch.\n\n"
                if workspace else "")
             + ("## What landed\n\n" + landed + "\n" if landed else "")
             + (RULINGS_HEADING + "\n\n" + rulings + "\n" if rulings else "")
+            + (f"This close finishes the plan: every other phase of it is already closed. "
+               f"Delete the plan file `{ledger.plan}` and fix every link to it.\n\n"
+               if finishes else "")
             + _sections((CLOSE_SECTION,))
             + f"{scratch_note(ledger, 'close')}\n\n{AS_BUILT_NOTE}\n\n{REPORT_NOTE}\n"
             + (PATHS_NOTE_WORKSPACE_REPO.format(project=ledger.project) if workspace
@@ -870,6 +898,47 @@ def phase_close(project: str | None, folder: str) -> str:
 
 PHASE_HEADING = re.compile(r"^##\s.*?\(.*?\bslug:\s*(?P<slug>[^\s;)]+)\s*[;)]")
 UNIT_HEADING = re.compile(r"^### ([A-Za-z0-9_-]+):\s")
+
+
+def _plan_slugs(text: str) -> list[str]:
+    """The phase slugs a plan's `## ` headings name, in plan order (fences and comments skipped)."""
+    lines = text.splitlines()
+    live = mask_lines(lines, Markers("\x00"))
+    return [m["slug"] for line, is_live in zip(lines, live)
+            if is_live and line.startswith("## ") and (m := PHASE_HEADING.match(line))]
+
+
+def _closed_slugs(repo: Path) -> set[str] | None:
+    """The slugs of every `Close phase <slug>:` commit subject in the repository's history,
+    read once per repository per command (`gitq.scope`); None when git cannot say."""
+    key = gitq._key(repo, "log", "--format=%s", "closed-phases")
+    if gitq._depth and key in gitq._cache:
+        return gitq._cache[key]  # type: ignore[return-value]
+    res = phase._git(repo, "log", "--format=%s")
+    if res is None or res.returncode != 0:
+        return None
+    found = {m[1] for line in phase._out(res).splitlines()
+             if (m := re.match(r"Close phase (\S+?):", line))}
+    if gitq._depth:
+        gitq._cache[key] = found
+    return found
+
+
+def built_plan(path: Path) -> bool:
+    """True when the plan names at least one phase by `slug:` and the git history of its
+    repository holds a `Close phase <slug>:` commit for every one. False for a plan with no
+    slug, a file outside a git repository, or a git call that fails."""
+    try:
+        slugs = _plan_slugs(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not slugs:
+        return False
+    top = gitq.toplevel(path.parent)
+    if top is None or top.returncode != 0:
+        return False
+    closed = _closed_slugs(Path(phase._out(top)))
+    return closed is not None and all(slug in closed for slug in slugs)
 
 
 def planned_units(root: Path, ledger: Ledger) -> list[str] | None:
@@ -904,9 +973,27 @@ def unadded(ledger: Ledger, planned: list[str] | None) -> list[str]:
     return [uid for uid in planned or [] if uid not in have]
 
 
-def next_action(ledger: Ledger, planned: list[str] | None = None) -> str:
+def driven() -> bool:
+    """True in a session the driver started (`GOVERN_DRIVE=1`)."""
+    return os.environ.get("GOVERN_DRIVE") == "1"
+
+
+def _driver_command(ledger: Ledger) -> str:
+    return f"{govern_build(ledger.project)} drive {ledger.plan or '<plan>'}"
+
+
+def next_action(ledger: Ledger, planned: list[str] | None = None, *, driven: bool = False) -> str:
     """One sentence: what the coordinator does next, and the command for it. A function of the
-    ledger and, when given, the unit ids the plan names for the phase."""
+    ledger and, when given, the unit ids the plan names for the phase. Outside a driver session
+    (`driven` False) it says to start the driver, and keeps the step in a parenthesis."""
+    step = _next_step(ledger, planned)
+    if driven:
+        return step
+    return (f"Start the driver: `{_driver_command(ledger)}`, in the background. (In a driver "
+            f"session, or with `--here`, the step is: {step.removesuffix('.')}.)")
+
+
+def _next_step(ledger: Ledger, planned: list[str] | None = None) -> str:
     govern = govern_build(ledger.project)
     stuck = next((u for u in ledger.units if u["status"] in ("blocked", "failed")), None)
     if stuck:
@@ -969,7 +1056,7 @@ def _local(root: Path, path: Path) -> str:
         return str(path)
 
 
-def status_data(root: Path, ledger: Ledger | None, branch: str) -> dict:
+def status_data(root: Path, ledger: Ledger | None, branch: str, *, driven: bool = False) -> dict:
     """What `build status --json` prints. The keys are a contract; with no build in flight
     they are all there, `phase` is null and the lists are empty."""
     if ledger is None:
@@ -983,7 +1070,7 @@ def status_data(root: Path, ledger: Ledger | None, branch: str) -> dict:
             "plan": ledger.plan or None, "high_risk": ledger.high_risk, "visual": ledger.visual, "stage": ledger.stage,
             "ledger": _posix(_base(root, ledger.path), ledger.path), "rulings": list(ledger.rulings), "units": units,
             "done": sum(1 for u in ledger.units if u["status"] == "done"),
-            "total": len(ledger.units), "next": next_action(ledger, planned),
+            "total": len(ledger.units), "next": next_action(ledger, planned, driven=driven),
             "unadded": unadded(ledger, planned)}
 
 
@@ -999,7 +1086,8 @@ def _rulings(ledger: Ledger) -> list[str]:
     return ["Rulings:"] + [f"  {n}. {r}" for n, r in enumerate(ledger.rulings, 1)]
 
 
-def status_lines(ledger: Ledger, planned: list[str] | None = None) -> list[str]:
+def status_lines(ledger: Ledger, planned: list[str] | None = None, *,
+                 driven: bool = False) -> list[str]:
     facts = [f"stage {ledger.stage}", f"base {ledger.base[:12]}"]
     if ledger.plan:
         facts.append(f"plan {ledger.plan}")
@@ -1018,7 +1106,7 @@ def status_lines(ledger: Ledger, planned: list[str] | None = None) -> list[str]:
                      + (f"  ({'; '.join(more)})" if more else ""))
     if not ledger.units:
         lines.append("  no units yet")
-    return lines + _rulings(ledger) + [f"Next: {next_action(ledger, planned)}"]
+    return lines + _rulings(ledger) + [f"Next: {next_action(ledger, planned, driven=driven)}"]
 
 
 def session_line(root: Path) -> str | None:
@@ -1032,7 +1120,25 @@ def session_line(root: Path) -> str | None:
         return None
     done = sum(1 for u in ledger.units if u["status"] == "done")
     return (f"A build is in flight: {ledger.phase}, {done} of {len(ledger.units)} units done. "
-            f"Next: {next_action(ledger, planned_units(root, ledger))}")
+            f"Next: {next_action(ledger, planned_units(root, ledger), driven=driven())}")
+
+
+def compact_text(root: Path) -> str:
+    """What a compacted session must keep, and what it is told again afterwards: the status of
+    the build in flight on the checked-out branch and the ledger that is the truth. "" when no
+    build is in flight, and on any failure."""
+    try:
+        branch = checked_out(root)
+        ledger = current(root, branch) if branch else None
+        if ledger is None:
+            return ""
+        where = _rel(root, ledger.path)
+        return "\n".join(["Build in flight: keep this in the summary.",
+                          *status_lines(ledger, planned_units(root, ledger), driven=driven()),
+                          f"The ledger at {where} is the truth; drop tool output and file "
+                          f"contents from the summary."])
+    except Exception:
+        return ""
 
 
 # ---------------------------------------------------------------------------- commands
@@ -1043,7 +1149,7 @@ def _top(folder: Path) -> bool:
     lock) raises `BuildError`, never False."""
     if not folder.is_dir():
         return False
-    res = phase._git(folder, "rev-parse", "--show-toplevel")
+    res = gitq.toplevel(folder)
     if res is None:
         raise BuildError(f"cannot tell whether {folder} is a repository: git could not run")
     if res.returncode != 0:
@@ -1121,10 +1227,27 @@ def _folder(ctx, project: str | None) -> str:
     return str(scope.get("dir")) if scope is not None and scope.get("dir") else ""
 
 
-def _need(ctx, project: str | None = None) -> Ledger:
-    """The checked-out branch's ledger, for a command that has nothing to do without one."""
+def _linked_worktree(root: Path) -> bool:
+    """True when `root` is in a linked git worktree, not the main checkout; False when git cannot
+    say."""
+    try:
+        here = phase._out(phase._run(root, "rev-parse", "--git-dir"))
+        common = phase._out(phase._run(root, "rev-parse", "--git-common-dir"))
+    except phase.PhaseError:
+        return False
+    if not here or not common:
+        return False
+    return (root / here).resolve() != (root / common).resolve()
+
+
+def _need(ctx, project: str | None = None, lone: bool = False) -> Ledger:
+    """The checked-out branch's ledger, for a command that has nothing to do without one. With
+    `lone`, a linked worktree on a branch no ledger names uses the one ledger it holds."""
     branch = checked_out(ctx.root)
     ledger = current(ctx.root, branch) if branch else None
+    if ledger is None and lone and _linked_worktree(ctx.root):
+        good, _ = ledgers(ctx.root)
+        ledger = good[0] if len(good) == 1 else None
     if ledger is None:
         said = nothing_in_flight(branch, project)
         raise BuildError(said[0].lower() + said[1:])
@@ -1152,7 +1275,7 @@ def _commits_since(root: Path, base: str) -> int:
 def git_email(root: Path) -> str | None:
     """`git config user.email` in `root`; None when git cannot say or it is not set."""
     try:
-        res = phase._run(root, "config", "user.email")
+        res = gitq.config_get(root, "user.email")
     except phase.PhaseError:
         return None
     text = phase._out(res)
@@ -1178,7 +1301,7 @@ def _hygiene_refusal(ctx, project: str | None, root: Path, state: Path) -> None:
 
 def start(ctx, name: str, plan: str | None, high_risk: bool, source: str | None = None,
           visual: bool = False, project: str | None = None, session: Path | None = None,
-          take_over: bool = False) -> int:
+          take_over: bool = False, here: bool = False) -> int:
     """`session` is the governance root, where runs are logged; `ctx.root` is the member's.
     `take_over` restarts a phase another person owns, as its new owner (one write)."""
     root = ctx.root
@@ -1285,7 +1408,7 @@ def start(ctx, name: str, plan: str | None, high_risk: bool, source: str | None 
                   f"{exc.strerror or exc}", file=sys.stderr)
     if taken:
         lines.insert(0, f"took over {name} from {taken}")
-    _say(lines + [f"Next: {next_action(ledger, planned_units(root, ledger))}"])
+    _say(lines + [f"Next: {next_action(ledger, planned_units(root, ledger), driven=driven() or here)}"])
     return 0
 
 
@@ -1326,6 +1449,28 @@ def _exclude_state(root: Path) -> None:
         exclude.write_bytes(have + gap + line.encode("utf-8"))
     except OSError as exc:
         raise BuildError(f"cannot write {exclude}: {exc}") from exc
+
+
+def _exclude_copy(repo: Path, tree: Path, rel: str) -> None:
+    """Make git ignore the brief copied into a writer's `tree` (`rel`, from its root) through the
+    `info/exclude` its worktrees share, so the copy neither blocks `git worktree remove` nor is
+    committed by accident. A copy git already ignores or tracks is left as it is; the line is
+    anchored at the top. Any failure is ignored: the copy is only a convenience."""
+    try:
+        if phase._run(tree, "check-ignore", "-q", "--", rel).returncode != 1:
+            return
+        if phase._yes(tree, "ls-files", "--error-unmatch", "--", rel):
+            return
+        common = phase._run(repo, "rev-parse", "--git-common-dir")
+        if common.returncode != 0:
+            return
+        exclude = repo / phase._out(common) / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        have = exclude.read_bytes() if exclude.exists() else b""
+        gap = b"" if not have or have.endswith(b"\n") else b"\n"
+        exclude.write_bytes(have + gap + f"/{rel}\n".encode("utf-8"))
+    except (OSError, phase.PhaseError):
+        pass
 
 
 def _ledger_ignored(root: Path, ledger: Ledger) -> str | None:
@@ -1414,6 +1559,9 @@ def unit_add(ctx, uid: str, title: str, role: str | None, red: bool,
     if not SLUG.fullmatch(uid):
         raise BuildError(f"{uid!r} is not a unit id: lower-case letters, digits and hyphens, "
                          f"starting with a letter or a digit")
+    if re.fullmatch(r".*-a\d+", uid):
+        raise BuildError(f"{uid} ends in -a and digits: that suffix is kept for retries "
+                         f"(a unit's second attempt is u-a2): pick another id")
     if uid in RESERVED:
         raise BuildError(f"{uid} is one of the phase's own folders ({', '.join(RESERVED)}): "
                          f"pick another id")
@@ -1473,7 +1621,7 @@ def unit_drop(ctx, uid: str, project: str | None = None) -> int:
 def _branch_tree(root: Path, branch: str) -> Path | None:
     """The project's folder in the other worktree that has `branch` checked out; None when no
     worktree has it, or it is the checkout the command runs in."""
-    here = Path(phase._ask(root, "rev-parse", "--show-toplevel")).resolve()
+    here = Path(gitq.toplevel_text(root)).resolve()
     tree = phase._worktrees(root).get(branch)
     if tree is None or Path(tree).resolve() == here:
         return None
@@ -1680,7 +1828,7 @@ def _handback(ctx, ledger: Ledger, unit: dict, branch: str) -> tuple[list[str], 
     tree = _branch_tree(root, branch)
     top = None
     if tree is not None:
-        top = Path(phase._ask(tree, "rev-parse", "--show-toplevel"))
+        top = Path(gitq.toplevel_text(tree))
         res = phase._run(tree, "status", "--porcelain", "-z", "--untracked-files=all")
         if res.returncode != 0:
             raise BuildError(f"git status failed in {tree}: {phase._reason(res)}")
@@ -1800,7 +1948,7 @@ def _full_gate(ctx) -> str:
 
 
 def _unit_gate(ctx) -> str:
-    return _gate_params(ctx).get("unit_gate", "scoped")
+    return _gate_params(ctx).get("unit_gate", roles.DEFAULT_UNIT_GATE)
 
 
 def _gate_record(ledger: Ledger) -> dict | None:
@@ -1828,6 +1976,56 @@ def _outside_build(root: Path, *args: str) -> list[str] | None:
     if res.returncode != 0:
         return None
     return [ln for ln in phase._out(res).splitlines() if ln.strip()]
+
+
+def _docs_paths(ctx) -> list[str]:
+    value = _gate_params(ctx).get("docs_paths", roles.DOCS_PATHS)
+    return [str(p) for p in value] if isinstance(value, list) else []
+
+
+@functools.lru_cache(maxsize=None)
+def _glob(pattern: str) -> re.Pattern:
+    """`pattern` as a regex: `*` and `?` stay inside one path part, `**` crosses any number of
+    parts, none included (`a/**/b` matches `a/b`)."""
+    out, i = [], 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return re.compile("".join(out))
+
+
+def _is_docs(path: str, patterns: list[str]) -> bool:
+    """Whether `path` (from the repository root, `/` separated) is docs: `patterns` are read in
+    order, a `!` pattern excludes, the last one that matches decides, none matching is not docs."""
+    docs = False
+    for pattern in patterns:
+        negate = pattern.startswith("!")
+        if _glob(pattern[1:] if negate else pattern).fullmatch(path):
+            docs = not negate
+    return docs
+
+
+def _code_changes(ctx, head: str) -> list[str] | None:
+    """The paths changed between `head` and HEAD outside the build folder and `docs_paths`; None
+    when git cannot say."""
+    moved = _outside_build(ctx.root, "diff", "--name-only", head, "HEAD")
+    if moved is None:
+        return None
+    docs = _docs_paths(ctx)
+    return [m for m in moved if not _is_docs(m, docs)]
 
 
 def _now() -> str:
@@ -1858,17 +2056,76 @@ def _run_check(session: Path | None, ctx, project: str | None) -> tuple[int, str
     return (rc or 0), out.getvalue()
 
 
+def _docs_only(ctx, ledger: Ledger) -> bool:
+    """Whether the last record is green and clean, the tree has no uncommitted change outside the
+    build folder, and every path changed since the record's head is a `docs_paths` path (at least
+    one): then only `govern check` has to run."""
+    rec = _gate_record(ledger)
+    if rec is None or rec.get("status") != "done" or rec.get("rc") != 0 \
+            or rec.get("dirty") is not False or not rec.get("head"):
+        return False
+    if _outside_build(ctx.root, "status", "--porcelain") != []:
+        return False
+    head = str(rec["head"])
+    moved = _outside_build(ctx.root, "diff", "--name-only", head, "HEAD")
+    code = _code_changes(ctx, head)
+    return bool(moved) and code == []
+
+
+def _gate_docs(ctx, ledger: Ledger, project: str | None, session: Path | None) -> int:
+    """`build gate` for a docs-only change: `govern check`, and `docs_gate` when one is set,
+    recorded at HEAD."""
+    root = ctx.root
+    record, log = ledger.dir / GATE_RECORD, ledger.dir / GATE_LOG
+    log.parent.mkdir(parents=True, exist_ok=True)
+    head = _head(root)
+    started = time.monotonic()
+    check_rc, check_text = _run_check(session, ctx, project)
+    log.write_text("== govern check ==\n" + check_text, encoding="utf-8")
+    docs_cmd = str(_gate_params(ctx).get("docs_gate", "") or "").strip()
+    docs_rc = 0
+    if docs_cmd:
+        with open(log, "ab") as out:
+            out.write(b"\n== docs_gate ==\n")
+            out.flush()
+            docs_rc = subprocess.run(docs_cmd, shell=True, cwd=root, stdin=subprocess.DEVNULL,
+                                     stdout=out, stderr=subprocess.STDOUT).returncode
+    rc = docs_rc or check_rc
+    cmd = f"govern check; {docs_cmd}" if docs_cmd else "govern check"
+    seconds = round(time.monotonic() - started)
+    dirty = _head(root) != head
+    _write_record(record, {"status": "done", "rc": rc, "check_rc": check_rc, "head": head,
+                           "dirty": dirty, "seconds": seconds, "at": _now(),
+                           "cmd": cmd, "scope": "docs"})
+    what = "govern check" + (" and docs_gate" if docs_cmd else "")
+    lines = [f"gate {'green' if rc == 0 else 'red'} (docs only: {what}, rc "
+             f"{rc}, {seconds} s, head {head[:7]})",
+             f"log: {_local(_base(root, log), log)}"]
+    if docs_rc:
+        lines.append(f"docs_gate: red (rc {docs_rc}): {docs_cmd}")
+    if check_rc:
+        lines.append("check: red (govern check" + (f" --project {project}" if project else "") + ")")
+        wrong = [ln for ln in check_text.splitlines() if re.search(r"error|ERROR|FAIL", ln)]
+        lines += wrong[:GATE_TAIL] if wrong else check_text.splitlines()[-GATE_TAIL:]
+    _say(lines)
+    return 0 if rc == 0 else 1
+
+
 def gate(ctx, cmd: str | None = None, project: str | None = None,
          session: Path | None = None) -> int:
-    """Run the project's full gate and its `govern check`; record the result for this phase
-    unless `cmd` is given, which runs only that command."""
-    ledger = _need(ctx, project)
+    """Run the project's local suite and its `govern check`; record the result for this phase
+    unless `cmd` is given, which runs only that command. After a green, clean run, a tree whose
+    only changes since are `docs_paths` runs only `govern check`. In a linked worktree on a branch
+    no ledger names, the one ledger there is used."""
+    ledger = _need(ctx, project, lone=True)
     root = ctx.root
     run_cmd = cmd or _full_gate(ctx)
     if not run_cmd:
         print("no full_gate set under [checks.agent-roles]; nothing was run")
         return 1
     record, log = ledger.dir / GATE_RECORD, ledger.dir / GATE_LOG
+    if not cmd and _docs_only(ctx, ledger):
+        return _gate_docs(ctx, ledger, project, session)
     if not cmd:
         _write_record(record, {"status": "running", "at": _now()})
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -1895,7 +2152,7 @@ def gate(ctx, cmd: str | None = None, project: str | None = None,
     if not cmd:
         _write_record(record, {"status": "done", "rc": rc, "check_rc": check_rc, "head": head,
                                "dirty": dirty, "seconds": seconds,
-                               "at": _now(), "cmd": run_cmd})
+                               "at": _now(), "cmd": run_cmd, "scope": "full"})
     lines = [f"gate {'green' if rc == 0 else 'red'} (rc {rc}, {seconds} s, head {head[:7]})"]
     lines.append(f"log: {_local(_base(root, log), log)}")
     if gate_rc:
@@ -1908,33 +2165,75 @@ def gate(ctx, cmd: str | None = None, project: str | None = None,
     return 0 if rc == 0 else 1
 
 
-def _need_green(ctx, ledger: Ledger, step: str) -> str | None:
-    """Why `step` may not go on: the phase's last full gate is red, missing or stale; None when
-    it is green for this tree. Work under the build folder does not make a record stale."""
-    tail = f": {AFTER_RED}"
-    rec = _gate_record(ledger)
+def _why_not_green(ctx, rec: dict | None) -> str | None:
+    """Why the gate record `rec` does not vouch for this tree: red, missing or stale; None when
+    it does. Work under the build folder and `docs_paths` does not make a record stale."""
     if rec is None or rec.get("status") != "done":
-        return f"cannot {step}: no full gate has run on this phase{tail}"
+        return "no local suite run on this phase"
     head = str(rec.get("head") or "")
     short = head[:7]
     if rec.get("rc") != 0:
-        return f"cannot {step}: the last full gate is red (rc {rec.get('rc')} at {short}){tail}"
+        return f"the last local suite run is red (rc {rec.get('rc')} at {short})"
     if rec.get("dirty") is not False:
-        return (f"cannot {step}: the last full gate is stale: the tree had uncommitted changes "
-                f"at {short}{tail}")
-    moved = _outside_build(ctx.root, "diff", "--name-only", head, "HEAD") if head else None
+        return (f"the last local suite run is stale: the tree had uncommitted changes "
+                f"at {short}")
+    moved = _code_changes(ctx, head) if head else None
     if moved is None:
-        return (f"cannot {step}: the last full gate is stale: git cannot compare {short} with "
-                f"HEAD{tail}")
+        return f"the last local suite run is stale: git cannot compare {short} with HEAD"
     if moved:
-        return (f"cannot {step}: the last full gate is stale: {len(moved)} files changed since "
-                f"{short}{tail}")
+        return (f"the last local suite run is stale: {len(moved)} files changed since "
+                f"{short}")
     return None
+
+
+def _unit_note(ctx, ledger: Ledger) -> str:
+    """`; gate/<id>.json ...` for the newest unit record that does not vouch for this tree: still
+    running, red or stale; empty when there is none."""
+    paths = []
+    for path in (ledger.dir / "gate").glob("*.json"):
+        if path.name != Path(GATE_RECORD).name:
+            try:
+                paths.append((path.stat().st_mtime, path))
+            except OSError:
+                continue
+    for _, path in sorted(paths, reverse=True):
+        try:
+            rec = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("status") == "running":
+            return f"; gate/{path.name} is still running"
+        why = _why_not_green(ctx, rec)
+        if why and rec.get("status") == "done":
+            return f"; gate/{path.name} " + why.removeprefix("the last local suite run ")
+    return ""
+
+
+def _need_green(ctx, ledger: Ledger, step: str) -> str | None:
+    """Why `step` may not go on: neither the phase's last local suite run nor any unit's own
+    record (`gate/<id>.json`, handed over by `unit set done --branch`) is green for this tree;
+    None when one is. The refusal reports on the last run."""
+    tail = f": {AFTER_RED}"
+    why = _why_not_green(ctx, _gate_record(ledger))
+    if why is None:
+        return None
+    for path in sorted((ledger.dir / "gate").glob("*.json")):
+        if path.name == Path(GATE_RECORD).name:
+            continue
+        try:
+            rec = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(rec, dict) and _why_not_green(ctx, rec) is None:
+            return None
+    return f"cannot {step}: {why}{_unit_note(ctx, ledger)}{tail}"
 
 
 def _gated(ctx, ledger: Ledger, step: str, accept_red: str | None,
            project: str | None) -> Ledger:
-    """Refuse `step` unless the full gate is green; `accept_red` lets it through with a ruling.
+    """Refuse `step` unless the local suite is green; `accept_red` lets it through with a ruling.
     Returns the ledger to go on with: reloaded when the ruling changed it."""
     refusal = _need_green(ctx, ledger, step)
     if refusal is None:
@@ -1944,6 +2243,21 @@ def _gated(ctx, ledger: Ledger, step: str, accept_red: str | None,
     what = refusal.split(": ", 1)[1].rsplit(": " + AFTER_RED, 1)[0]
     ruling(ctx, f"{step} accepted although {what}. Reason: {accept_red}", project)
     return _need(ctx, project)
+
+
+def _take_unit_gate(ctx, ledger: Ledger, uid: str, branch: str) -> list[str]:
+    """Copy the gate record `branch`'s worktree holds for this phase to `gate/<uid>.json` here;
+    the worktree is only read. The line to say: what was copied, or why nothing was."""
+    tree = _branch_tree(ctx.root, branch)
+    if tree is None:
+        return [f"no worktree has {branch} checked out; no gate record copied"]
+    src = tree / BUILD_DIR / ledger.dir.name / GATE_RECORD
+    if not src.is_file():
+        return [f"the worktree of {branch} has no gate record; none copied"]
+    dest = ledger.dir / "gate" / f"{uid}.json"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest)
+    return [f"copied the gate record of {branch} to {_local(_base(ctx.root, dest), dest)}"]
 
 
 def unit_set(ctx, uid: str, status: str, branch: str | None, commit: str | None,
@@ -1964,7 +2278,10 @@ def unit_set(ctx, uid: str, status: str, branch: str | None, commit: str | None,
                              + " — nothing was changed")
         for w in warnings:
             print(f"warning: {w}", file=sys.stderr)
+    handed: list[str] = []
     if status == "done" and _full_gate(ctx) and _unit_gate(ctx) == "scoped":
+        if branch:
+            handed = _take_unit_gate(ctx, ledger, uid, branch)
         ledger = _gated(ctx, ledger, f"mark {uid} done", accept_red, project)
         unit = ledger.unit(uid)
     earlier, unit["role"] = unit["role"], role
@@ -1987,6 +2304,7 @@ def unit_set(ctx, uid: str, status: str, branch: str | None, commit: str | None,
     said = [f"unit {uid} is {status}"
             + (f" (attempt {unit['attempts']})" if status == "running" else "")
             + (f", now for {role}" if role != earlier else "")]
+    said += handed
     if status == "done" and branch:
         said += _copy_from_branch(ctx.root, branch, f"{BUILD_DIR}/{ledger.dir.name}/{uid}", False,
                                   state_root(ctx.root))
@@ -2046,7 +2364,8 @@ def team_status(ctx, as_json: bool) -> int:
     return 0
 
 
-def status(ctx, as_json: bool, project: str | None = None, team: bool = False) -> int:
+def status(ctx, as_json: bool, project: str | None = None, team: bool = False,
+           here: bool = False) -> int:
     if team:
         return team_status(ctx, as_json)
     branch = checked_out(ctx.root)
@@ -2055,9 +2374,9 @@ def status(ctx, as_json: bool, project: str | None = None, team: bool = False) -
         ledger.project = ledger.project or project or ""
         ledger.folder = _folder(ctx, ledger.project)
     if as_json:
-        _say([json.dumps(status_data(ctx.root, ledger, branch), indent=2, ensure_ascii=False)])
+        _say([json.dumps(status_data(ctx.root, ledger, branch, driven=driven() or here), indent=2, ensure_ascii=False)])
     else:
-        _say(status_lines(ledger, planned_units(ctx.root, ledger)) if ledger else [nothing_in_flight(branch, project)])
+        _say(status_lines(ledger, planned_units(ctx.root, ledger), driven=driven() or here) if ledger else [nothing_in_flight(branch, project)])
     return 0
 
 
@@ -2265,11 +2584,14 @@ def _no_index(folder: Path) -> None:
         pass
 
 
-def _agent_tree(member: Path, session: Path, project: str, slug: str, uid: str) -> Path:
+def _agent_tree(member: Path, session: Path, project: str, slug: str, uid: str,
+                attempt: int = 1) -> Path:
     """The worktree of `member` an agent of unit `uid` works in, made if it is not there:
-    `<session>/.claude/worktrees/<project>-<slug>-<uid>` on the branch `build/<slug>/<uid>`. One
-    already there for that branch is reused; anything else at the path, or the branch checked out
-    elsewhere, is refused and nothing is removed."""
+    `<session>/.claude/worktrees/<project>-<slug>-<uid>` on the branch `build/<slug>/<uid>`. From
+    the second `attempt` on, a new one beside it: `<uid>-a<attempt>` in both names, cut from HEAD;
+    the earlier ones are left as they are. One already there for that branch is reused; anything
+    else at the path, or the branch checked out elsewhere, is refused and nothing is removed."""
+    uid = f"{uid}-a{attempt}" if attempt > 1 else uid
     branch = f"build/{slug}/{uid}"
     path = session / ".claude" / "worktrees" / f"{project}-{slug}-{uid}"
     try:
@@ -2316,47 +2638,21 @@ def _default_ahead(root: Path) -> None:
                              f"--no-edit {short}, commit, then launch again.")
 
 
-def _retry_base(root: Path, ledger: Ledger, unit: dict, head: str) -> str:
-    """Where a retried unit's agent starts: its own branch with HEAD merged in, so the first
-    attempt's commits are there. HEAD when the unit has no branch here; the branch's tip when
-    it already has HEAD, and HEAD when the branch holds nothing HEAD lacks."""
-    branch = unit["branch"]
-    ref = f"refs/heads/{branch}"
-    if not branch or not phase._yes(root, "rev-parse", "--verify", "--quiet", ref):
-        return head
-    if phase._yes(root, "merge-base", "--is-ancestor", "HEAD", ref):
-        return phase._ask(root, "rev-parse", ref)
-    if phase._yes(root, "merge-base", "--is-ancestor", ref, "HEAD"):
-        return head           # nothing the attempt made that HEAD lacks: no merge, ref unmoved
-    refusal = BuildError(f"{branch} does not merge cleanly with HEAD: merge it by hand, then "
-                         "launch again.")
-    tip = phase._ask(root, "rev-parse", ref)
-    tree = phase._worktrees(root).get(branch)
-    if tree is not None:
-        if phase._ask(Path(tree), "status", "--porcelain"):
-            raise refusal
-        if phase._run(Path(tree), "merge", "--no-edit", head).returncode != 0:
-            phase._run(Path(tree), "merge", "--abort")
-            raise refusal
-        return phase._ask(root, "rev-parse", ref)
-    res = phase._run(root, "merge-tree", "--write-tree", ref, "HEAD")
-    if res.returncode != 0:
-        raise refusal
-    merged = phase._out(res).splitlines()[0]
-    new = phase._ask(root, "commit-tree", merged, "-p", tip, "-p", head, "-m",
-                     f"Merge {ledger.branch} into {branch} for attempt {unit['attempts'] + 1}")
-    phase._ask(root, "update-ref", ref, new, tip)
-    return new
-
-
-def launch(ctx, what: str, project: str | None = None, session: Path | None = None) -> int:
+def launch(ctx, what: str, project: str | None = None, session: Path | None = None,
+           here: bool = False) -> int:
     """Check every brief `what` covers (filled in, committed at HEAD), mark a unit running, and
     print each launch prompt: the role, the brief's path from the repository root, and for a role
-    that works in a worktree the commit that worktree must start from. In a workspace (`project`)
+    that works in a worktree the commit that worktree must start from: always HEAD, so a retried
+    unit starts fresh on current code; its earlier attempt's branch is only named, on an
+    `Earlier attempt:` line, and nothing is merged from it. In a workspace (`project`)
     that worktree is made here, inside the member's repository, and named on a `Worktree:` line;
     a role that writes nothing is told the member's folder. `session` is the governance root."""
     root = ctx.root
     ledger = _need(ctx, project)
+    if not (driven() or here):
+        raise BuildError(f"Builds run under the driver: start `{_driver_command(ledger)}` in the "
+                         f"background. To launch this step from this session on purpose, run "
+                         f"`{govern_build(ledger.project)} launch {what} --here`.")
     found = _covered(root, ledger, what)
     ignored = _ledger_ignored(root, ledger)
     if ignored is not None:
@@ -2378,7 +2674,8 @@ def launch(ctx, what: str, project: str | None = None, session: Path | None = No
         _default_ahead(root)
     head = phase._ask(root, "rev-parse", "HEAD")
     unit = ledger.unit(what) if what not in RESERVED else None
-    base = _retry_base(root, ledger, unit, head) if unit is not None else head
+    earlier = unit["branch"] if unit is not None and unit["branch"] and phase._yes(
+        root, "rev-parse", "--verify", "--quiet", f"refs/heads/{unit['branch']}") else ""
     prefix = phase._ask(root, "rev-parse", "--show-prefix")
     lines = []
     again = what == "fix" and all(p.name in ledger.launched for p in _fix_briefs(ledger))
@@ -2386,13 +2683,21 @@ def launch(ctx, what: str, project: str | None = None, session: Path | None = No
         lines.append(AGAIN)
     for role, brief in found:
         workspace = project and what == "close" and brief.name == "workspace-brief.md"
-        lines += [f"launch {role} with the prompt:",
-                  launch_line(str(brief) if moved or workspace else prefix + _posix(root, brief))]
+        if not workspace:
+            lines += [f"launch {role} with the prompt:",
+                      launch_line(str(brief) if moved else prefix + _posix(root, brief))]
         if workspace:
             # The writer of the workspace repository's own documents: a worktree of that
-            # repository, from its HEAD, on the branch it has checked out.
+            # repository, from its HEAD, on the branch it has checked out. Its brief is copied
+            # into that tree, beside where its report goes, so it finds it there.
             repo = where if moved else session or root
             tree = _agent_tree(repo, session or root, project, ledger.dir.name, "close-workspace")
+            rel = (Path(_close_produces(root, ledger, True)).parent / brief.name).as_posix()
+            copy = tree / rel
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(brief, copy)
+            _exclude_copy(repo, tree, rel)
+            lines += [f"launch {role} with the prompt:", launch_line(str(copy))]
             on = checked_out(repo)
             if not on:
                 short = phase._ask(repo, "rev-parse", "--short", "HEAD")
@@ -2403,11 +2708,15 @@ def launch(ctx, what: str, project: str | None = None, session: Path | None = No
         elif role in WORKTREE_ROLES:
             if (root / ".claude" / "worktrees").is_dir():
                 _no_index(root / ".claude" / "worktrees")
-            lines += [f"Base: {base}", f"Phase branch: {ledger.branch}"]
+            lines.append(f"Base: {head}")
+            if earlier:
+                lines.append(f"Earlier attempt: {earlier}")
+            lines.append(f"Phase branch: {ledger.branch}")
             if project:
                 uid = what if what not in RESERVED else brief.parent.name \
                     + ("-" + brief.stem if what == "fix" else "")
-                tree = _agent_tree(root, session or root, project, ledger.dir.name, uid)
+                tree = _agent_tree(root, session or root, project, ledger.dir.name, uid,
+                                   unit["attempts"] + 1 if unit is not None else 1)
                 lines += [f"Worktree: {tree}",
                           "launch it without isolation: the worktree is made"]
         elif project:
@@ -2415,7 +2724,7 @@ def launch(ctx, what: str, project: str | None = None, session: Path | None = No
     if unit is not None:
         unit["status"] = "running"
         unit["attempts"] += 1
-        unit["base"] = base
+        unit["base"] = head
         unit["agent"] = ""
         save(ledger)
     elif what == "fix" and not again:
@@ -2448,6 +2757,16 @@ def run(ctx, args) -> int:
     """`govern build ...`. Exit 0 when the command did its work; 1 when it refused, with the
     reason as `error:` on stderr and nothing changed. In a workspace the command works in one
     member's repository (`target`): `ctx` is that repository's, from here on."""
+    if args.build_cmd == "drive":
+        from govern import drive
+        return drive.run(ctx, args.plan, cap=args.cap, hours=args.hours,
+                         max_sessions=args.max_sessions, compact_pct=args.compact_pct,
+                         permission_mode=args.permission_mode, claude=args.claude,
+                         project=getattr(args, "project", None))
+    if args.build_cmd == "drive-report":
+        from govern import drive_log
+        sys.stdout.write(drive_log.report(ctx.home, args.name))
+        return 0
     try:
         try:
             root, project = target(ctx, getattr(args, "project", None), args.build_cmd == "start")
@@ -2467,7 +2786,7 @@ def run(ctx, args) -> int:
             _owned(root, getattr(args, "take_over", False))
         if args.build_cmd == "start":
             return start(ctx, args.phase, args.plan, args.high_risk, args.source, args.visual,
-                         project, session, getattr(args, "take_over", False))
+                         project, session, getattr(args, "take_over", False), args.here)
         if args.build_cmd == "unit":
             if args.unit_cmd == "add":
                 return unit_add(ctx, args.id, args.title, args.role, args.red, project)
@@ -2476,7 +2795,7 @@ def run(ctx, args) -> int:
             return unit_set(ctx, args.id, args.status, args.branch, args.commit, args.note,
                             args.role, project, args.accept_red, args.agent)
         if args.build_cmd == "launch":
-            return launch(ctx, args.what, project, session)
+            return launch(ctx, args.what, project, session, args.here)
         if args.build_cmd == "collect":
             return collect(ctx, args.branch, project)
         if args.build_cmd == "verify":
@@ -2486,7 +2805,7 @@ def run(ctx, args) -> int:
         if args.build_cmd == "ruling":
             return ruling(ctx, " ".join(args.text), project)
         if args.build_cmd == "status":
-            return status(ctx, args.as_json, project, args.team)
+            return status(ctx, args.as_json, project, args.team, args.here)
         if args.build_cmd == "review":
             return review(ctx, project, args.accept_red)
         if args.build_cmd == "fix":

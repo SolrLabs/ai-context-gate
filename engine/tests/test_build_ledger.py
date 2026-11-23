@@ -20,7 +20,7 @@ class NextAction(unittest.TestCase):
     HERE = Path("build")
 
     def say(self, *units, stage="build") -> str:
-        return build.next_action(ledger(self.HERE, *units, stage=stage))
+        return build.next_action(ledger(self.HERE, *units, stage=stage), driven=True)
 
     def test_a_phase_with_no_units_adds_the_first(self):
         self.assertIn(f"`{roles.GOVERN} build unit add <id> --title <title>`", self.say())
@@ -428,6 +428,10 @@ class Units(Build):
             self.refused("the phase's own folders", "unit", "add", uid, "--title", "T")
         for uid in ("U2", "u/2", ".u", "u_2"):
             self.refused("is not a unit id", "unit", "add", uid, "--title", "T")
+        for uid in ("u1-a2", "a-a10"):
+            self.refused("kept for retries", "unit", "add", uid, "--title", "T")
+        for uid in ("u1-alpha", "a2", "u1-a"):
+            self.unit(uid)
         self.refused("--title is empty", "unit", "add", "u2", "--title", "  ")
 
     def test_a_brief_no_unit_owns_is_never_overwritten(self):
@@ -830,7 +834,7 @@ class Status(Build):
     def test_the_next_line_is_what_next_action_says(self):
         self.started()
         self.unit("u1")
-        said = build.next_action(build.load(self.dir() / build.LEDGER))
+        said = build.next_action(build.load(self.dir() / build.LEDGER), driven=True)
         self.assertEqual(self.ok("status").splitlines()[-1], f"Next: {said}")
         self.assertEqual(json.loads(self.ok("status", "--json"))["next"], said)
         self.assertIn(f"`{roles.GOVERN} build launch u1`", said)
